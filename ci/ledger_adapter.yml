@@ -1,6 +1,7 @@
-rules:
-  - if: $CI_COMMIT_BRANCH == "on-chain-branch"
-
+default:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "on-chain-branch"
+    
 ledger_adapter_lint:
   stage: lint
   tags: [docker]
