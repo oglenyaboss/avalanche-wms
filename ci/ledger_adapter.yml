@@ -9,3 +9,14 @@ ledger_adapter_lint:
   - go get .
   - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
   - golangci-lint run .
+
+ledeger_adapter_build:
+  stage: build
+  tags: [docker]
+  image: docker:24.0.5
+  rules:
+  - if: '$CI_COMMIT_BRANCH == "on-chain-branch"'
+  script:
+  - docker build . -t ledger_adapter
+  - echo "where should I deploy"
+
