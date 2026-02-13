@@ -1,6 +1,6 @@
 ledger_adapter_lint:
   stage: lint
-  tags: [all]
+  tags: [docker]
   image: golang:tip-20260207-alpine3.23
   script:
   - cd ledger_adapter

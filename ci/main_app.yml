@@ -1,5 +1,5 @@
 main_app:
   stage: lint
-  tags: [all]
+  tags: [docker]
   script:
   - echo "1234"
