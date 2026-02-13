@@ -1,5 +1,5 @@
 front:
   stage: lint
-  tags: [all,lintS]
+  tags: [all]
   script:
   - echo "1234"
