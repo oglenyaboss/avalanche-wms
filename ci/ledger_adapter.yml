@@ -3,7 +3,7 @@ ledger_adapter_lint:
   tags: [docker]
   image: golang:tip-20260207-alpine3.23
   rules:
-    - if: $CI_COMMIT_BRANCH == on-chain-branch
+    - if: '$CI_COMMIT_BRANCH == "on-chain-branch"'
   script:
   - cd ledger_adapter
   - go get .
