@@ -5,6 +5,7 @@ include:
 
 stages:
   - lint
+  - build
 
 variables:
   PROJECT_NAME: my-project
