@@ -1,0 +1,9 @@
+ledger_adapter_lint:
+  stage: lint
+  tags: [all,lint]
+  image: golang:tip-20260207-alpine3.23
+  script:
+  - cd ledger_adapter
+  - go mod tidy
+  - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+  - golangci-lint run .
