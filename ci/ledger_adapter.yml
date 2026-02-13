@@ -17,6 +17,6 @@ ledeger_adapter_build:
   rules:
   - if: '$CI_COMMIT_BRANCH == "on-chain-branch"'
   script:
-  - docker build . -t ledger_adapter
+  - docker build ./ledger_adapter -t ledger_adapter
   - echo "where should I deploy"
 
