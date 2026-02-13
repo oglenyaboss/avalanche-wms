@@ -1,0 +1,21 @@
+# Stage 1: Build the Go application
+FROM golang:1.24.5-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod .
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o main .
+
+# Stage 2: Create the final, smaller image
+FROM alpine:3.19
+
+WORKDIR /app
+
+COPY --from=builder /app/main .
+EXPOSE 8080
+
+CMD ["./main"]
