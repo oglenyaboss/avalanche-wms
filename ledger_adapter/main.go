@@ -304,12 +304,17 @@ func main() {
 		res, err := getHelloWorld(client)
 		if err != nil {
 			w.WriteHeader(500)
-			w.Write([]byte(err.Error()))
+			_, Err := w.Write([]byte(err.Error()))
+			if Err != nil {
+				fmt.Print("error")
+			}
 			return
 		}
 		w.WriteHeader(200)
-		w.Write([]byte(res))
-		return
+		_, err = w.Write([]byte(res))
+		if err != nil {
+			fmt.Print("error")
+		}
 	}
 
 	y := func(w http.ResponseWriter, r *http.Request) {
@@ -334,7 +339,6 @@ func main() {
 		res := parseReceipt(info)
 		w.WriteHeader(200)
 		w.Write([]byte(res))
-		return
 	}
 	z := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -357,7 +361,6 @@ func main() {
 		res := parseReceipt(info)
 		w.WriteHeader(200)
 		w.Write([]byte(res))
-		return
 	}
 	w := func(w http.ResponseWriter, r *http.Request) {
 		x := r.URL.Query()
