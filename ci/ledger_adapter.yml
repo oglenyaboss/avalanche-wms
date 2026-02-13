@@ -28,7 +28,7 @@ ledeger_adapter_build_&_deploy:
   - if: '$CI_COMMIT_BRANCH == "on-chain-branch"'
   script:
   - docker build ./ledger_adapter -t ledger_adapter
-  - echo " pushin' to  some registry "
+  - echo " pushin' to  some registry...."
 
   
 
