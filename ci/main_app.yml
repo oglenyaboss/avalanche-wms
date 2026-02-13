@@ -20,7 +20,7 @@ main_app_test:
   - cd app
   - go test -v
 
-ledeger_adapter_build_&_deploy:
+main_app_build_&_deploy:
   stage: build_&_deploy
   tags: [docker]
   image: docker:24.0.5
