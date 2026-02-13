@@ -9,7 +9,8 @@ lint-job:
   tags: [docker]
   image: golangci/golangci-lint:v2.9.0-alpine
   script:
-    - golint ledger_adapter
+    - cd ledger_adapter
+    - golangci-lint run
 
 build-job:       # This job runs in the build stage, which runs first.
   stage: build
