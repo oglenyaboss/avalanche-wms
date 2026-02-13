@@ -5,9 +5,6 @@ include:
 
 stages:
   - lint
-  - build
-  - test
-  - deploy
 
 variables:
   PROJECT_NAME: my-project
