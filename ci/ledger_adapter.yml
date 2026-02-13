@@ -21,7 +21,7 @@ ledger_adapter_test:
   - go test -v
 
 ledeger_adapter_build_&_deploy:
-  stage: build
+  stage: build_&_deploy
   tags: [docker]
   image: docker:24.0.5
   rules:
