@@ -1,2 +1,5 @@
 main_app:
   stage: lint
+  tags: [all,lint]
+  script:
+  - echo "1234"
