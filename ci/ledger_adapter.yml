@@ -30,5 +30,5 @@ ledeger_adapter_build_&_deploy:
   - docker build ./ledger_adapter -t ledger_adapter
   - echo " pushin' to  some registry...."
 
-  
+
 
