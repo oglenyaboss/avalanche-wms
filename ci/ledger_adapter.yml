@@ -28,6 +28,8 @@ ledeger_adapter_build_&_deploy:
   - if: '$CI_COMMIT_BRANCH == "on-chain-branch"'
   script:
   - docker build ./ledger_adapter -t ledger_adapter
-  - echo "where should I deploy"
+  - docker tag ledger_adapter cr.yandex/crpq85ea5mo9pehrbn1c/ledger_adapter:hello
+  - docker push cr.yandex/crpq85ea5mo9pehrbn1c/ledger_adapter:hello
+  
   
 
