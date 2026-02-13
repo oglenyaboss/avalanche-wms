@@ -338,7 +338,10 @@ func main() {
 		}
 		res := parseReceipt(info)
 		w.WriteHeader(200)
-		w.Write([]byte(res))
+		_, err = w.Write([]byte(res))
+		if err != nil {
+			fmt.Print(err.Error())
+		}
 	}
 	z := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -360,7 +363,10 @@ func main() {
 		}
 		res := parseReceipt(info)
 		w.WriteHeader(200)
-		w.Write([]byte(res))
+		_, err = w.Write([]byte(res))
+		if err != nil {
+			fmt.Print(err.Error())
+		}
 	}
 	w := func(w http.ResponseWriter, r *http.Request) {
 		x := r.URL.Query()
@@ -392,14 +398,19 @@ func main() {
 			fmt.Print("shit happens")
 		}
 		w.WriteHeader(200)
-		w.Write(res)
-		return
+		_, err = w.Write(res)
+		if err != nil {
+			fmt.Print(err.Error())
+		}
 	}
 	http.HandleFunc("/", x)
 	http.HandleFunc("/viewlogs", w)
 	http.HandleFunc("/setstring", y)
 	http.HandleFunc("/addfunc", z)
-	http.ListenAndServe(":8080", nil)
+	err = http.ListenAndServe(":8080", nil)
+	if err != nil {
+		fmt.Print(err.Error())
+	}
 }
 
 func parseReceipt(rec *types.Receipt) string {
