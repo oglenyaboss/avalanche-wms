@@ -1,0 +1,39 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+        files: ^app/.*\.go$
+      - id: go-imports
+        files: ^app/.*\.go$
+      - id: go-mod-tidy
+        files: ^app/go\.mod$
+
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v1.62.0
+    hooks:
+    - id: golangci-lint
+      name: golangci-lint
+      entry: bash -c 'cd app && golangci-lint run --timeout=5m ./...'
+      language: system
+      files: ^app/.*\.go$
+      types: [go]
+      pass_filenames: false
+      args: []
+
+  - repo: local
+    hooks:
+      - id: go-test
+        name: go tests (app)
+        entry: bash -c 'cd app && go test ./...'
+        language: system
+        types: [go]
+        files: ^app/.*\.go$
+        pass_filenames: false

@@ -1,5 +1,10 @@
-front:
+front_end_lint:
   stage: lint
   tags: [docker]
+  image: cytopia/eslint:alpine
+  rules:
+  - if: '$CI_COMMIT_BRANCH == "front-end"'
   script:
-  - echo "1234"
+  - cd frontend
+  - npx eslint .
+
