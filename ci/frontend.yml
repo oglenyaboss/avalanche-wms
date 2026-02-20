@@ -3,8 +3,9 @@ front_end_lint:
   tags: [docker]
   image: cytopia/eslint:alpine
   rules:
-  - if: '$CI_COMMIT_BRANCH == "front-end"'
+    - changes:
+        - frontend/**/*
+        - frontend/**/*
   script:
-  - cd frontend
-  - npx eslint .
-
+    - cd frontend
+    - npx eslint .

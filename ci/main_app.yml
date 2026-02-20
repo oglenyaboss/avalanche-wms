@@ -3,31 +3,35 @@ main_app_lint:
   tags: [docker]
   image: golang:tip-20260207-alpine3.23
   rules:
-  - if: '$CI_COMMIT_BRANCH == "off-chain-branch"'
+    - changes:
+        - app/**/*
+        - app/**/*
   script:
-  - cd app
-  - go get .
-  - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-  - golangci-lint run .
-
+    - cd app
+    - go get .
+    - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+    - golangci-lint run .
 
 main_app_test:
   stage: test
   tags: [docker]
   image: golang:tip-20260207-alpine3.23
   rules:
-  - if: '$CI_COMMIT_BRANCH == "off-chain-branch"'
+    - changes:
+        - app/**/*
+        - app/**/*
   script:
-  - cd app
-  - go test -v
-
+    - cd app
+    - go test -v
 
 main_app_build_&_deploy:
   stage: build_&_deploy
   tags: [docker]
   image: docker:24.0.5
   rules:
-  - if: '$CI_COMMIT_BRANCH == "off-chain-branch"'
+    - changes:
+        - app/**/*
+        - app/**/*
   script:
-  - docker build ./app -t main_app
-  - echo " pushin' to  some registry "
+    - docker build ./app -t main_app
+    - echo " pushin' to  some registry "

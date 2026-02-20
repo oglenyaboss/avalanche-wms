@@ -3,32 +3,35 @@ ledger_adapter_lint:
   tags: [docker]
   image: golang:tip-20260207-alpine3.23
   rules:
-  - if: '$CI_COMMIT_BRANCH == "on-chain-branch"'
+    - changes:
+        - ledger_adapter/**/*
+        - ledger_adapter/**/*
   script:
-  - cd ledger_adapter
-  - go get .
-  - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-  - golangci-lint run .
+    - cd ledger_adapter
+    - go get .
+    - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+    - golangci-lint run .
 
 ledger_adapter_test:
   stage: test
   tags: [docker]
   image: golang:tip-20260207-alpine3.23
   rules:
-  - if: '$CI_COMMIT_BRANCH == "on-chain-branch"'
+    - changes:
+        - ledger_adapter/**/*
+        - ledger_adapter/**/*
   script:
-  - cd ledger_adapter
-  - go test -v
+    - cd ledger_adapter
+    - go test -v
 
-ledeger_adapter_build_&_deploy:
+ledger_adapter_build_&_deploy:
   stage: build_&_deploy
   tags: [docker]
   image: docker:24.0.5
   rules:
-  - if: '$CI_COMMIT_BRANCH == "on-chain-branch"'
+    - changes:
+        - ledger_adapter/**/*
+        - ledger_adapter/**/*
   script:
-  - docker build ./ledger_adapter -t ledger_adapter
-  - echo " pushin' to  some registry...."
-
-
-
+    - docker build ./ledger_adapter -t ledger_adapter
+    - echo " pushin' to  some registry...."
