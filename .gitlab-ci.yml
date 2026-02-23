@@ -1,5 +1,4 @@
 include:
-  - local: 'ci/frontend.yml'
   - local: 'ci/ledger_adapter.yml'
   - local: 'ci/main_app.yml'
 
