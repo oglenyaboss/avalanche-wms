@@ -36,3 +36,4 @@ ledger_adapter_build_&_deploy:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - docker build ./ledger_adapter -t registry.miem.hse.ru/2340/blockchain_project/ledger_adapter:$CI_COMMIT_SHORT_SHA .
     - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - echo "mb you should use nexus?"
