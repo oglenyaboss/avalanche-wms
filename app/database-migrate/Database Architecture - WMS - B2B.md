@@ -1,245 +1,341 @@
 
-# Модель данных системы управления складом (WMS)
+---
+
+# **1. Основные данные / таблицы текущего состояния（wms_inventory）**
 
 ---
 
-# **1. Основные данные / Текущее состояние (wms_inventory)**
+## `skus`（основные данные о товарах）
+
+| Имя поля         | Тип          | Описание     |
+| ----------- | ----------- | ------ |
+| sku_id      | uuid (PK)   | Первичный ключ SKU |
+| name        | text        | Наименование товара |
+| description | text        | Описание товара |
+| volume      | numeric     | Единица: литры |
+| created_at  | timestamptz | Время создания |
+| updated_at  | timestamptz | Время последнего обновления |
+
+
+## `warehouses`（таблица складов）
+
+| Имя поля          | Тип            | Описание                   |
+| ------------ | ------------- | -------------------- |
+| warehouse_id | bigserial(PK) | ID первичного ключа склада |
+| name         | text          | Название склада |
+| address      | text          | Адрес склада |
+| contact      | text          | Контактная информация |
+| created_at   | timestamptz   | Время создания |
+| updated_at   | timestamptz   | Время обновления |
+
+
+## `bins`（ячейки склада）
+
+| Имя поля          | Тип                       | Описание                        |
+| ------------ | ------------------------ | ------------------------- |
+| bin_id       | uuid (PK)                | Первичный ключ ячейки |
+| warehouse_id | bigint (FK - warehouses) | Принадлежит складу |
+| code         | text                     | Код ячейки |
+| section      | text                     | Зона (RECEIVING_BUFFER_T1 и т. д.) |
+| volume       | numeric                  | Объем |
+| created_at   | timestamptz              | Время создания |
+| updated_at   | timestamptz              | Время обновления |
+В section добавлено назначение буферной зоны
+
+
+## `inbound_shipments`（TTN）
+
+| Имя поля          | Тип                       | Описание                                       |
+| ------------ | ------------------------ | ---------------------------------------- |
+| shipment_id  | uuid (PK)                | Первичный ключ TTN |
+| warehouse_id | bigint (FK - warehouses) | Принадлежит складу |
+| ttn_code     | text UNIQUE              | Номер транспортной накладной |
+| status       | text                     | CREATED / GATE_IN_PROGRESS / GATE_CLOSED |
+| created_at   | timestamptz              | Время создания |
+| updated_at   | timestamptz              | Время обновления |
+
+- Представляет одну полную перевозку (TTN)
+- Верхнеуровневая сущность этапа КПП
+- GATE_CLOSED устанавливается только после «поставка принята»
+
+## `cargoplaces`（транспортная единица）
+
+| Имя поля                 | Тип                            | Описание                                                                            |
+| ------------------- | ----------------------------- | ----------------------------------------------------------------------------- |
+| cargoplace_id       | uuid (PK)                     | ID транспортной единицы |
+| shipment_id         | uuid (FK - inbound_shipments) | К какой TTN относится |
+| cargoplace_code     | text                          | Отсканированный код транспортной единицы |
+| status              | text                          | EXPECTED / RECEIVED_AT_GATE / NOT_RECEIVED / TABLE_IN_PROGRESS / TABLE_CLOSED |
+| received_at_gate_at | timestamptz                   | Время приема на КПП |
+| created_at          | timestamptz                   | Время создания |
+| updated_at          | timestamptz                   | Время обновления |
+- `UNIQUE(shipment_id, cargoplace_code)`
+- На КПП принимаемой сущностью является cargoplace
+- Только cargoplace в статусе RECEIVED_AT_GATE может перейти к приемке на столе
+- Статус EXPECTED используется для поддержки сценария «не отсканировано = не получено»
+
+
+## `boxes`（короб）
+
+|Имя поля|Тип|Описание|
+|---|---|---|
+|box_id|uuid (PK)|ID короба|
+|cargoplace_id|uuid (FK - cargoplaces)|К какой транспортной единице относится|
+|box_barcode|text|Штрихкод короба|
+|status|text|OPEN / CLOSED|
+|created_at|timestamptz|Время создания|
+|updated_at|timestamptz|Время обновления|
+- `UNIQUE(cargoplace_id, box_barcode)`
+- В одном cargoplace может быть несколько box
+- Не является единицей запаса, используется только для структурного управления
+
+
+## `expected_cargoplace_skus`
+
+| Имя поля           | Тип                      | Описание  |
+| ------------- | ----------------------- | --- |
+| id            | bigserial (PK)          |     |
+| cargoplace_id | uuid (FK - cargoplaces) |     |
+| sku_id        | uuid (FK - skus)        |     |
+| expected_qty  | int                     |     |
+- `UNIQUE(cargoplace_id, sku_id)`
+- Обозначает «сколько единиц определенного SKU ожидается в данной транспортной единице»
+- Используется для сверки недостач при приемке на столе
+- Существует только как плановое/ожидаемое количество
+
+
+## `orders`（заказы）
+
+| Имя поля               | Тип                       | Описание           |
+| ----------------- | ------------------------ | ------------ |
+| order_id          | uuid (PK)                | Первичный ключ заказа |
+| external_order_no | text                     | Номер внешнего заказа (ERP и т. д.) |
+| customer_id       | uuid (FK - users)        | ID клиента |
+| warehouse_id      | bigint (FK - warehouses) | Принадлежит складу |
+| status            | text                     | Статус заказа |
+| created_at        | timestamptz              | Время создания |
+| updated_at        | timestamptz              | Время обновления |
+**Перечень значений `status`:**
+- NEW（новый заказ）
+- ALLOCATED（для заказа уже выделены конкретные products）
+- ASSEMBLY_IN_PROGRESS（комплектация в процессе）
+- ASSEMBLED（комплектация завершена）
+- READY_TO_SHIP（ожидает отгрузки）
+- SHIPPED（отгружен）
+
+- Когда у заказа есть любой product в `ALLOCATED` и при этом еще есть не созданные задачи комплектации, заказ находится в `ALLOCATED`;
+- Когда у заказа есть product, который сейчас комплектуется, заказ находится в `ASSEMBLY_IN_PROGRESS`;
+- Когда все products заказа находятся в `ASSEMBLED` / `READY_TO_SHIP` и еще не отгружены, заказ переходит в `READY_TO_SHIP`;
+- Когда все products достигают `SHIPPED`, заказ переходит в статус `SHIPPED`.
+
+## `products` （таблица экземпляров товара）
+
+| Имя поля           | Тип                            | Описание       |
+| ------------- | ----------------------------- | -------- |
+| product_id    | uuid (PK)                     | Уникальный идентификатор единицы товара |
+| sku_id        | uuid (FK - skus)              | SKU      |
+| shipment_id   | uuid (FK - inbound_shipments) | Исходный TTN |
+| cargoplace_id | uuid (FK - cargoplaces)       | Исходная транспортная единица |
+| box_id        | uuid (FK - boxes)             | Исходный короб |
+| qr_code       | text UNIQUE                   | Уникальный QR |
+| bin_id        | uuid (FK - bins)              | Текущая ячейка |
+| order_id      | uuid                          | К какому заказу назначен |
+| status        | text                          | Статус товара |
+| created_at    | timestamptz                   | Время создания |
+| updated_at    | timestamptz                   | Время обновления |
+
+- product создается только при «сканировании QR»
+- Каждая запись представляет одну реально существующую единицу товара
+- На этапе КПП product не создается
+- Сканирование штрихкода товара не создает product
+
+
+**Перечень значений `status`:**
+- RECEIVED（только поступил на склад, еще не размещен）
+- STORED（размещен на хранение）
+- ALLOCATED（назначен заказу, но еще не подобран）
+- ASSEMBLED（подбор завершен）
+- READY_TO_SHIP（ожидает отгрузки）
+- SHIPPED（отгружен）
+
+
+# **2. Четыре основные таблицы истории операций（wms_ops）**
+
+Эти четыре таблицы являются **append-only журналами истории**; при каждой операции добавляется одна запись.
 
 ---
 
-## `skus` (Основные данные товаров)
+## `receiving_gate`
 
-| Имя поля       | Тип           | Описание          |
-| -------------- | ------------- | ----------------- |
-| sku_id         | uuid (PK)     | Первичный ключ SKU |
-| name           | text          | Название товара   |
-| description    | text          | Описание товара   |
-| volume         | numeric       | Объем (литры)     |
-| created_at     | timestamptz   | Время создания    |
-| updated_at     | timestamptz   | Время обновления  |
+| Имя поля             | Тип             | Описание                                             |
+| --------------- | -------------- | ---------------------------------------------- |
+| id              | bigserial (PK) |                                                |
+| ttn_code        | text           |                                                |
+| cargoplace_code | text           |                                                |
+| event_id        | uuid           |                                                |
+| shipment_id     | uuid           |                                                |
+| cargoplace_id   | uuid           |                                                |
+| operator_id     | uuid           |                                                |
+| action          | text           | SCAN_TTN / SCAN_CARGOPLACE / SHIPMENT_ACCEPTED |
+| occurred_at     | timestamptz    |                                                |
+| created_at      | timestamptz    |                                                |
 
----
+- Фиксирует все операции этапа КПП
+- SHIPMENT_ACCEPTED массово обновляет неотсканированные cargoplace в NOT_RECEIVED
 
-## <a id="warehouses"></a>`warehouses` (Таблица складов)
 
-| Имя поля       | Тип           | Описание          |
-| -------------- | ------------- | ----------------- |
-| warehouse_id   | bigserial(PK) | ID склада         |
-| name           | text          | Название склада   |
-| address        | text          | Адрес склада      |
-| contact        | text          | Контактная информация |
-| created_at     | timestamptz   | Время создания    |
-| updated_at     | timestamptz   | Время обновления  |
+## `receiving_table`
 
----
+| Имя поля           | Тип             | Описание                                                                    |
+| ------------- | -------------- | --------------------------------------------------------------------- |
+| id            | bigserial (PK) | Первичный ключ |
+| event_id      | uuid           | Уникальный ID события（для идемпотентности Outbox/Kafka） |
+| cargoplace_id | uuid           | Транспортная единица, к которой относится текущая операция |
+| box_id        | uuid           | Короб текущей операции（может быть NULL） |
+| operator_id   | uuid           | Оператор |
+| action        | text           | SCAN_BOX / SCAN_SKU / SCAN_QR / SCAN_BUFFER / CLOSE_BOX / CLOSE_CARGO |
+| box_barcode   | text           | Отсканированный штрихкод короба（записывается при action=SCAN_BOX） |
+| sku_id        | uuid           | Распознанный SKU（записывается при action=SCAN_SKU） |
+| qr_code       | text           | Отсканированный уникальный QR（записывается при action=SCAN_QR） |
+| product_id    | uuid           | Созданный product_id（записывается при action=SCAN_QR） |
+| buffer_bin_id | uuid           | Отсканированная буферная ячейка（записывается при action=SCAN_BUFFER） |
+| occurred_at   | timestamptz    | Время бизнес-события |
+| created_at    | timestamptz    | Время вставки в БД |
 
-## <a id="bins"></a>`bins` (Складские ячейки)
+- Логирует только операции на столе приемки
+- Реальные изменения остатков происходят в таблице products
 
-| Имя поля       | Тип                       | Описание          |
-| -------------- | ------------------------- | ----------------- |
-| bin_id         | uuid (PK)                 | ID ячейки         |
-| warehouse_id   | bigint (FK - warehouses)  | ID склада         |
-| code           | text                      | Код ячейки        |
-| section        | text                      | Зона              |
-| volume         | numeric                   | Объем             |
-| created_at     | timestamptz               | Время создания    |
-| updated_at     | timestamptz               | Время обновления  |
-
----
-
-## <a id="orders"></a>`orders` (Заказы)
-
-| Имя поля          | Тип                       | Описание              |
-| ----------------- | ------------------------- | --------------------- |
-| order_id          | uuid (PK)                 | ID заказа             |
-| external_order_no | text                      | Внешний номер заказа  |
-| customer_id       | uuid (FK - users)         | ID клиента            |
-| warehouse_id      | bigint (FK - warehouses)  | ID склада             |
-| status            | text                      | Статус заказа         |
-| created_at        | timestamptz               | Время создания        |
-| updated_at        | timestamptz               | Время обновления      |
-
-**Статусы заказа:**
-- NEW (Новый заказ)
-- ALLOCATED (Продукты распределены по заказу)
-- ASSEMBLY_IN_PROGRESS (Комплектация)
-- ASSEMBLED (Укомплектован)
-- READY_TO_SHIP (Готов к отгрузке)
-- SHIPPED (Отгружен)
-
-**Логика статусов:**
-- Заказ переходит в статус `ALLOCATED`, когда для любого продукта установлен статус `ALLOCATED` и существуют несгенерированные задачи комплектации;
-- Заказ переходит в статус `ASSEMBLY_IN_PROGRESS`, когда существуют продукты в процессе комплектации;
-- Заказ переходит в статус `READY_TO_SHIP`, когда все продукты имеют статус `ASSEMBLED` / `READY_TO_SHIP` и еще не отгружены;
-- Заказ переходит в статус `SHIPPED`, когда все продукты достигли статуса `SHIPPED`.
 
 ---
 
-## <a id="products"></a>`products` (Таблица товаров)
+## `putaways`（размещение）
 
-| Имя поля     | Тип          | Описание              |
-| ------------ | ------------ | --------------------- |
-| product_id   | uuid (PK)    | Уникальный ID продукта |
-| sku_id       | uuid         | ID SKU                |
-| bin_id       | uuid         | Текущая ячейка        |
-| order_id     | uuid         | Распределен по заказу |
-| status       | text         | Статус продукта       |
-| created_at   | timestamptz  | Время создания        |
-| updated_at   | timestamptz  | Время обновления      |
+| Имя поля             | Тип                   | Описание                                  |
+| --------------- | -------------------- | ----------------------------------- |
+| id              | bigserial (PK)       |                                     |
+| event_id        | uuid                 |                                     |
+| product_id      | uuid (FK → products) |                                     |
+| bin_id          | uuid (FK → bins)     |                                     |
+| operator_id     | uuid (FK - users)    | Оператор |
+| onchain_status  | text                 | PENDING_ONCHAIN / ONCHAIN_COMMITTED |
+| onchain_tx_hash | text                 |                                     |
+| occurred_at     | timestamptz          |                                     |
+| created_at      | timestamptz          |                                     |
 
-**Статусы продукта:**
-- RECEIVED (Поступил на склад, не размещен)
-- STORED (Размещен)
-- ALLOCATED (Распределен по заказу, не собран)
-- ASSEMBLED (Собран)
-- READY_TO_SHIP (Готов к отгрузке)
-- SHIPPED (Отгружен)
+- До putaway product должен находиться в buffer
+- После putaway поле product.bin_id обновляется на целевую ячейку
 
 ---
 
-# **2. Таблицы истории операций (wms_ops)**
+## `assembly_tasks` （таблица задач комплектации）
 
-Эти четыре таблицы являются **только для добавления записей**, каждая операция записывает новую строку.
+| Имя поля             | Тип                   | Описание                                       |
+| --------------- | -------------------- | ---------------------------------------- |
+| id              | bigserial(PK)        | Уникальный идентификатор задачи |
+| event_id        | uuid                 |                                          |
+| order_id        | uuid (FK - orders)   | К какому заказу относится |
+| product_id      | uuid (FK - products) | Какая конкретно единица товара |
+| sku_id          | uuid (FK - skus)     | sku                                      |
+| from_bin_id     | uuid (FK - bins)     | Ячейка |
+| section         | text                 | Берется из bins.section, используется для распределения задач по зонам |
+| status          | text                 | PENDING / IN_PROGRESS / DONE / CANCELLED |
+| onchain_status  | text                 |                                          |
+| onchain_tx_hash | text                 |                                          |
+| operator_id     | uuid (FK - users)    | Оператор |
+| occurred_at     | timestamptz          | Время бизнес-события |
+| created_at      | timestamptz          | Время создания |
+| updated_at      | timestamptz          | Время обновления |
 
----
-
-## <a id="receivings"></a>`receivings` (Приемка)
-
-| Имя поля         | Тип                   | Описание                              |
-| ---------------- | --------------------- | ------------------------------------- |
-| id               | bigserial (PK)        | Первичный ключ                        |
-| event_id         | uuid                  | Соответствует outbox / onchain        |
-| product_id       | uuid (FK → products)  | Какой продукт принят                  |
-| operator_id      | uuid (FK - users)     | Оператор                              |
-| onchain_status   | text                  | PENDING_ONCHAIN / ONCHAIN_COMMITTED   |
-| onchain_tx_hash  | text                  | Хэш транзакции в блокчейне            |
-| occurred_at      | timestamptz           | Время операции (от фронтенда)         |
-| created_at       | timestamptz           | Время записи в БД                     |
-
-`event_id` гарантирует Exactly-Once доставку через Outbox + Debezium + Kafka
-
----
-
-## <a id="putaways"></a>`putaways` (Размещение)
-
-| Имя поля         | Тип                   | Описание                              |
-| ---------------- | --------------------- | ------------------------------------- |
-| id               | bigserial (PK)        |                                       |
-| event_id         | uuid                  |                                       |
-| product_id       | uuid (FK → products)  |                                       |
-| bin_id           | uuid (FK → bins)      |                                       |
-| operator_id      | uuid (FK - users)     | Оператор                              |
-| onchain_status   | text                  | PENDING_ONCHAIN / ONCHAIN_COMMITTED   |
-| onchain_tx_hash  | text                  |                                       |
-| occurred_at      | timestamptz           |                                       |
-| created_at       | timestamptz           |                                       |
 
 ---
 
-## <a id="assembly_tasks"></a>`assembly_tasks` (Задачи комплектации)
+## `shippings`（отгрузка）
 
-| Имя поля        | Тип                  | Описание                           |
-| --------------- | -------------------- | ---------------------------------- |
-| id              | bigserial(PK)        | Уникальный ID задачи               |
-| event_id        | uuid                 |                                    |
-| order_id        | uuid (FK - orders)   | Соответствующий заказ              |
-| product_id      | uuid (FK - products) | Конкретный товар                   |
-| sku_id          | uuid (FK - skus)     | SKU                                |
-| from_bin_id     | uuid (FK - bins)     | Ячейка                             |
-| section         | text                 | Зона из bins.section               |
-| status          | text                 | PENDING/IN_PROGRESS/DONE/CANCELLED |
-| operator_id     | uuid (FK - users)    | Оператор                           |
-| onchain_status  | text                 |                                    |
-| onchain_tx_hash | text                 |                                    |
-| occurred_at     | timestamptz          | Время операции                     |
-| created_at      | timestamptz          | Время создания                     |
-| updated_at      | timestamptz          | Время обновления                   |
-
----
-
-## <a id="shippings"></a>`shippings` (Отгрузка)
-
-| Имя поля        | Тип                  | Описание                   |
-| --------------- | -------------------- | -------------------------- |
-| id              | bigserial (PK)       |                            |
-| event_id        | uuid                 |                            |
-| product_id      | uuid (FK - products) |                            |
-| operator_id     | uuid (FK - users)    | Оператор                   |
-| vehicle_number  | text                 | Номер транспорта           |
-| onchain_status  | text                 |                            |
-| onchain_tx_hash | text                 |                            |
+| Имя поля             | Тип                   | Описание     |
+| --------------- | -------------------- | ------ |
+| id              | bigserial (PK)       |        |
+| event_id        | uuid                 |        |
+| product_id      | uuid (FK - products) |        |
+| operator_id     | uuid (FK - users)    | Оператор |
+| vehicle_number  | text                 | Номер ТС |
+| onchain_status  | text                 |        |
+| onchain_tx_hash | text                 |        |
 | shipped_at      | timestamptz          | Фактическое время отгрузки |
-| occurred_at     | timestamptz          |                            |
-| created_at      | timestamptz          |                            |
+| occurred_at     | timestamptz          |        |
+| created_at      | timestamptz          |        |
 
-**Отслеживается только отгрузка со склада и запись в блокчейн, доставка до клиента не учитывается**
-
----
-
-# **3. Таблицы событий (общая схема)**
+**Здесь рассматриваются только отгрузка заказа и запись в блокчейн, без учета доставки до клиента**
 
 ---
 
-## <a id="outbox_events"></a>`outbox_events` (PostgreSQL → Kafka)
+# **3. Таблицы событий（common schema）**
 
-| Имя поля       | Тип            | Описание                         |
-| -------------- | -------------- | -------------------------------- |
-| id             | bigserial (PK) |                                  |
-| event_id       | uuid           |                                  |
-| aggregate_id   | uuid           | ID связанной бизнес-сущности     |
-| aggregate_type | text           | RECEIVING / PUTAWAY и т.д.       |
-| event_type     | text           | Маршрут Kafka (wms.receiving.v1) |
-| payload_hash   | text           |                                  |
-| created_at     | timestamptz    |                                  |
+---
 
-**`aggregate_id`**: ID агрегата, ID связанной бизнес-сущности, нужно добавить
+## `outbox_events`（PostgreSQL → Kafka）
+
+| Имя поля            | Тип             | Описание                                           |
+| -------------- | -------------- | -------------------------------------------- |
+| id             | bigserial (PK) |                                              |
+| event_id       | uuid           |                                              |
+| aggregate_id   | uuid           | ID агрегата, ID связанной бизнес-сущности |
+| aggregate_type | text           | RECEIVING_GATE / RECEIVING_TABLE / PUTAWAY и т. д. |
+| event_type     | text           | Kafka-маршрутизация（wms.receiving.v1） |
+| payload_hash   | text           |                                              |
+| created_at     | timestamptz    |                                              |
+**`aggregate_id`：ID агрегата, то есть ID связанной бизнес-сущности, нужно добавить**
 
 
 ---
 
-## <a id="onchain_events"></a>`onchain_events` (Записи в блокчейне)
+## `onchain_events`（записи в блокчейне）
 
-| Имя поля        | Тип             | Описание                            |
-| --------------- | --------------- | ----------------------------------- |
-| id              | bigserial (PK)  |                                     |
-| event_id        | uuid            |                                     |
-| aggregate_type  | text            | Тип операции                        |
-| tx_hash         | text            | Хэш транзакции в блокчейне          |
-| status          | text            | PENDING/SENT/COMMITTED/FAILED       |
-| error_message   | text            | Причина ошибки                      |
-| created_at      | timestamptz     |                                     |
-| updated_at      | timestamptz     |                                     |
+| Имя поля            | Тип             | Описание                            |
+| -------------- | -------------- | ----------------------------- |
+| id             | bigserial (PK) |                               |
+| event_id       | uuid           |                               |
+| aggregate_type | text           | Тип операции |
+| tx_hash        | text           | Хэш транзакции в блокчейне |
+| status         | text           | PENDING/SENT/COMMITTED/FAILED |
+| error_message  | text           | Причина неудачной записи в блокчейн |
+| created_at     | timestamptz    |                               |
+| updated_at     | timestamptz    |                               |
 
 **Ledger Adapter отправляет события Kafka в блокчейн**
-**Значение `tx_hash` генерируется и записывается в БД при отправке транзакции**
-**При подтверждении в блокчейне значение `status` обновляется на `COMMITTED`**
+**Значение `tx_hash` создается после отправки транзакции и записывается в БД**
+**После подтверждения в блокчейне значение `status` обновляется до `COMMITTED`**
+
 
 ---
 
-## <a id="users"></a>`users` (Таблица пользователей)
+# `users`（таблица учетных записей пользователей）
 
-| Имя поля       | Тип          | Описание                      |
-| -------------- | ------------ | ----------------------------- |
-| user_id        | uuid (PK)    | Уникальный ID пользователя    |
-| username       | text         | Имя пользователя              |
-| password_hash  | text         | Хэш пароля                    |
-| role           | text         | Роль: ADMIN/OPERATOR/CUSTOMER |
-| is_active      | boolean      | Активен ли пользователь       |
-| created_at     | timestamptz  | Время создания                |
-| updated_at     | timestamptz  | Время изменения               |
+| Имя поля           | Тип          | Описание                                |
+| ------------- | ----------- | --------------------------------- |
+| user_id       | uuid (PK)   | ID первичного ключа пользователя |
+| username      | text        | Имя пользователя |
+| password_hash | text        | Хэш пароля |
+| role          | text        | Роль пользователя: ADMIN / OPERATOR / CUSTOMER и т. д. |
+| is_active     | boolean     | Активен ли пользователь |
+| created_at    | timestamptz | Время создания |
+| updated_at    | timestamptz | Время последнего изменения |
 
 ---
 
-## <a id="evm_addresses"></a>`evm_addresses` (Привязка пользователей к адресам в блокчейне)
+# `evm_addresses`（таблица привязки пользователь ↔ адрес EVM в сети）
 
-| Имя поля       | Тип                | Описание                |
-| -------------- | ------------------ | ----------------------- |
-| id             | bigserial (PK)     | Первичный ключ          |
-| user_id        | uuid (FK → users)  | ID пользователя         |
-| evm_address    | text               | Адрес кошелька в блокчейне |
-| onchain_role   | text               | Роль в блокчейне        |
-| created_at     | timestamptz        | Время создания          |
-| updated_at     | timestamptz        | Время изменения         |
+| Имя поля          | Тип                | Описание        |
+| ------------ | ----------------- | --------- |
+| id           | bigserial (PK)    | ID первичного ключа |
+| user_id      | uuid (FK → users） | Принадлежит пользователю |
+| evm_address  | text              | Адрес кошелька пользователя в сети |
+| onchain_role | text              | Роль этого адреса в блокчейне |
+| created_at   | timestamptz       | Время создания |
+| updated_at   | timestamptz       | Время последнего изменения |
 
-1. **После создания пользователя генерируется `evm_address` и записывается в эту таблицу**
-2. **`onchain_role` управляет правами записи в блокчейне, эта роль определяется в блокчейне, здесь используется для кэширования/отображения**
+1. **После создания пользователя для него генерируется `evm_address`, который заполняется в этой таблице**
+2. **`onchain_role` используется для управления правами записи в блокчейне; эта роль определяется на цепочке, здесь может использоваться как кэш/отображение**
+
+
+
+---
