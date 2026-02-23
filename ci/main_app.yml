@@ -33,5 +33,5 @@ main_app_build_&_deploy:
         - app/**/*
         - app/**/*
   script:
-    - docker build ./app -t main_app
+    - docker build ./app/go_app -t main_app
     - echo " pushin' to  some registry "
