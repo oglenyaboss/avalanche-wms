@@ -33,5 +33,7 @@ ledger_adapter_build_&_deploy:
         - ledger_adapter/**/*
         - ledger_adapter/**/*
   script:
-    - docker build ./ledger_adapter -t ledger_adapter
-    - echo " pushin' to  some registry...."
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build ./ledger_adapter -t registry.miem.hse.ru/2340/blockchain_project/ledger_adapter:$CI_COMMIT_SHORT_SHA .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - echo "artifact has been builded"
