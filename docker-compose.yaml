@@ -1,5 +1,9 @@
 services:
 
+  # TODO after writing back
+  # golang-app:
+  #   image:
+
   postgres:
     image: postgres:17
     container_name: postgres_db
@@ -157,6 +161,18 @@ services:
       SERVICE_PORT: 5556
     volumes:
       - ./jmx/debezium-jmx-config.yaml:/opt/jmx_exporter/config.yml
+    networks:
+      - app_network
+
+  ledger-adapter:
+    build:
+      context: ./ledger_adapter
+      dockerfile: dockerfile
+    container_name: ledger-adapter
+    ports:
+      - "8085:8085"
+    environment:
+      - PORT=8085
     networks:
       - app_network
 
