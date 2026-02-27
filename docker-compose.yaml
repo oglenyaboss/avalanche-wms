@@ -1,8 +1,26 @@
 services:
-
-  # TODO after writing back
-  # golang-app:
-  #   image:
+  wms_app:
+    build:
+      context: ./app/go_app
+      dockerfile: dockerfile
+    container_name: wms-service
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      POSTGRES_USER: ${DB_USER:-root}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-root}
+      POSTGRES_DB: ${DB_NAME:-wms_blockchain_db}
+      KAFKA_BROKER: kafka:9092
+      LEDGER_ADAPTER_URL: http://ledger-adapter:8085
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ledger-adapter:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - app_network
 
   postgres:
     image: postgres:17
@@ -206,6 +224,12 @@ services:
       - "8085:8085"
     environment:
       - PORT=8085
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
     networks:
       - app_network
 
