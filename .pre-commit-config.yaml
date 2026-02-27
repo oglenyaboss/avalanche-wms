@@ -10,20 +10,20 @@ repos:
     rev: v0.5.1
     hooks:
       - id: go-fmt
-        files: ^app/.*\.go$
+        files: ^app/go_app/.*\.go$
       - id: go-imports
-        files: ^app/.*\.go$
+        files: ^app/go_app/.*\.go$
       - id: go-mod-tidy
-        files: ^app/go\.mod$
+        files: ^app/go.app/go\.mod$
 
   - repo: https://github.com/golangci/golangci-lint
     rev: v1.62.0
     hooks:
     - id: golangci-lint
       name: golangci-lint
-      entry: bash -c 'cd app && golangci-lint run --timeout=5m ./...'
+      entry: bash -c 'cd app/go_app && golangci-lint run --timeout=5m ./...'
       language: system
-      files: ^app/.*\.go$
+      files: ^app/go_app/.*\.go$
       types: [go]
       pass_filenames: false
       args: []
@@ -32,8 +32,8 @@ repos:
     hooks:
       - id: go-test
         name: go tests (app)
-        entry: bash -c 'cd app && go test ./...'
+        entry: bash -c 'cd app/go_app && go test ./...'
         language: system
         types: [go]
-        files: ^app/.*\.go$
+        files: ^app/go_app/.*\.go$
         pass_filenames: false

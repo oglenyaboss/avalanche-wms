@@ -222,6 +222,7 @@ services:
     container_name: ledger-adapter
     ports:
       - "8085:8085"
+    # добавить url и ключ
     environment:
       - PORT=8085
     healthcheck:

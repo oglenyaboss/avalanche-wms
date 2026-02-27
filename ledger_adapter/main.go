@@ -290,6 +290,15 @@ func getHelloWorld(client *ethclient.Client) (string, error) {
 	return message, nil
 }
 
+func chech_service_health(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "healty",
+		"time":   time.Now(),
+	})
+}
+
 func main() {
 	client, err := ethclient.Dial(rpcUrl)
 	if err != nil {
@@ -299,6 +308,9 @@ func main() {
 	if err != nil {
 		fmt.Print(err.Error())
 	}
+
+	log.Print("server staring...")
+	http.HandleFunc("/health", chech_service_health)
 
 	x := func(w http.ResponseWriter, r *http.Request) {
 		res, err := getHelloWorld(client)
@@ -407,9 +419,10 @@ func main() {
 	http.HandleFunc("/viewlogs", w)
 	http.HandleFunc("/setstring", y)
 	http.HandleFunc("/addfunc", z)
-	err = http.ListenAndServe(":8080", nil)
+	err = http.ListenAndServe(":8085", nil)
 	if err != nil {
 		fmt.Print(err.Error())
+		log.Fatalf("server failed: %w", err)
 	}
 }
 
