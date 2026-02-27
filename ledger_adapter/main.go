@@ -293,10 +293,13 @@ func getHelloWorld(client *ethclient.Client) (string, error) {
 func chech_service_health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "healty",
 		"time":   time.Now(),
 	})
+	if err != nil {
+		log.Fatalf("Failed to connect: %v", err)
+	}
 }
 
 func main() {
@@ -422,7 +425,7 @@ func main() {
 	err = http.ListenAndServe(":8085", nil)
 	if err != nil {
 		fmt.Print(err.Error())
-		log.Fatalf("server failed: %w", err)
+		log.Fatalf("server failed: %v", err)
 	}
 }
 
