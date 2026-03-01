@@ -43,7 +43,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 // Health responds with service health status.
-func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	err := json.NewEncoder(w).Encode(map[string]interface{}{
@@ -56,7 +56,7 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetMessage returns the current message from the contract.
-func (h *Handler) GetMessage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetMessage(w http.ResponseWriter, _ *http.Request) {
 	res, err := h.chain.GetMessage()
 	if err != nil {
 		w.WriteHeader(500)
@@ -90,7 +90,7 @@ func (h *Handler) SetMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := h.chain.SetMessage(x["NewWord"])
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{error:"unexpected behaviour of subnet:%v"}`, err), http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf(`{error:"unexpected behavior of subnet:%v"}`, err), http.StatusBadGateway)
 		return
 	}
 	res := h.chain.ParseReceipt(info)
@@ -105,6 +105,7 @@ func (h *Handler) SetMessage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) AddMessage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "not found", http.StatusNotFound)
+		return
 	}
 	x := map[string]string{
 		"addition": "",
@@ -117,7 +118,7 @@ func (h *Handler) AddMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := h.chain.AddMessage(x["addition"])
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{error:"unexpected behaviour of subnet:%v"}`, err), http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf(`{error:"unexpected behavior of subnet:%v"}`, err), http.StatusBadGateway)
 		return
 	}
 	res := h.chain.ParseReceipt(info)
@@ -138,21 +139,22 @@ func (h *Handler) ViewLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	logs, err := h.chain.ViewLogs(id)
 	prettified := []LogJSON{}
-	for _, v := range logs {
-		pd := chain.PrettifiedData(v.Data)
+	for i := range logs {
+		pd := chain.PrettifiedData(logs[i].Data)
 		entry := LogJSON{
-			Address:     v.Address.String(),
+			Address:     logs[i].Address.String(),
 			Data:        string(pd),
-			BlockNumber: v.BlockNumber,
-			TxHash:      v.TxHash.String(),
-			TxIndex:     v.TxIndex,
-			BlockHash:   v.BlockHash.String(),
-			Removed:     v.Removed,
+			BlockNumber: logs[i].BlockNumber,
+			TxHash:      logs[i].TxHash.String(),
+			TxIndex:     logs[i].TxIndex,
+			BlockHash:   logs[i].BlockHash.String(),
+			Removed:     logs[i].Removed,
 		}
 		prettified = append(prettified, entry)
 	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("%v", err), 500)
+		return
 	}
 	res, err := json.Marshal(prettified)
 	if err != nil {

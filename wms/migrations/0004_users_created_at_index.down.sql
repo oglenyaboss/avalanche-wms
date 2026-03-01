@@ -4,4 +4,3 @@ BEGIN;
 DROP INDEX IF EXISTS public.idx_users_created_at;
 
 COMMIT;
-

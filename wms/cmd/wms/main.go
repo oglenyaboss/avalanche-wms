@@ -36,7 +36,8 @@ func main() {
 	// Kafka
 	kafkaConn, err := kafka.NewConn(cfg.KafkaBroker)
 	if err != nil {
-		log.Fatalf("Kafka connection failed: %v", err)
+		log.Printf("Kafka connection failed: %v", err)
+		return
 	}
 	defer kafkaConn.Close()
 	log.Println("Connected to Kafka")
@@ -75,7 +76,7 @@ func main() {
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		log.Printf("Server failed: %v", err)
 	}
 }
 
@@ -119,6 +120,8 @@ func healthHandler(dbPool *pgxpool.Pool, kafkaConn *kafkago.Conn, ledgerClient *
 		if status != "ok" {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		json.NewEncoder(w).Encode(result)
+		if err := json.NewEncoder(w).Encode(result); err != nil {
+			log.Printf("Failed to encode health response: %v", err)
+		}
 	}
 }

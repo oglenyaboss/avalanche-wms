@@ -12,4 +12,3 @@ COMMENT ON TABLE public.migration_test IS 'Test table used to validate migrate/r
 INSERT INTO public.schema_migrations(version) VALUES (2);
 
 COMMIT;
-

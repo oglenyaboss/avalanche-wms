@@ -59,13 +59,13 @@ repos:
         pass_filenames: false
       - id: go-mod-tidy-wms
         name: go mod tidy (wms)
-        entry: bash -c 'cd wms && go mod tidy && git diff --exit-code wms/go.mod wms/go.sum'
+        entry: bash -c 'cd wms && go mod tidy && git diff --exit-code -- go.mod go.sum'
         language: system
         files: ^wms/go\.mod$
         pass_filenames: false
       - id: go-mod-tidy-ledger
         name: go mod tidy (ledger-adapter)
-        entry: bash -c 'cd ledger-adapter && go mod tidy && git diff --exit-code ledger-adapter/go.mod ledger-adapter/go.sum'
+        entry: bash -c 'cd ledger-adapter && go mod tidy && git diff --exit-code -- go.mod go.sum'
         language: system
         files: ^ledger-adapter/go\.mod$
         pass_filenames: false
@@ -73,29 +73,7 @@ repos:
       # ── Conventional Commits ──────────────────────────
       - id: conventional-commit
         name: conventional commit message
-        entry: bash -c '
-          MSG=$(head -1 "$1")
-          PATTERN="^(feat|fix|docs|style|refactor|test|chore|ci|perf|build|revert)(\(.+\))?\!?: .{3,}"
-          if ! echo "$MSG" | grep -qE "$PATTERN"; then
-            echo ""
-            echo "❌ Коммит отклонён: сообщение не соответствует Conventional Commits"
-            echo ""
-            echo "Формат: <тип>(<скоуп>): <описание>"
-            echo ""
-            echo "Типы:  feat fix docs style refactor test chore ci perf build revert"
-            echo "Скоупы: wms ledger-adapter deploy ci db"
-            echo ""
-            echo "Примеры:"
-            echo "  feat(wms): добавить эндпоинт приёмки товаров"
-            echo "  fix(ledger-adapter): исправить таймаут подключения к ноде"
-            echo "  docs: обновить README"
-            echo "  chore(ci): добавить stage деплоя"
-            echo ""
-            echo "Подробнее: docs/CONVENTIONS.md"
-            echo ""
-            exit 1
-          fi
-        ' --
+        entry: scripts/hooks/conventional-commit.sh
         language: system
         stages: [commit-msg]
         always_run: true
@@ -103,30 +81,7 @@ repos:
       # ── Branch naming ─────────────────────────────────
       - id: branch-name
         name: branch name convention
-        entry: bash -c '
-          BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "develop" ]; then
-            exit 0
-          fi
-          PATTERN="^(feature|fix|hotfix|docs|refactor|chore|test)/[a-z0-9._-]+$"
-          if ! echo "$BRANCH" | grep -qE "$PATTERN"; then
-            echo ""
-            echo "❌ Имя ветки не соответствует конвенции"
-            echo ""
-            echo "Формат: <тип>/<описание-через-дефис>"
-            echo ""
-            echo "Типы: feature fix hotfix docs refactor chore test"
-            echo ""
-            echo "Примеры:"
-            echo "  feature/receiving-endpoint"
-            echo "  fix/kafka-connection-timeout"
-            echo "  docs/api-documentation"
-            echo ""
-            echo "Подробнее: docs/CONVENTIONS.md"
-            echo ""
-            exit 1
-          fi
-        ' --
+        entry: scripts/hooks/branch-name.sh
         language: system
         stages: [pre-push]
         always_run: true

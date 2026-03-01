@@ -4,4 +4,3 @@ BEGIN;
 DROP TABLE IF EXISTS public.migration_test;
 
 COMMIT;
-

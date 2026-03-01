@@ -12,4 +12,3 @@ COMMENT ON COLUMN public.users.email IS 'Optional email for test migration.';
 INSERT INTO public.schema_migrations(version) VALUES (3);
 
 COMMIT;
-

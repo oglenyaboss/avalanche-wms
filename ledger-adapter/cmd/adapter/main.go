@@ -24,10 +24,8 @@ func main() {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	log.Print("server staring...")
-	err = http.ListenAndServe(fmt.Sprintf(":%s", cfg.Port), mux)
-	if err != nil {
-		fmt.Print(err.Error())
-		log.Fatalf("server failed: %v", err)
+	log.Print("server starting...")
+	if err := http.ListenAndServe(fmt.Sprintf(":%s", cfg.Port), mux); err != nil {
+		log.Printf("server failed: %v", err)
 	}
 }
