@@ -3,7 +3,7 @@ set -euo pipefail
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
-if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "develop" ] || [ "$BRANCH" = "dev" ]; then
+if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ] || [ "$BRANCH" = "develop" ] || [ "$BRANCH" = "dev" ]; then
   exit 0
 fi
 
