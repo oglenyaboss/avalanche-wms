@@ -1,6 +1,6 @@
 include:
   - local: 'ci/ledger_adapter.yml'
-  - local: 'ci/main_app.yml'
+  - local: 'ci/wms.yml'
 
 stages:
   - lint
@@ -8,4 +8,4 @@ stages:
   - build_&_deploy
 
 variables:
-  PROJECT_NAME: my-project
+  PROJECT_NAME: blockchain_project

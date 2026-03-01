@@ -3,37 +3,130 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+      - id: end-of-file-fixer
       - id: check-yaml
       - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: detect-private-key
 
+  # ── Go: форматирование ──────────────────────────────
   - repo: https://github.com/dnephin/pre-commit-golang
     rev: v0.5.1
     hooks:
       - id: go-fmt
-        files: ^app/go_app/.*\.go$
+        files: ^(wms|ledger-adapter)/.*\.go$
       - id: go-imports
-        files: ^app/go_app/.*\.go$
-      - id: go-mod-tidy
-        files: ^app/go.app/go\.mod$
+        files: ^(wms|ledger-adapter)/.*\.go$
 
+  # ── Go: линтинг ─────────────────────────────────────
   - repo: https://github.com/golangci/golangci-lint
     rev: v1.62.0
     hooks:
-    - id: golangci-lint
-      name: golangci-lint
-      entry: bash -c 'cd app/go_app && golangci-lint run --timeout=5m ./...'
-      language: system
-      files: ^app/go_app/.*\.go$
-      types: [go]
-      pass_filenames: false
-      args: []
+      - id: golangci-lint
+        name: golangci-lint (wms)
+        entry: bash -c 'cd wms && golangci-lint run --config ../.golangci.yml --timeout=5m ./...'
+        language: system
+        files: ^wms/.*\.go$
+        types: [go]
+        pass_filenames: false
+        args: []
+      - id: golangci-lint
+        name: golangci-lint (ledger-adapter)
+        entry: bash -c 'cd ledger-adapter && golangci-lint run --config ../.golangci.yml --timeout=5m ./...'
+        language: system
+        files: ^ledger-adapter/.*\.go$
+        types: [go]
+        pass_filenames: false
+        args: []
 
+  # ── Go: тесты и модули ──────────────────────────────
   - repo: local
     hooks:
-      - id: go-test
-        name: go tests (app)
-        entry: bash -c 'cd app/go_app && go test ./...'
+      - id: go-test-wms
+        name: go tests (wms)
+        entry: bash -c 'cd wms && go test ./...'
         language: system
         types: [go]
-        files: ^app/go_app/.*\.go$
+        files: ^wms/.*\.go$
         pass_filenames: false
+      - id: go-test-ledger
+        name: go tests (ledger-adapter)
+        entry: bash -c 'cd ledger-adapter && go test ./...'
+        language: system
+        types: [go]
+        files: ^ledger-adapter/.*\.go$
+        pass_filenames: false
+      - id: go-mod-tidy-wms
+        name: go mod tidy (wms)
+        entry: bash -c 'cd wms && go mod tidy && git diff --exit-code wms/go.mod wms/go.sum'
+        language: system
+        files: ^wms/go\.mod$
+        pass_filenames: false
+      - id: go-mod-tidy-ledger
+        name: go mod tidy (ledger-adapter)
+        entry: bash -c 'cd ledger-adapter && go mod tidy && git diff --exit-code ledger-adapter/go.mod ledger-adapter/go.sum'
+        language: system
+        files: ^ledger-adapter/go\.mod$
+        pass_filenames: false
+
+      # ── Conventional Commits ──────────────────────────
+      - id: conventional-commit
+        name: conventional commit message
+        entry: bash -c '
+          MSG=$(head -1 "$1")
+          PATTERN="^(feat|fix|docs|style|refactor|test|chore|ci|perf|build|revert)(\(.+\))?\!?: .{3,}"
+          if ! echo "$MSG" | grep -qE "$PATTERN"; then
+            echo ""
+            echo "❌ Коммит отклонён: сообщение не соответствует Conventional Commits"
+            echo ""
+            echo "Формат: <тип>(<скоуп>): <описание>"
+            echo ""
+            echo "Типы:  feat fix docs style refactor test chore ci perf build revert"
+            echo "Скоупы: wms ledger-adapter deploy ci db"
+            echo ""
+            echo "Примеры:"
+            echo "  feat(wms): добавить эндпоинт приёмки товаров"
+            echo "  fix(ledger-adapter): исправить таймаут подключения к ноде"
+            echo "  docs: обновить README"
+            echo "  chore(ci): добавить stage деплоя"
+            echo ""
+            echo "Подробнее: docs/CONVENTIONS.md"
+            echo ""
+            exit 1
+          fi
+        ' --
+        language: system
+        stages: [commit-msg]
+        always_run: true
+
+      # ── Branch naming ─────────────────────────────────
+      - id: branch-name
+        name: branch name convention
+        entry: bash -c '
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "develop" ]; then
+            exit 0
+          fi
+          PATTERN="^(feature|fix|hotfix|docs|refactor|chore|test)/[a-z0-9._-]+$"
+          if ! echo "$BRANCH" | grep -qE "$PATTERN"; then
+            echo ""
+            echo "❌ Имя ветки не соответствует конвенции"
+            echo ""
+            echo "Формат: <тип>/<описание-через-дефис>"
+            echo ""
+            echo "Типы: feature fix hotfix docs refactor chore test"
+            echo ""
+            echo "Примеры:"
+            echo "  feature/receiving-endpoint"
+            echo "  fix/kafka-connection-timeout"
+            echo "  docs/api-documentation"
+            echo ""
+            echo "Подробнее: docs/CONVENTIONS.md"
+            echo ""
+            exit 1
+          fi
+        ' --
+        language: system
+        stages: [pre-push]
+        always_run: true

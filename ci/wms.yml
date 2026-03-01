@@ -1,34 +1,33 @@
-ledger_adapter_lint:
+wms_lint:
   stage: lint
   tags: [docker]
   image: golang:1.24-alpine
   rules:
     - changes:
-        - ledger-adapter/**/*
+        - wms/**/*
   script:
-    - cd ledger-adapter
+    - cd wms
     - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
     - golangci-lint run --config ../.golangci.yml --timeout=5m ./...
 
-ledger_adapter_test:
+wms_test:
   stage: test
   tags: [docker]
   image: golang:1.24-alpine
   rules:
     - changes:
-        - ledger-adapter/**/*
+        - wms/**/*
   script:
-    - cd ledger-adapter
+    - cd wms
     - go test -race -count=1 ./...
 
-ledger_adapter_build_&_deploy:
+wms_build_&_deploy:
   stage: build_&_deploy
   tags: [docker]
   image: docker:24.0.5
   rules:
     - changes:
-        - ledger-adapter/**/*
+        - wms/**/*
   script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - docker build ./ledger-adapter -t $CI_REGISTRY_IMAGE/ledger-adapter:$CI_COMMIT_SHORT_SHA
-    - docker push $CI_REGISTRY_IMAGE/ledger-adapter:$CI_COMMIT_SHORT_SHA
+    - docker build ./wms -t wms-service
+    - echo "pushin' to some registry"
