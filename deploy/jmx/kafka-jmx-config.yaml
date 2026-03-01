@@ -1,0 +1,9 @@
+hostPort: kafka:9999
+ssl: false
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+rules:
+  - pattern: "kafka.server<type=ReplicaManager, name=UnderReplicatedPartitions><>Value"
+    name: kafka_under_replicated_partitions
+    type: GAUGE

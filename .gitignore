@@ -1,5 +1,44 @@
-.env
-go .sum
+# ── Binaries ────────────────────────────────────────────
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 
+# ── Go ──────────────────────────────────────────────────
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# ── Go vendor ───────────────────────────────────────────
+**/vendor/
+
+# ── Environment ─────────────────────────────────────────
+.env
+*.env.local
+
+# ── IDE / Editor ────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
+
+# ── Docker ──────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── Traces / Debug ──────────────────────────────────────
+trace.json
+trace.json.gz
+*.heapsnapshot
+*.cpuprofile
+
+# ── Temporary ───────────────────────────────────────────
+tmp/
+temp/
+*.tmp
+*.log

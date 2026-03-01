@@ -1,0 +1,252 @@
+services:
+  wms_app:
+    build:
+      context: ./wms
+      dockerfile: Dockerfile
+    container_name: wms-service
+    environment:
+      PORT: 8080
+      DB_HOST: postgres
+      DB_PORT: 5432
+      POSTGRES_USER: ${DB_USER:-root}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-root}
+      POSTGRES_DB: ${DB_NAME:-wms_blockchain_db}
+      KAFKA_BROKER: kafka:9092
+      LEDGER_ADAPTER_URL: http://ledger-adapter:8085
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ledger-adapter:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postgres:
+    image: postgres:17
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: ${DB_USER:-root}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-root}
+      POSTGRES_DB: ${DB_NAME:-wms_blockchain_db}
+    ports:
+      - "5432:5432"
+    command: >
+      postgres -c wal_level=logical
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-root} -d ${DB_NAME:-wms_blockchain_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - app_network
+
+  db-migrate:
+    image: postgres:17
+    container_name: db_migrate
+    restart: "no"
+    working_dir: /migrate
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      DB_NAME: ${DB_NAME:-wms_blockchain_db}
+      DB_CONTAINER: ""
+    volumes:
+      - ./wms/migrations:/migrate
+    command: >
+      bash -c "chmod +x migrate.sh && ./migrate.sh"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app_network
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "9999:9999"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: kafka
+      JMX_PORT: 9999
+      KAFKA_OPTS: >
+        -Dcom.sun.management.jmxremote
+        -Dcom.sun.management.jmxremote.port=9999
+        -Dcom.sun.management.jmxremote.rmi.port=9999
+        -Dcom.sun.management.jmxremote.authenticate=false
+        -Dcom.sun.management.jmxremote.ssl=false
+        -Djava.rmi.server.hostname=kafka
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - app_network
+
+  debezium:
+    image: debezium/connect:2.5
+    container_name: debezium-connect
+    ports:
+      - "8083:8083"
+      - "9012:9012"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: debezium-connect
+
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_statuses
+
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      ERRORS_DEADLETTERQUEUE_TOPIC_NAME: debezium_dlq
+      ERRORS_DEADLETTERQUEUE_TOPIC_REPLICATION_FACTOR: 1
+      ERRORS_DEADLETTERQUEUE_CONTEXT_HEADERS_ENABLE: "true"
+      ERRORS_LOG_ENABLE: "true"
+      ERRORS_LOG_INCLUDE_MESSAGES: "true"
+
+      JMXPORT: 9012
+      KAFKA_OPTS: >
+        -Dcom.sun.management.jmxremote
+        -Dcom.sun.management.jmxremote.port=9012
+        -Dcom.sun.management.jmxremote.rmi.port=9012
+        -Dcom.sun.management.jmxremote.authenticate=false
+        -Dcom.sun.management.jmxremote.ssl=false
+        -Djava.rmi.server.hostname=debezium-connect
+    depends_on:
+      kafka:
+        condition: service_started
+      db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - app_network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - app_network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    networks:
+      - app_network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - prometheus
+    networks:
+      - app_network
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter
+    container_name: postgres_exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${DB_USER:-root}:${DB_PASSWORD:-root}@postgres_db:5432/${DB_NAME:-wms_blockchain_db}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - app_network
+
+  kafka-jmx-exporter:
+    image: sscaling/jmx-prometheus-exporter
+    container_name: kafka-jmx-exporter
+    environment:
+      SERVICE_PORT: 5556
+    volumes:
+      - ./deploy/jmx/kafka-jmx-config.yaml:/opt/jmx_exporter/config.yml
+    networks:
+      - app_network
+
+  debezium-jmx-exporter:
+    image: sscaling/jmx-prometheus-exporter
+    container_name: debezium-jmx-exporter
+    environment:
+      SERVICE_PORT: 5556
+    volumes:
+      - ./deploy/jmx/debezium-jmx-config.yaml:/opt/jmx_exporter/config.yml
+    networks:
+      - app_network
+
+  ledger-adapter:
+    build:
+      context: ./ledger-adapter
+      dockerfile: Dockerfile
+    container_name: ledger-adapter
+    ports:
+      - "8085:8085"
+    environment:
+      PORT: 8085
+      RPC_URL: ${RPC_URL:-http://localhost:8545}
+      PRIVATE_KEY: ${PRIVATE_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      CONTRACT_ADDR: ${CONTRACT_ADDR:-0x0000000000000000000000000000000000000000}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    networks:
+      - app_network
+
+volumes:
+  postgres_data:
+  kafka_data:
+
+networks:
+  app_network:
+    driver: bridge

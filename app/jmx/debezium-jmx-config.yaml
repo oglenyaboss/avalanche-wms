@@ -1,9 +1,0 @@
-hostPort: debezium-connect:9012
-ssl: false
-lowercaseOutputName: true
-lowercaseOutputLabelNames: true
-
-rules:
-  - pattern: "kafka.connect<type=connect-worker-metrics><>running-task-count"
-    name: debezium_running_task_count
-    type: GAUGE
