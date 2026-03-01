@@ -4,7 +4,14 @@ set -euo pipefail
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
 if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ] || [ "$BRANCH" = "develop" ] || [ "$BRANCH" = "dev" ]; then
-  exit 0
+  echo ""
+  echo "❌ Пуш напрямую в $BRANCH запрещён"
+  echo ""
+  echo "Создай ветку и открой MR:"
+  echo "  git checkout -b fix/my-change"
+  echo "  git push -u origin fix/my-change"
+  echo ""
+  exit 1
 fi
 
 PATTERN="^(feature|fix|hotfix|docs|refactor|chore|test)/[a-z0-9._-]+$"
