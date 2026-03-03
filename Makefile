@@ -58,11 +58,12 @@ tidy: tidy-wms tidy-ledger ## Tidy all go.mod
 vendor: vendor-wms vendor-ledger ## Rebuild all vendors
 
 # ── Migrations ──────────────────────────────────────────
-init: ## Run database & Kafka init (migrations, seed, topics)
+init: ## Run full infrastructure init (DB migrations + seed + Kafka topics)
 	$(COMPOSE) run --rm db-init
+	$(COMPOSE) run --rm kafka-init
 
-migrate: ## Run database migrations only (alias for init)
-	$(COMPOSE) run --rm db-init
+migrate: ## Run database migrations only
+	$(COMPOSE) run --rm db-init bash /wms/migrations/migrate.sh
 
 # ── Pre-commit ──────────────────────────────────────────
 hooks-install: ## Install pre-commit hooks

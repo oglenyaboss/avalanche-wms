@@ -31,9 +31,8 @@ EOSQL
 else
   echo "  debezium role already exists"
 fi
-run_sql -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO debezium;"
-run_sql -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO debezium;"
-echo "  debezium privileges granted"
+run_sql -c "GRANT SELECT ON TABLE public.outbox_events TO debezium;"
+echo "  debezium privileges granted (outbox_events only)"
 
 # ── Step 3: Outbox publication ─────────────────────────
 echo "=== Step 3/4: Creating outbox publication ==="
