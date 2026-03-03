@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"os"
+	"time"
+)
 
 type Config struct {
 	Port             string
@@ -11,6 +14,9 @@ type Config struct {
 	DBName           string
 	KafkaBroker      string
 	LedgerAdapterURL string
+	JWTSecret        string
+	JWTAccessTTL     time.Duration
+	JWTRefreshTTL    time.Duration
 }
 
 func Load() *Config {
@@ -23,6 +29,9 @@ func Load() *Config {
 		DBName:           getEnv("POSTGRES_DB", "wms_blockchain_db"),
 		KafkaBroker:      getEnv("KAFKA_BROKER", "localhost:9092"),
 		LedgerAdapterURL: getEnv("LEDGER_ADAPTER_URL", ""),
+		JWTSecret:        getEnv("JWT_SECRET", "dev-secret"),
+		JWTAccessTTL:     getDurationEnv("JWT_ACCESS_TTL", 15*time.Minute),
+		JWTRefreshTTL:    getDurationEnv("JWT_REFRESH_TTL", 7*24*time.Hour),
 	}
 }
 
@@ -31,4 +40,19 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getDurationEnv retrieves a duration from the environment variable specified by key.
+func getDurationEnv(key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return fallback
+	}
+
+	return parsed
 }
