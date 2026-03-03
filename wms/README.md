@@ -140,7 +140,7 @@ make tidy-wms
 
 ## База данных
 
-Миграции лежат в `migrations/`. Применяются автоматически при `docker compose up` через контейнер `db-migrate`.
+Миграции лежат в `migrations/`. Применяются автоматически при `docker compose up` через контейнер `db-init`.
 
 Схемы:
 - `public` — общие таблицы (`users`, `evm_addresses`, `outbox_events`)

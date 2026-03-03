@@ -18,8 +18,10 @@ services:
         condition: service_healthy
       ledger-adapter:
         condition: service_healthy
-      kafka:
-        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
     networks:
       - app_network
     healthcheck:
@@ -42,7 +44,6 @@ services:
       postgres -c wal_level=logical
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./deploy/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-root} -d ${DB_NAME:-wms_blockchain_db}"]
       interval: 5s
@@ -51,11 +52,10 @@ services:
     networks:
       - app_network
 
-  db-migrate:
+  db-init:
     image: postgres:17
-    container_name: db_migrate
+    container_name: db_init
     restart: "no"
-    working_dir: /migrate
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
@@ -63,10 +63,12 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-root}
       DB_NAME: ${DB_NAME:-wms_blockchain_db}
       DB_CONTAINER: ""
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-debezium}
     volumes:
-      - ./wms/migrations:/migrate
-    command: >
-      bash -c "chmod +x migrate.sh && ./migrate.sh"
+      - ./wms/migrations:/wms/migrations:ro
+      - ./deploy/db-init.sh:/db-init.sh:ro
+    entrypoint: ["bash", "/db-init.sh"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,7 +90,7 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -105,6 +107,28 @@ services:
         -Djava.rmi.server.hostname=kafka
     volumes:
       - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "unset KAFKA_OPTS JMX_PORT && /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - app_network
+
+  kafka-init:
+    image: apache/kafka:3.7.0
+    container_name: kafka_init
+    restart: "no"
+    environment:
+      KAFKA_BROKER: kafka:9092
+    volumes:
+      - ./deploy/kafka-init.sh:/kafka-init.sh:ro
+    entrypoint: ["bash", "/kafka-init.sh"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
     networks:
       - app_network
 
@@ -142,9 +166,9 @@ services:
         -Dcom.sun.management.jmxremote.ssl=false
         -Djava.rmi.server.hostname=debezium-connect
     depends_on:
-      kafka:
-        condition: service_started
-      db-migrate:
+      db-init:
+        condition: service_completed_successfully
+      kafka-init:
         condition: service_completed_successfully
     networks:
       - app_network
@@ -197,7 +221,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      db-migrate:
+      db-init:
         condition: service_completed_successfully
     networks:
       - app_network
@@ -240,6 +264,11 @@ services:
       timeout: 10s
       retries: 5
       start_period: 10s
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
     networks:
       - app_network
 
