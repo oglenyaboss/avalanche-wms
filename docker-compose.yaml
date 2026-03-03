@@ -16,8 +16,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ledger-adapter:
-        condition: service_healthy
+      # ledger-adapter:
+      #   condition: service_healthy
       db-init:
         condition: service_completed_successfully
       kafka-init:
@@ -138,6 +138,8 @@ services:
     ports:
       - "8083:8083"
       - "9012:9012"
+    env_file:
+      - .env
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: debezium-connect
@@ -150,6 +152,9 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
 
       ERRORS_DEADLETTERQUEUE_TOPIC_NAME: debezium_dlq
       ERRORS_DEADLETTERQUEUE_TOPIC_REPLICATION_FACTOR: 1
@@ -246,31 +251,31 @@ services:
     networks:
       - app_network
 
-  ledger-adapter:
-    build:
-      context: ./ledger-adapter
-      dockerfile: Dockerfile
-    container_name: ledger-adapter
-    ports:
-      - "8085:8085"
-    environment:
-      PORT: 8085
-      RPC_URL: ${RPC_URL:-http://localhost:8545}
-      PRIVATE_KEY: ${PRIVATE_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
-      CONTRACT_ADDR: ${CONTRACT_ADDR:-0x0000000000000000000000000000000000000000}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 10s
-    depends_on:
-      db-init:
-        condition: service_completed_successfully
-      kafka-init:
-        condition: service_completed_successfully
-    networks:
-      - app_network
+  # ledger-adapter:
+  #   build:
+  #     context: ./ledger-adapter
+  #     dockerfile: Dockerfile
+  #   container_name: ledger-adapter
+  #   ports:
+  #     - "8085:8085"
+  #   environment:
+  #     PORT: 8085
+  #     RPC_URL: ${RPC_URL:-http://localhost:8545}
+  #     PRIVATE_KEY: ${PRIVATE_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+  #     CONTRACT_ADDR: ${CONTRACT_ADDR:-0x0000000000000000000000000000000000000000}
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #     start_period: 10s
+  #   depends_on:
+  #     db-init:
+  #       condition: service_completed_successfully
+  #     kafka-init:
+  #       condition: service_completed_successfully
+  #   networks:
+  #     - app_network
 
 volumes:
   postgres_data:
