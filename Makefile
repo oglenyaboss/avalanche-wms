@@ -1,4 +1,4 @@
-.PHONY: help up down build logs lint test tidy vendor migrate
+.PHONY: help up down build logs lint test tidy vendor init migrate
 
 COMPOSE := docker compose
 
@@ -58,8 +58,11 @@ tidy: tidy-wms tidy-ledger ## Tidy all go.mod
 vendor: vendor-wms vendor-ledger ## Rebuild all vendors
 
 # ── Migrations ──────────────────────────────────────────
-migrate: ## Run database migrations
-	$(COMPOSE) run --rm db-migrate
+init: ## Run database & Kafka init (migrations, seed, topics)
+	$(COMPOSE) run --rm db-init
+
+migrate: ## Run database migrations only (alias for init)
+	$(COMPOSE) run --rm db-init
 
 # ── Pre-commit ──────────────────────────────────────────
 hooks-install: ## Install pre-commit hooks
