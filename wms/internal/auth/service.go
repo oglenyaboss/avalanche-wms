@@ -24,6 +24,7 @@ var (
 	ErrInvalidToken       = errors.New("invalid token")
 	ErrForbidden          = errors.New("forbidden")
 	ErrInvalidInput       = errors.New("invalid input")
+	ErrUserExists         = errors.New("user already exists")
 )
 
 type UserRepository interface {
@@ -130,7 +131,7 @@ func (s *Service) Register(ctx context.Context,
 		return nil, fmt.Errorf("auth.Service.Register: %w", ErrForbidden)
 	}
 
-	if username == "" || password == "" || !isValidRole(role) {
+	if username == "" || !isValidPasswordLength(password) || !isValidRole(role) {
 		return nil, fmt.Errorf("auth.Service.Register: %w", ErrInvalidInput)
 	}
 
@@ -247,4 +248,9 @@ func isValidRole(role domain.UserRole) bool {
 	default:
 		return false
 	}
+}
+
+func isValidPasswordLength(password string) bool {
+	passwordLen := len(password)
+	return passwordLen >= 6 && passwordLen <= 72
 }

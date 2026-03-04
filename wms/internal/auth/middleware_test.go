@@ -40,7 +40,7 @@ func TestAuthMiddlewareValidBearerToken(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
 
-	Middleware(secret)(next).ServeHTTP(rr, req)
+	Middleware([]byte(secret))(next).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", rr.Code)
@@ -68,7 +68,7 @@ func TestAuthMiddlewareMissingAuthorizationHeader(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/private", http.NoBody)
 	rr := httptest.NewRecorder()
 
-	Middleware(secret)(next).ServeHTTP(rr, req)
+	Middleware([]byte(secret))(next).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d", rr.Code)
@@ -101,7 +101,7 @@ func TestAuthMiddlewareInvalidSignature(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
 
-	Middleware(secret)(next).ServeHTTP(rr, req)
+	Middleware([]byte(secret))(next).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d", rr.Code)
@@ -134,7 +134,7 @@ func TestAuthMiddlewareExpiredToken(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
 
-	Middleware(secret)(next).ServeHTTP(rr, req)
+	Middleware([]byte(secret))(next).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d", rr.Code)

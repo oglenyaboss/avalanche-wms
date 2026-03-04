@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,6 +238,50 @@ func TestServiceRegisterFromNonAdmin(t *testing.T) {
 	)
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestServiceRegisterInvalidPasswordLength(t *testing.T) {
+	repo := &mockUserRepo{}
+	svc := NewService(repo, "test-secret", 15*time.Minute, 7*24*time.Hour)
+
+	_, err := svc.Register(
+		context.Background(),
+		domain.UserRoleAdmin,
+		"new-user",
+		"123",
+		domain.UserRoleOperator,
+	)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for short password, got %v", err)
+	}
+
+	longPassword := strings.Repeat("a", 73)
+	_, err = svc.Register(
+		context.Background(),
+		domain.UserRoleAdmin,
+		"new-user-2",
+		longPassword,
+		domain.UserRoleOperator,
+	)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for long password, got %v", err)
+	}
+}
+
+func TestServiceRegisterDuplicateUsername(t *testing.T) {
+	repo := &mockUserRepo{createErr: ErrUserExists}
+	svc := NewService(repo, "test-secret", 15*time.Minute, 7*24*time.Hour)
+
+	_, err := svc.Register(
+		context.Background(),
+		domain.UserRoleAdmin,
+		"existing-user",
+		"password123",
+		domain.UserRoleOperator,
+	)
+	if !errors.Is(err, ErrUserExists) {
+		t.Fatalf("expected ErrUserExists, got %v", err)
 	}
 }
 

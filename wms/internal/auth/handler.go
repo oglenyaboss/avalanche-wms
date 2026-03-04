@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -55,7 +56,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/auth/refresh", h.Refresh).Methods(http.MethodPost)
 	router.Handle(
 		"/auth/register",
-		Middleware(string(h.svc.jwtSecret))(http.HandlerFunc(h.Register)),
+		Middleware(h.svc.jwtSecret)(http.HandlerFunc(h.Register)),
 	).Methods(http.MethodPost)
 }
 
@@ -121,6 +122,9 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrForbidden):
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
+		case errors.Is(err, ErrUserExists):
+			http.Error(w, "user already exists", http.StatusConflict)
+			return
 		case errors.Is(err, ErrInvalidInput):
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -136,7 +140,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func Middleware(jwtSecret string) func(http.Handler) http.Handler {
+func Middleware(jwtSecret []byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tokenString, err := extractBearerToken(r.Header.Get("Authorization"))
@@ -145,7 +149,7 @@ func Middleware(jwtSecret string) func(http.Handler) http.Handler {
 				return
 			}
 
-			claims, err := parseToken(tokenString, []byte(jwtSecret), tokenTypeAccess)
+			claims, err := parseToken(tokenString, jwtSecret, tokenTypeAccess)
 			if err != nil {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
@@ -182,7 +186,7 @@ func UserRoleFromCtx(ctx context.Context) domain.UserRole {
 
 // decodeJSON decodes the JSON body of the request into the provided destination struct.
 // It also disallows unknown fields to prevent silent errors.
-func decodeJSON(r *http.Request, dest interface{}) error {
+func decodeJSON(r *http.Request, dest any) error {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dest); err != nil {
@@ -191,10 +195,12 @@ func decodeJSON(r *http.Request, dest interface{}) error {
 	return nil
 }
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("auth.writeJSON encode: %v", err)
+	}
 }
 
 func extractBearerToken(header string) (string, error) {

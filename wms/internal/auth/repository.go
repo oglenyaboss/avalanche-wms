@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"wms/internal/domain"
@@ -32,6 +34,10 @@ func (r *Repository) CreateUser(ctx context.Context, user *domain.User) error {
 		user.UpdatedAt,
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("auth.Repository.CreateUser: %w", ErrUserExists)
+		}
 		return fmt.Errorf("auth.Repository.CreateUser exec: %w", err)
 	}
 
