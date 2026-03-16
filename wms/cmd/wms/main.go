@@ -24,7 +24,10 @@ import (
 
 func main() {
 	ctx := context.Background()
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("WMS config invalid: %v", err)
+	}
 
 	// PostgreSQL
 	dbPool, err := postgres.NewPool(ctx, cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBName)
