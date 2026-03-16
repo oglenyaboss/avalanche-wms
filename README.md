@@ -72,12 +72,15 @@ cd blockchain_project
 # 2. Скопировать переменные окружения
 cp .env.example .env
 
-# 3. Поднять всё
+# 3. Обязательно заменить JWT_SECRET на уникальный секрет
+# Например: openssl rand -hex 32
+
+# 4. Поднять всё
 make up
 # или
 docker compose up -d
 
-# 4. Проверить статус
+# 5. Проверить статус
 make ps
 ```
 
@@ -98,7 +101,7 @@ make hooks-install # установить pre-commit хуки
 
 | Сервис | URL | Описание |
 |--------|-----|----------|
-| WMS Service | http://localhost:8080 | Основной WMS API |
+| WMS Service | http://localhost:8081 | Основной WMS API |
 | Ledger Adapter | http://localhost:8085 | Блокчейн-мост |
 | Kafka UI | http://localhost:8080 | Просмотр топиков Kafka |
 | Grafana | http://localhost:3000 | Дашборды мониторинга |
@@ -166,6 +169,7 @@ internal/receiving/
 | `DB_USER` | Пользователь PostgreSQL | `root` |
 | `DB_PASSWORD` | Пароль PostgreSQL | `root` |
 | `DB_NAME` | Имя базы данных | `wms_blockchain_db` |
+| `JWT_SECRET` | Секрет подписи JWT для WMS (установить вручную, минимум 32 символа) | — |
 | `RPC_URL` | Avalanche C-Chain RPC | `http://localhost:8545` |
 | `PRIVATE_KEY` | Приватный ключ для транзакций | — |
 | `CONTRACT_ADDR` | Адрес смарт-контракта | — |
