@@ -113,12 +113,18 @@ handler → service → repository
 | `POSTGRES_DB` | Имя базы данных | `wms_blockchain_db` |
 | `KAFKA_BROKER` | Адрес Kafka-брокера | `localhost:9092` |
 | `LEDGER_ADAPTER_URL` | URL ledger-adapter | — |
+| `JWT_SECRET` | Секрет подписи JWT (обязателен, минимум 32 символа) | — |
+| `JWT_ACCESS_TTL` | TTL access token | `15m` |
+| `JWT_REFRESH_TTL` | TTL refresh token | `168h` |
 
 ## Локальная разработка
 
 ```bash
 # Установить зависимости
 go mod download
+
+# Установить JWT_SECRET для локального запуска
+export JWT_SECRET=$(openssl rand -hex 32)
 
 # Собрать
 go build -mod=vendor ./cmd/wms/

@@ -13,6 +13,11 @@ services:
       POSTGRES_DB: ${DB_NAME:-wms_blockchain_db}
       KAFKA_BROKER: kafka:9092
       LEDGER_ADAPTER_URL: http://ledger-adapter:8085
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env or environment}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
+    ports:
+      - "8081:8080"
     depends_on:
       postgres:
         condition: service_healthy
