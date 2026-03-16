@@ -102,6 +102,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
+	actorID := UserIDFromCtx(r.Context())
 	actorRole := UserRoleFromCtx(r.Context())
 
 	var req registerRequest
@@ -112,6 +113,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.svc.Register(
 		r.Context(),
+		actorID,
 		actorRole,
 		req.Username,
 		req.Password,

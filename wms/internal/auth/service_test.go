@@ -198,11 +198,15 @@ func TestServiceRefreshAccessTokenInsteadOfRefresh(t *testing.T) {
 }
 
 func TestServiceRegisterFromAdmin(t *testing.T) {
-	repo := &mockUserRepo{}
+	actor := newActiveUser(domain.UserRoleAdmin)
+	repo := &mockUserRepo{
+		usersByID: map[uuid.UUID]*domain.User{actor.ID: actor},
+	}
 	svc := NewService(repo, "test-secret", 15*time.Minute, 7*24*time.Hour)
 
 	user, err := svc.Register(
 		context.Background(),
+		actor.ID,
 		domain.UserRoleAdmin,
 		"new-operator",
 		"password123",
@@ -231,6 +235,7 @@ func TestServiceRegisterFromNonAdmin(t *testing.T) {
 
 	_, err := svc.Register(
 		context.Background(),
+		uuid.New(),
 		domain.UserRoleOperator,
 		"new-user",
 		"password123",
@@ -242,11 +247,15 @@ func TestServiceRegisterFromNonAdmin(t *testing.T) {
 }
 
 func TestServiceRegisterInvalidPasswordLength(t *testing.T) {
-	repo := &mockUserRepo{}
+	actor := newActiveUser(domain.UserRoleAdmin)
+	repo := &mockUserRepo{
+		usersByID: map[uuid.UUID]*domain.User{actor.ID: actor},
+	}
 	svc := NewService(repo, "test-secret", 15*time.Minute, 7*24*time.Hour)
 
 	_, err := svc.Register(
 		context.Background(),
+		actor.ID,
 		domain.UserRoleAdmin,
 		"new-user",
 		"123",
@@ -259,6 +268,7 @@ func TestServiceRegisterInvalidPasswordLength(t *testing.T) {
 	longPassword := strings.Repeat("a", 73)
 	_, err = svc.Register(
 		context.Background(),
+		actor.ID,
 		domain.UserRoleAdmin,
 		"new-user-2",
 		longPassword,
@@ -270,11 +280,14 @@ func TestServiceRegisterInvalidPasswordLength(t *testing.T) {
 }
 
 func TestServiceRegisterDuplicateUsername(t *testing.T) {
+	actor := newActiveUser(domain.UserRoleAdmin)
 	repo := &mockUserRepo{createErr: ErrUserExists}
+	repo.usersByID = map[uuid.UUID]*domain.User{actor.ID: actor}
 	svc := NewService(repo, "test-secret", 15*time.Minute, 7*24*time.Hour)
 
 	_, err := svc.Register(
 		context.Background(),
+		actor.ID,
 		domain.UserRoleAdmin,
 		"existing-user",
 		"password123",
@@ -282,6 +295,72 @@ func TestServiceRegisterDuplicateUsername(t *testing.T) {
 	)
 	if !errors.Is(err, ErrUserExists) {
 		t.Fatalf("expected ErrUserExists, got %v", err)
+	}
+}
+
+func TestServiceRegisterRejectsMissingActorRecord(t *testing.T) {
+	repo := &mockUserRepo{}
+	svc := NewService(repo, "test-secret", 15*time.Minute, 7*24*time.Hour)
+
+	_, err := svc.Register(
+		context.Background(),
+		uuid.New(),
+		domain.UserRoleAdmin,
+		"new-user",
+		"password123",
+		domain.UserRoleOperator,
+	)
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestServiceRegisterRejectsInactiveActor(t *testing.T) {
+	actor := newActiveUser(domain.UserRoleAdmin)
+	actor.IsActive = false
+	repo := &mockUserRepo{
+		usersByID: map[uuid.UUID]*domain.User{actor.ID: actor},
+	}
+	svc := NewService(repo, "test-secret", 15*time.Minute, 7*24*time.Hour)
+
+	_, err := svc.Register(
+		context.Background(),
+		actor.ID,
+		domain.UserRoleAdmin,
+		"new-user",
+		"password123",
+		domain.UserRoleOperator,
+	)
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestServiceRegisterRejectsNonAdminActorInDB(t *testing.T) {
+	actor := newActiveUser(domain.UserRoleOperator)
+	repo := &mockUserRepo{
+		usersByID: map[uuid.UUID]*domain.User{actor.ID: actor},
+	}
+	svc := NewService(repo, "test-secret", 15*time.Minute, 7*24*time.Hour)
+
+	_, err := svc.Register(
+		context.Background(),
+		actor.ID,
+		domain.UserRoleAdmin,
+		"new-user",
+		"password123",
+		domain.UserRoleCustomer,
+	)
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func newActiveUser(role domain.UserRole) *domain.User {
+	return &domain.User{
+		ID:       uuid.New(),
+		Role:     role,
+		IsActive: true,
 	}
 }
 

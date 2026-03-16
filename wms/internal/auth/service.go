@@ -123,11 +123,24 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 }
 
 func (s *Service) Register(ctx context.Context,
+	actorID uuid.UUID,
 	actorRole domain.UserRole,
 	username, password string,
 	role domain.UserRole,
 ) (*domain.User, error) {
-	if actorRole != domain.UserRoleAdmin {
+	if actorID == uuid.Nil || actorRole != domain.UserRoleAdmin {
+		return nil, fmt.Errorf("auth.Service.Register: %w", ErrForbidden)
+	}
+
+	actor, err := s.repo.GetUserByID(ctx, actorID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("auth.Service.Register: %w", ErrForbidden)
+		}
+		return nil, fmt.Errorf("auth.Service.Register get actor: %w", err)
+	}
+
+	if !actor.IsActive || actor.Role != domain.UserRoleAdmin {
 		return nil, fmt.Errorf("auth.Service.Register: %w", ErrForbidden)
 	}
 
