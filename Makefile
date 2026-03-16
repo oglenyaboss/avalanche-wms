@@ -1,4 +1,4 @@
-.PHONY: help up down build logs lint test tidy vendor migrate
+.PHONY: help up down build logs lint test tidy vendor init migrate
 
 COMPOSE := docker compose
 
@@ -58,8 +58,12 @@ tidy: tidy-wms tidy-ledger ## Tidy all go.mod
 vendor: vendor-wms vendor-ledger ## Rebuild all vendors
 
 # ── Migrations ──────────────────────────────────────────
-migrate: ## Run database migrations
-	$(COMPOSE) run --rm db-migrate
+init: ## Run full infrastructure init (DB migrations + seed + Kafka topics)
+	$(COMPOSE) run --rm db-init
+	$(COMPOSE) run --rm kafka-init
+
+migrate: ## Run database migrations only
+	$(COMPOSE) run --rm db-init bash /wms/migrations/migrate.sh
 
 # ── Pre-commit ──────────────────────────────────────────
 hooks-install: ## Install pre-commit hooks
@@ -67,3 +71,23 @@ hooks-install: ## Install pre-commit hooks
 
 hooks-run: ## Run pre-commit on all files
 	pre-commit run --all-files
+
+# ── Debezium Connector ──────────────────────────────────
+
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
+
+.PHONY: register-connector connector-status delete-connector
+
+register-connector:
+	@curl -X POST http://localhost:8083/connectors \
+  		-H "Content-Type: application/json" \
+  		-d @deploy/debezium/connectors/postgres-connector.json
+
+connector-status:
+	@curl http://localhost:8083/connectors/outbox-connector/status
+
+delete-connector:
+	@curl -X DELETE http://localhost:8083/connectors/outbox-connector
