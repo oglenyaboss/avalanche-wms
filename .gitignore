@@ -43,5 +43,6 @@ temp/
 *.tmp
 *.log
 
-# ── OpenCode (local AI skills) ─────────────────────────
+# ── AI tools (local skills, config) ───────────────────
 .opencode/
+.claude/
