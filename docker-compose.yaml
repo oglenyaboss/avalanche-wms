@@ -49,6 +49,7 @@ services:
       postgres -c wal_level=logical
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./deploy/seed.sql:/deploy/seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-root} -d ${DB_NAME:-wms_blockchain_db}"]
       interval: 5s
@@ -70,9 +71,11 @@ services:
       DB_CONTAINER: ""
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-debezium}
+      SEED_DATA: ${SEED_DATA:-true}
     volumes:
       - ./wms/migrations:/wms/migrations:ro
       - ./deploy/db-init.sh:/db-init.sh:ro
+      - ./deploy/seed.sql:/deploy/seed.sql:ro
     entrypoint: ["bash", "/db-init.sh"]
     depends_on:
       postgres:
