@@ -68,40 +68,145 @@ apply_file() {
   run_psql_file "$file"
 }
 
-shopt -s nullglob
-up_files=()
-while IFS= read -r file; do
-  up_files+=("$file")
-done < <(ls -1 "${MIGRATIONS_DIR}"/*.up.sql 2>/dev/null | sort)
+# Показать подсказку по режимам запуска скрипта.
+usage() {
+  cat <<EOF
+Usage:
+  $(basename "$0") [up]
+  $(basename "$0") down <version>
+  $(basename "$0") down-last
+EOF
+}
 
-if ((${#up_files[@]} == 0)); then
-  echo "No migrations found in ${MIGRATIONS_DIR}"
-  exit 1
-fi
+# Найти down-файл по номеру версии (например, 5 -> 0005_*.down.sql).
+find_down_file_by_version() {
+  local target_version="$1"
+  local file
+  local base
+  local parsed
 
-# Обработать up-миграции по очереди: разобрать версию -> проверить применение -> выполнить, если не применена
-for file in "${up_files[@]}"; do
-  base="$(basename "$file")"
-  version="${base%%_*}"
-  version="${version%%.*}"
-  if [[ ! "$version" =~ ^[0-9]+$ ]]; then
-    echo "Skip (cannot parse version): ${base}"
-    continue
-  fi
+  shopt -s nullglob
+  for file in "${MIGRATIONS_DIR}"/*.down.sql; do
+    base="$(basename "$file")"
+    parsed="${base%%_*}"
+    if [[ "$parsed" =~ ^[0-9]+$ ]] && ((10#${parsed} == target_version)); then
+      echo "$file"
+      return 0
+    fi
+  done
 
-  # При первом запуске schema_migrations может еще не существовать: выполняем текущую миграцию (обычно 0001_init.up.sql)
+  return 1
+}
+
+latest_applied_version() {
+  # Получить последнюю примененную версию из schema_migrations.
   if [[ "$(has_migrations_table)" != "t" ]]; then
+    return 1
+  fi
+
+  run_psql -Atc "SELECT max(version) FROM public.schema_migrations;" 2>/dev/null | tail -n 1
+}
+
+# Применить все up-миграции по порядку, пропуская уже примененные.
+run_up_migrations() {
+  shopt -s nullglob
+  local up_files=()
+  local file
+  local base
+  local version
+
+  while IFS= read -r file; do
+    up_files+=("$file")
+  done < <(ls -1 "${MIGRATIONS_DIR}"/*.up.sql 2>/dev/null | sort)
+
+  if ((${#up_files[@]} == 0)); then
+    echo "No migrations found in ${MIGRATIONS_DIR}"
+    exit 1
+  fi
+
+  # Обработать up-миграции по очереди: разобрать версию -> проверить применение -> выполнить, если не применена
+  for file in "${up_files[@]}"; do
+    base="$(basename "$file")"
+    version="${base%%_*}"
+    version="${version%%.*}"
+    if [[ ! "$version" =~ ^[0-9]+$ ]]; then
+      echo "Skip (cannot parse version): ${base}"
+      continue
+    fi
+
+    # При первом запуске schema_migrations может еще не существовать: выполняем текущую миграцию (обычно 0001_init.up.sql)
+    if [[ "$(has_migrations_table)" != "t" ]]; then
+      apply_file "$file"
+      continue
+    fi
+
+    # Если уже применена (есть запись в schema_migrations) — пропустить; иначе выполнить
+    if [[ "$(is_applied "$version")" == "t" ]]; then
+      echo "Skip (already applied): ${base}"
+      continue
+    fi
+
     apply_file "$file"
-    continue
+  done
+}
+
+run_down_migration() {
+  # Откатить конкретную версию, если она применена и есть соответствующий down-файл.
+  local version="$1"
+  local down_file
+
+  if [[ "$(has_migrations_table)" != "t" ]]; then
+    echo "Cannot rollback: public.schema_migrations does not exist."
+    exit 1
   fi
 
-  # Если уже применена (есть запись в schema_migrations) — пропустить; иначе выполнить
-  if [[ "$(is_applied "$version")" == "t" ]]; then
-    echo "Skip (already applied): ${base}"
-    continue
+  if ! down_file="$(find_down_file_by_version "$version")"; then
+    echo "Rollback file not found for version ${version} in ${MIGRATIONS_DIR}."
+    exit 1
   fi
 
-  apply_file "$file"
-done
+  if [[ "$(is_applied "$version")" != "t" ]]; then
+    echo "Version ${version} is not marked as applied in public.schema_migrations."
+    exit 1
+  fi
+
+  echo "Rolling back: $(basename "$down_file")"
+  run_psql_file "$down_file"
+}
+
+MODE="${1:-up}"
+
+case "${MODE}" in
+  up)
+    run_up_migrations
+    ;;
+  down)
+    if (($# != 2)); then
+      usage
+      exit 1
+    fi
+    if [[ ! "${2}" =~ ^[0-9]+$ ]]; then
+      echo "Invalid version: ${2}. Expected integer."
+      exit 1
+    fi
+    run_down_migration "${2}"
+    ;;
+  down-last)
+    if (($# != 1)); then
+      usage
+      exit 1
+    fi
+    last_version="$(latest_applied_version || true)"
+    if [[ -z "${last_version}" || "${last_version}" == "NULL" ]]; then
+      echo "No applied migrations found to roll back."
+      exit 1
+    fi
+    run_down_migration "${last_version}"
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
 
 echo "Done."
