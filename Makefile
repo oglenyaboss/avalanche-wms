@@ -1,4 +1,4 @@
-.PHONY: help up down build logs lint test tidy vendor init migrate
+.PHONY: help up down build logs lint test tidy vendor init migrate seed
 
 COMPOSE := docker compose
 
@@ -64,6 +64,9 @@ init: ## Run full infrastructure init (DB migrations + seed + Kafka topics)
 
 migrate: ## Run database migrations only
 	$(COMPOSE) run --rm db-init bash /wms/migrations/migrate.sh
+
+seed: ## Re-seed development data
+	$(COMPOSE) exec postgres psql -U $${DB_USER:-root} -d $${DB_NAME:-wms_blockchain_db} -f /deploy/seed.sql
 
 # ── Pre-commit ──────────────────────────────────────────
 hooks-install: ## Install pre-commit hooks

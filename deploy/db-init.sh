@@ -9,6 +9,7 @@ DB_PASSWORD="${DB_PASSWORD:-root}"
 DB_NAME="${DB_NAME:-wms_blockchain_db}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
 DEBEZIUM_PASSWORD="${DEBEZIUM_PASSWORD:-debezium}"
+SEED_DATA="${SEED_DATA:-true}"
 
 export PGPASSWORD="${DB_PASSWORD}"
 
@@ -18,11 +19,11 @@ run_sql() {
 }
 
 # ── Step 1: Migrations ─────────────────────────────────
-echo "=== Step 1/4: Running database migrations ==="
+echo "=== Step 1/5: Running database migrations ==="
 bash /wms/migrations/migrate.sh
 
 # ── Step 2: Debezium replication user ──────────────────
-echo "=== Step 2/4: Creating debezium replication user ==="
+echo "=== Step 2/5: Creating debezium replication user ==="
 if ! run_sql -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'debezium'" | grep -q 1; then
   run_sql -v debezium_pass="${DEBEZIUM_PASSWORD}" <<'EOSQL'
 CREATE ROLE debezium WITH LOGIN REPLICATION PASSWORD :'debezium_pass';
@@ -35,7 +36,7 @@ run_sql -c "GRANT SELECT ON TABLE public.outbox_events TO debezium;"
 echo "  debezium privileges granted (outbox_events only)"
 
 # ── Step 3: Outbox publication ─────────────────────────
-echo "=== Step 3/4: Creating outbox publication ==="
+echo "=== Step 3/5: Creating outbox publication ==="
 if ! run_sql -tAc "SELECT 1 FROM pg_publication WHERE pubname = 'outbox_publication'" | grep -q 1; then
   run_sql -c "CREATE PUBLICATION outbox_publication FOR TABLE public.outbox_events;"
   echo "  outbox_publication created"
@@ -45,7 +46,7 @@ fi
 echo "  outbox_publication ready"
 
 # ── Step 4: Seed admin user ────────────────────────────
-echo "=== Step 4/4: Seeding admin user ==="
+echo "=== Step 4/5: Seeding admin user ==="
 run_sql -v admin_pass="${ADMIN_PASSWORD}" <<'EOSQL'
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 INSERT INTO public.users (user_id, username, password_hash, role, is_active, created_at, updated_at)
@@ -60,5 +61,15 @@ VALUES (
 ) ON CONFLICT (username) DO NOTHING;
 EOSQL
 echo "  admin user ready"
+
+
+# ── Step 5: Seed dev data ──────────────────────────────
+if [ "${SEED_DATA}" != "false" ]; then
+  echo "=== Step 5/5: Seeding dev data ==="
+  run_sql -f /deploy/seed.sql
+  echo "  dev data seeded"
+else
+  echo "=== Step 5/5: Skipping seed (SEED_DATA=false) ==="
+fi
 
 echo "=== All init steps completed successfully ==="
