@@ -43,6 +43,9 @@ temp/
 *.tmp
 *.log
 
+# ── Secrets (tokens, keys) ────────────────────────────
+.gitlab-token
+
 # ── AI tools (local skills, config) ───────────────────
 .opencode/
 .claude/
