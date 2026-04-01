@@ -60,7 +60,7 @@ func main() {
 	// Module wiring: repositories → services → handlers
 	receivingRepo := receiving.NewRepository(dbPool)
 	receivingSvc := receiving.NewService(receivingRepo)
-	_ = receiving.NewHandler(receivingSvc)
+	receivingHandler := receiving.NewHandler(receivingSvc)
 
 	assemblyRepo := assembly.NewRepository(dbPool)
 	assemblySvc := assembly.NewService(assemblyRepo)
@@ -82,6 +82,9 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
 	authHandler.RegisterRoutes(r)
+	receivingRouter := r.PathPrefix("/receiving").Subrouter()
+	receivingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	receivingHandler.RegisterRoutes(receivingRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
