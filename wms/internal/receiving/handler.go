@@ -134,7 +134,7 @@ func (h *Handler) AcceptShipment(w http.ResponseWriter, r *http.Request) {
 }
 
 // mapServiceError maps internal service errors to appropriate HTTP status codes and API error responses.
-func mapServiceError(err error) (status int, code string, message string) {
+func mapServiceError(err error) (status int, code, message string) {
 	switch {
 	case errors.Is(err, ErrTTNNotFound):
 		return http.StatusNotFound, "TTN_NOT_FOUND", "TTN не найдена"
