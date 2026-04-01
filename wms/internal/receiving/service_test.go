@@ -33,7 +33,7 @@ type mockReceivingRepo struct {
 	countTotalErr                error
 	countByStatus                map[string]int
 	countByStatusErr             error
-	insertReceivingGateLogs      []ReceivingGateLogParams
+	insertReceivingGateLogs      []GateLogParams
 	insertReceivingGateLogErr    error
 	getCargoplaceByShipmentID    uuid.UUID
 	getCargoplaceByShipmentCode  string
@@ -134,8 +134,8 @@ func (m *mockReceivingRepo) CountCargoplacesByStatus(_ context.Context, shipment
 	return m.countByStatus[status], nil
 }
 
-func (m *mockReceivingRepo) InsertReceivingGateLog(_ context.Context, params ReceivingGateLogParams) error {
-	m.insertReceivingGateLogs = append(m.insertReceivingGateLogs, params)
+func (m *mockReceivingRepo) InsertReceivingGateLog(_ context.Context, params *GateLogParams) error {
+	m.insertReceivingGateLogs = append(m.insertReceivingGateLogs, *params)
 	if m.insertReceivingGateLogErr != nil {
 		return m.insertReceivingGateLogErr
 	}

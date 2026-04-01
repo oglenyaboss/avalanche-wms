@@ -48,7 +48,7 @@ type receivingRepository interface {
 	MarkExpectedAsNotReceived(ctx context.Context, shipmentID uuid.UUID, notReceivedStatus string) error
 	CountCargoplaces(ctx context.Context, shipmentID uuid.UUID) (int, error)
 	CountCargoplacesByStatus(ctx context.Context, shipmentID uuid.UUID, status string) (int, error)
-	InsertReceivingGateLog(ctx context.Context, params ReceivingGateLogParams) error
+	InsertReceivingGateLog(ctx context.Context, params *GateLogParams) error
 }
 
 func NewService(repo receivingRepository) *Service {
@@ -116,7 +116,7 @@ func (s *Service) ScanTTN(ctx context.Context, operatorID uuid.UUID, ttnCode str
 		shipment.Status = shipmentStatusGateInProgress
 	}
 
-	if err := s.repo.InsertReceivingGateLog(ctx, ReceivingGateLogParams{
+	if err := s.repo.InsertReceivingGateLog(ctx, &GateLogParams{
 		TTNCode:    &shipment.TTNCode,
 		ShipmentID: &shipment.ShipmentID,
 		OperatorID: operatorID,
@@ -194,7 +194,7 @@ func (s *Service) ScanCargoplace(
 		return nil, fmt.Errorf("receiving.Service.ScanCargoplace update cargoplace: %w", err)
 	}
 
-	if err := s.repo.InsertReceivingGateLog(ctx, ReceivingGateLogParams{
+	if err := s.repo.InsertReceivingGateLog(ctx, &GateLogParams{
 		TTNCode:        &shipment.TTNCode,
 		CargoplaceCode: &cp.CargoplaceCode,
 		ShipmentID:     &shipment.ShipmentID,
@@ -252,7 +252,7 @@ func (s *Service) AcceptShipment(
 		return nil, fmt.Errorf("receiving.Service.AcceptShipment close shipment: %w", err)
 	}
 
-	if err := s.repo.InsertReceivingGateLog(ctx, ReceivingGateLogParams{
+	if err := s.repo.InsertReceivingGateLog(ctx, &GateLogParams{
 		TTNCode:    &shipment.TTNCode,
 		ShipmentID: &shipmentID,
 		OperatorID: operatorID,
@@ -297,7 +297,7 @@ func (s *Service) tryAutoCloseShipment(
 		return fmt.Errorf("receiving.Service.tryAutoCloseShipment close shipment: %w", err)
 	}
 
-	if err := s.repo.InsertReceivingGateLog(ctx, ReceivingGateLogParams{
+	if err := s.repo.InsertReceivingGateLog(ctx, &GateLogParams{
 		TTNCode:    &ttnCode,
 		ShipmentID: &shipmentID,
 		OperatorID: operatorID,

@@ -21,7 +21,7 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
-type ReceivingGateLogParams struct {
+type GateLogParams struct {
 	TTNCode        *string
 	CargoplaceCode *string
 	ShipmentID     *uuid.UUID
@@ -232,7 +232,7 @@ func (r *Repository) CountCargoplacesByStatus(ctx context.Context, shipmentID uu
 	return total, nil
 }
 
-func (r *Repository) InsertReceivingGateLog(ctx context.Context, params ReceivingGateLogParams) error {
+func (r *Repository) InsertReceivingGateLog(ctx context.Context, params *GateLogParams) error {
 	const query = `
 		INSERT INTO wms_ops.receiving_gate (
 			ttn_code,
