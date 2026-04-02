@@ -870,7 +870,7 @@ func isBufferBin(bin *domain.Bin) bool {
 	return strings.Contains(section, "BUFFER")
 }
 
-func payloadHashForReceiving(productID uuid.UUID, cargoplaceID uuid.UUID) (string, error) {
+func payloadHashForReceiving(productID, cargoplaceID uuid.UUID) (string, error) {
 	payload := struct {
 		ProductID     uuid.UUID `json:"product_id"`
 		CargoplaceID  uuid.UUID `json:"cargoplace_id"`

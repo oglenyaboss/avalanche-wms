@@ -366,8 +366,8 @@ func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
-// CloseCargoplace finalizes the receiving process for a cargoplace, 
-// calculating the summary of received products vs expected, and updating the system state to reflect the completion of processing for that cargoplace.
+// CloseCargoplace finalizes the receiving process for a cargoplace,
+// returning the received-vs-expected summary and closing the cargoplace.
 func (h *Handler) CloseCargoplace(w http.ResponseWriter, r *http.Request) {
 	operatorID, ok := requireOperator(w, r)
 	if !ok {
