@@ -20,12 +20,17 @@ type mockReceivingRepo struct {
 	listCargoplacesErr           error
 	cargoplace                   *domain.Cargoplace
 	cargoplaceErr                error
+	cargoplaceByID               *domain.Cargoplace
+	cargoplaceByIDErr            error
 	updateShipmentStatusCalls    []string
 	updateShipmentStatusErr      error
 	updateCargoplaceID           uuid.UUID
 	updateCargoplaceStatus       string
 	updateCargoplaceReceivedAt   time.Time
 	updateCargoplaceErr          error
+	updateCargoplaceStatusID     uuid.UUID
+	updateCargoplaceStatusValue  string
+	updateCargoplaceStatusErr    error
 	markNotReceivedShipmentID    uuid.UUID
 	markNotReceivedStatus        string
 	markNotReceivedErr           error
@@ -33,8 +38,36 @@ type mockReceivingRepo struct {
 	countTotalErr                error
 	countByStatus                map[string]int
 	countByStatusErr             error
+	expectedSKUs                 []ExpectedSKU
+	expectedSKUsErr              error
+	box                          *domain.Box
+	boxErr                       error
+	boxByBarcode                 *domain.Box
+	boxByBarcodeErr              error
+	upsertedBox                  *domain.Box
+	upsertBoxErr                 error
+	upsertBoxCargoplaceID        uuid.UUID
+	upsertBoxBarcode             string
+	upsertBoxStatus              string
+	updateBoxStatusID            uuid.UUID
+	updateBoxStatusValue         string
+	updateBoxStatusErr           error
+	productsInBox                int
+	productsInBoxErr             error
+	skuByBarcode                 *domain.SKU
+	skuByBarcodeErr              error
+	skuByID                      *domain.SKU
+	skuByIDErr                   error
+	insertedProduct              *domain.Product
+	insertProductErr             error
+	productsInCargoplace         int
+	productsInCargoplaceErr      error
+	expectedItemsInCargoplace    int
+	expectedItemsInCargoplaceErr error
 	insertReceivingGateLogs      []GateLogParams
 	insertReceivingGateLogErr    error
+	insertReceivingTableLogs     []TableLogParams
+	insertReceivingTableLogErr   error
 	getCargoplaceByShipmentID    uuid.UUID
 	getCargoplaceByShipmentCode  string
 	listCargoplacesByShipmentID  uuid.UUID
@@ -81,6 +114,13 @@ func (m *mockReceivingRepo) GetCargoplaceByShipmentAndCode(
 	return m.cargoplace, nil
 }
 
+func (m *mockReceivingRepo) GetCargoplaceByID(_ context.Context, _ uuid.UUID) (*domain.Cargoplace, error) {
+	if m.cargoplaceByIDErr != nil {
+		return nil, m.cargoplaceByIDErr
+	}
+	return m.cargoplaceByID, nil
+}
+
 func (m *mockReceivingRepo) UpdateShipmentStatus(_ context.Context, shipmentID uuid.UUID, status string) error {
 	m.updateShipmentStatusCalls = append(m.updateShipmentStatusCalls, shipmentID.String()+":"+status)
 	if m.updateShipmentStatusErr != nil {
@@ -100,6 +140,15 @@ func (m *mockReceivingRepo) UpdateCargoplaceReceivedAtGate(
 	m.updateCargoplaceReceivedAt = receivedAt
 	if m.updateCargoplaceErr != nil {
 		return m.updateCargoplaceErr
+	}
+	return nil
+}
+
+func (m *mockReceivingRepo) UpdateCargoplaceStatus(_ context.Context, cargoplaceID uuid.UUID, status string) error {
+	m.updateCargoplaceStatusID = cargoplaceID
+	m.updateCargoplaceStatusValue = status
+	if m.updateCargoplaceStatusErr != nil {
+		return m.updateCargoplaceStatusErr
 	}
 	return nil
 }
@@ -134,10 +183,105 @@ func (m *mockReceivingRepo) CountCargoplacesByStatus(_ context.Context, shipment
 	return m.countByStatus[status], nil
 }
 
+func (m *mockReceivingRepo) ListExpectedSKUsByCargoplace(_ context.Context, _ uuid.UUID) ([]ExpectedSKU, error) {
+	if m.expectedSKUsErr != nil {
+		return nil, m.expectedSKUsErr
+	}
+	return m.expectedSKUs, nil
+}
+
+func (m *mockReceivingRepo) UpsertBox(_ context.Context, cargoplaceID uuid.UUID, boxBarcode string, status string) (*domain.Box, error) {
+	m.upsertBoxCargoplaceID = cargoplaceID
+	m.upsertBoxBarcode = boxBarcode
+	m.upsertBoxStatus = status
+	if m.upsertBoxErr != nil {
+		return nil, m.upsertBoxErr
+	}
+	return m.upsertedBox, nil
+}
+
+func (m *mockReceivingRepo) GetBoxByID(_ context.Context, _ uuid.UUID) (*domain.Box, error) {
+	if m.boxErr != nil {
+		return nil, m.boxErr
+	}
+	return m.box, nil
+}
+
+func (m *mockReceivingRepo) GetBoxByCargoplaceAndBarcode(
+	_ context.Context,
+	_ uuid.UUID,
+	_ string,
+) (*domain.Box, error) {
+	if m.boxByBarcodeErr != nil {
+		return nil, m.boxByBarcodeErr
+	}
+	return m.boxByBarcode, nil
+}
+
+func (m *mockReceivingRepo) UpdateBoxStatus(_ context.Context, boxID uuid.UUID, status string) error {
+	m.updateBoxStatusID = boxID
+	m.updateBoxStatusValue = status
+	if m.updateBoxStatusErr != nil {
+		return m.updateBoxStatusErr
+	}
+	return nil
+}
+
+func (m *mockReceivingRepo) CountProductsByBox(_ context.Context, _ uuid.UUID) (int, error) {
+	if m.productsInBoxErr != nil {
+		return 0, m.productsInBoxErr
+	}
+	return m.productsInBox, nil
+}
+
+func (m *mockReceivingRepo) GetSKUByBarcode(_ context.Context, _ string) (*domain.SKU, error) {
+	if m.skuByBarcodeErr != nil {
+		return nil, m.skuByBarcodeErr
+	}
+	return m.skuByBarcode, nil
+}
+
+func (m *mockReceivingRepo) GetSKUByID(_ context.Context, _ uuid.UUID) (*domain.SKU, error) {
+	if m.skuByIDErr != nil {
+		return nil, m.skuByIDErr
+	}
+	return m.skuByID, nil
+}
+
+func (m *mockReceivingRepo) InsertProduct(_ context.Context, product *domain.Product) error {
+	m.insertedProduct = product
+	if m.insertProductErr != nil {
+		return m.insertProductErr
+	}
+	return nil
+}
+
+func (m *mockReceivingRepo) CountProductsByCargoplace(_ context.Context, _ uuid.UUID) (int, error) {
+	if m.productsInCargoplaceErr != nil {
+		return 0, m.productsInCargoplaceErr
+	}
+	return m.productsInCargoplace, nil
+}
+
+func (m *mockReceivingRepo) CountExpectedItemsByCargoplace(_ context.Context, _ uuid.UUID) (int, error) {
+	if m.expectedItemsInCargoplaceErr != nil {
+		return 0, m.expectedItemsInCargoplaceErr
+	}
+	return m.expectedItemsInCargoplace, nil
+}
+
 func (m *mockReceivingRepo) InsertReceivingGateLog(_ context.Context, params *GateLogParams) error {
 	m.insertReceivingGateLogs = append(m.insertReceivingGateLogs, *params)
 	if m.insertReceivingGateLogErr != nil {
 		return m.insertReceivingGateLogErr
+	}
+	return nil
+}
+
+func (m *mockReceivingRepo) InsertReceivingTableLog(_ context.Context, params *TableLogParams) error {
+	m.insertReceivingTableLogs = append(m.insertReceivingTableLogs, *params)
+	if m.insertReceivingTableLogErr != nil {
+		return m.insertReceivingTableLogErr
 	}
 	return nil
 }
@@ -333,5 +477,192 @@ func TestServiceAcceptShipmentRejectsShipmentOutsideGateProgress(t *testing.T) {
 	_, err := NewService(repo).AcceptShipment(context.Background(), uuid.New(), repo.shipmentByID.ShipmentID)
 	if !errors.Is(err, ErrShipmentNotInProgress) {
 		t.Fatalf("expected ErrShipmentNotInProgress, got %v", err)
+	}
+}
+
+func TestServiceScanTableCargoplaceSuccess(t *testing.T) {
+	cargoplaceID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID:   cargoplaceID,
+			CargoplaceCode: "CP-001",
+			Status:         cargoplaceStatusReceivedAtGate,
+		},
+		expectedSKUs: []ExpectedSKU{
+			{SKUID: uuid.New(), SKUName: "SKU-A", ExpectedQty: 2},
+			{SKUID: uuid.New(), SKUName: "SKU-B", ExpectedQty: 3},
+		},
+	}
+
+	result, err := NewService(repo).ScanTableCargoplace(context.Background(), uuid.New(), cargoplaceID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Status != cargoplaceStatusTableInProgress {
+		t.Fatalf("expected status %s, got %s", cargoplaceStatusTableInProgress, result.Status)
+	}
+	if result.TotalExpected != 5 {
+		t.Fatalf("expected total_expected 5, got %d", result.TotalExpected)
+	}
+	if repo.updateCargoplaceStatusID != cargoplaceID || repo.updateCargoplaceStatusValue != cargoplaceStatusTableInProgress {
+		t.Fatalf("unexpected cargoplace status update: %+v", repo)
+	}
+	if len(repo.insertReceivingTableLogs) != 1 || repo.insertReceivingTableLogs[0].Action != "SCAN_CARGOPLACE" {
+		t.Fatalf("expected SCAN_CARGOPLACE log, got %+v", repo.insertReceivingTableLogs)
+	}
+}
+
+func TestServiceScanSKURejectsClosedBox(t *testing.T) {
+	cargoplaceID := uuid.New()
+	boxID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableInProgress,
+		},
+		box: &domain.Box{
+			BoxID:        boxID,
+			CargoplaceID: cargoplaceID,
+			Status:       boxStatusClosed,
+		},
+	}
+
+	_, err := NewService(repo).ScanSKU(context.Background(), uuid.New(), cargoplaceID, boxID, "4607036430014")
+	if !errors.Is(err, ErrBoxNotOpen) {
+		t.Fatalf("expected ErrBoxNotOpen, got %v", err)
+	}
+}
+
+func TestServiceScanBoxRejectsClosedExistingBox(t *testing.T) {
+	cargoplaceID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableInProgress,
+		},
+		boxByBarcode: &domain.Box{
+			BoxID:        uuid.New(),
+			CargoplaceID: cargoplaceID,
+			BoxBarcode:   "BOX-TABLE-001",
+			Status:       boxStatusClosed,
+		},
+	}
+
+	_, err := NewService(repo).ScanBox(context.Background(), uuid.New(), cargoplaceID, "BOX-TABLE-001")
+	if !errors.Is(err, ErrBoxNotOpen) {
+		t.Fatalf("expected ErrBoxNotOpen, got %v", err)
+	}
+}
+
+func TestServiceScanQRSuccess(t *testing.T) {
+	cargoplaceID := uuid.New()
+	shipmentID := uuid.New()
+	boxID := uuid.New()
+	skuID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			ShipmentID:   shipmentID,
+			Status:       cargoplaceStatusTableInProgress,
+		},
+		box: &domain.Box{
+			BoxID:        boxID,
+			CargoplaceID: cargoplaceID,
+			Status:       boxStatusOpen,
+		},
+		skuByID: &domain.SKU{
+			SKUID: skuID,
+			Name:  "Ноутбук Lenovo X1",
+		},
+		productsInCargoplace:      5,
+		expectedItemsInCargoplace: 12,
+	}
+
+	result, err := NewService(repo).ScanQR(context.Background(), uuid.New(), cargoplaceID, boxID, skuID, "WMS-QR-001")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if repo.insertedProduct == nil {
+		t.Fatal("expected product to be inserted")
+	}
+	if repo.insertedProduct.ShipmentID != shipmentID || repo.insertedProduct.CargoplaceID != cargoplaceID {
+		t.Fatalf("unexpected product payload: %+v", repo.insertedProduct)
+	}
+	if result.Status != domain.ProductStatusReceived {
+		t.Fatalf("expected status RECEIVED, got %s", result.Status)
+	}
+	if result.Progress.ReceivedInCargoplace != 5 || result.Progress.ExpectedInCargoplace != 12 {
+		t.Fatalf("unexpected progress: %+v", result.Progress)
+	}
+	if len(repo.insertReceivingTableLogs) != 1 || repo.insertReceivingTableLogs[0].Action != "SCAN_QR" {
+		t.Fatalf("expected SCAN_QR log, got %+v", repo.insertReceivingTableLogs)
+	}
+}
+
+func TestServiceCloseBoxSuccess(t *testing.T) {
+	boxID := uuid.New()
+	cargoplaceID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableInProgress,
+		},
+		box: &domain.Box{
+			BoxID:        boxID,
+			CargoplaceID: cargoplaceID,
+			Status:       boxStatusOpen,
+		},
+		productsInBox: 3,
+	}
+
+	result, err := NewService(repo).CloseBox(context.Background(), uuid.New(), boxID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if repo.updateBoxStatusID != boxID || repo.updateBoxStatusValue != boxStatusClosed {
+		t.Fatalf("unexpected box update: %+v", repo)
+	}
+	if result.ProductsInBox != 3 || result.Status != boxStatusClosed {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(repo.insertReceivingTableLogs) != 1 || repo.insertReceivingTableLogs[0].Action != "CLOSE_BOX" {
+		t.Fatalf("expected CLOSE_BOX log, got %+v", repo.insertReceivingTableLogs)
+	}
+}
+
+func TestServiceCloseBoxRejectsClosedBox(t *testing.T) {
+	boxID := uuid.New()
+	repo := &mockReceivingRepo{
+		box: &domain.Box{
+			BoxID:        boxID,
+			CargoplaceID: uuid.New(),
+			Status:       boxStatusClosed,
+		},
+	}
+
+	_, err := NewService(repo).CloseBox(context.Background(), uuid.New(), boxID)
+	if !errors.Is(err, ErrBoxNotOpen) {
+		t.Fatalf("expected ErrBoxNotOpen, got %v", err)
+	}
+}
+
+func TestServiceCloseBoxRejectsCargoplaceOutsideProgress(t *testing.T) {
+	boxID := uuid.New()
+	cargoplaceID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableClosed,
+		},
+		box: &domain.Box{
+			BoxID:        boxID,
+			CargoplaceID: cargoplaceID,
+			Status:       boxStatusOpen,
+		},
+	}
+
+	_, err := NewService(repo).CloseBox(context.Background(), uuid.New(), boxID)
+	if !errors.Is(err, ErrCargoplaceNotInProgress) {
+		t.Fatalf("expected ErrCargoplaceNotInProgress, got %v", err)
 	}
 }

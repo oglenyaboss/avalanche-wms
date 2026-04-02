@@ -165,6 +165,59 @@ JOIN wms_inventory.cargoplaces c
 JOIN wms_inventory.skus s ON s.name = v.sku_name
 ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
+-- 8.5) Dedicated receiving-table happy-path dataset
+-- This cargoplace starts at RECEIVED_AT_GATE and has no boxes/products yet,
+-- so the full table flow can be tested from scan-cargoplace to close-box.
+INSERT INTO wms_inventory.inbound_shipments (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  w.warehouse_id,
+  'ТТН-2026-TABLE-001',
+  'GATE_IN_PROGRESS',
+  now(),
+  now()
+FROM wms_inventory.warehouses w
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT (ttn_code) DO NOTHING;
+
+INSERT INTO wms_inventory.cargoplaces (
+  cargoplace_id,
+  shipment_id,
+  cargoplace_code,
+  status,
+  received_at_gate_at,
+  created_at,
+  updated_at
+)
+SELECT
+  gen_random_uuid(),
+  sh.shipment_id,
+  'CP-TABLE-001',
+  'RECEIVED_AT_GATE',
+  now() - interval '15 minutes',
+  now(),
+  now()
+FROM wms_inventory.inbound_shipments sh
+WHERE sh.ttn_code = 'ТТН-2026-TABLE-001'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO wms_inventory.expected_cargoplace_skus (cargoplace_id, sku_id, expected_qty)
+SELECT
+  c.cargoplace_id,
+  s.sku_id,
+  v.expected_qty
+FROM (
+  VALUES
+    ('CP-TABLE-001', 'Кроссовки Nike Air Max 90', 2),
+    ('CP-TABLE-001', 'Футболка Adidas Originals', 1)
+) AS v(cargoplace_code, sku_name, expected_qty)
+JOIN wms_inventory.inbound_shipments sh ON sh.ttn_code = 'ТТН-2026-TABLE-001'
+JOIN wms_inventory.cargoplaces c
+  ON c.shipment_id = sh.shipment_id
+ AND c.cargoplace_code = v.cargoplace_code
+JOIN wms_inventory.skus s ON s.name = v.sku_name
+ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
+
 -- 9) Orders (customer = existing admin user)
 INSERT INTO wms_inventory.orders (order_id, external_order_no, customer_id, warehouse_id, status, created_at, updated_at)
 SELECT

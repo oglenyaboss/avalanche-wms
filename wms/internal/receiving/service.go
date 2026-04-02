@@ -16,18 +16,32 @@ const (
 	shipmentStatusGateInProgress = "GATE_IN_PROGRESS"
 	shipmentStatusGateClosed     = "GATE_CLOSED"
 
-	cargoplaceStatusExpected       = "EXPECTED"
-	cargoplaceStatusReceivedAtGate = "RECEIVED_AT_GATE"
-	cargoplaceStatusNotReceived    = "NOT_RECEIVED"
+	cargoplaceStatusExpected        = "EXPECTED"
+	cargoplaceStatusReceivedAtGate  = "RECEIVED_AT_GATE"
+	cargoplaceStatusNotReceived     = "NOT_RECEIVED"
+	cargoplaceStatusTableInProgress = "TABLE_IN_PROGRESS"
+	cargoplaceStatusTableClosed     = "TABLE_CLOSED"
+
+	boxStatusOpen   = "OPEN"
+	boxStatusClosed = "CLOSED"
 )
 
 var (
-	ErrTTNNotFound              = errors.New("TTN_NOT_FOUND")
-	ErrShipmentAlreadyClosed    = errors.New("SHIPMENT_ALREADY_CLOSED")
-	ErrShipmentNotInProgress    = errors.New("SHIPMENT_NOT_IN_PROGRESS")
-	ErrCargoplaceNotInShipment  = errors.New("CARGOPLACE_NOT_IN_SHIPMENT")
-	ErrCargoplaceAlreadyReceive = errors.New("CARGOPLACE_ALREADY_RECEIVED")
-	ErrInvalidInput             = errors.New("INVALID_INPUT")
+	ErrTTNNotFound                 = errors.New("TTN_NOT_FOUND")
+	ErrShipmentAlreadyClosed       = errors.New("SHIPMENT_ALREADY_CLOSED")
+	ErrShipmentNotInProgress       = errors.New("SHIPMENT_NOT_IN_PROGRESS")
+	ErrCargoplaceNotInShipment     = errors.New("CARGOPLACE_NOT_IN_SHIPMENT")
+	ErrCargoplaceAlreadyReceive    = errors.New("CARGOPLACE_ALREADY_RECEIVED")
+	ErrInvalidInput                = errors.New("INVALID_INPUT")
+	ErrCargoplaceNotFound          = errors.New("CARGOPLACE_NOT_FOUND")
+	ErrCargoplaceNotReceivedAtGate = errors.New("CARGOPLACE_NOT_RECEIVED_AT_GATE")
+	ErrCargoplaceNotInProgress     = errors.New("CARGOPLACE_NOT_IN_PROGRESS")
+	ErrBoxNotFound                 = errors.New("BOX_NOT_FOUND")
+	ErrBoxNotOpen                  = errors.New("BOX_NOT_OPEN")
+	ErrBoxNotInCargoplace          = errors.New("BOX_NOT_IN_CARGOPLACE")
+	ErrBarcodeNotFound             = errors.New("BARCODE_NOT_FOUND")
+	ErrSKUNotFound                 = errors.New("SKU_NOT_FOUND")
+	ErrQRAlreadyExists             = errors.New("QR_ALREADY_EXISTS")
 )
 
 type Service struct {
@@ -43,12 +57,26 @@ type receivingRepository interface {
 		shipmentID uuid.UUID,
 		cargoplaceCode string,
 	) (*domain.Cargoplace, error)
+	GetCargoplaceByID(ctx context.Context, cargoplaceID uuid.UUID) (*domain.Cargoplace, error)
 	UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, status string) error
 	UpdateCargoplaceReceivedAtGate(ctx context.Context, cargoplaceID uuid.UUID, status string, receivedAt time.Time) error
+	UpdateCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID, status string) error
 	MarkExpectedAsNotReceived(ctx context.Context, shipmentID uuid.UUID, notReceivedStatus string) error
 	CountCargoplaces(ctx context.Context, shipmentID uuid.UUID) (int, error)
 	CountCargoplacesByStatus(ctx context.Context, shipmentID uuid.UUID, status string) (int, error)
+	ListExpectedSKUsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) ([]ExpectedSKU, error)
+	UpsertBox(ctx context.Context, cargoplaceID uuid.UUID, boxBarcode string, status string) (*domain.Box, error)
+	GetBoxByCargoplaceAndBarcode(ctx context.Context, cargoplaceID uuid.UUID, boxBarcode string) (*domain.Box, error)
+	GetBoxByID(ctx context.Context, boxID uuid.UUID) (*domain.Box, error)
+	UpdateBoxStatus(ctx context.Context, boxID uuid.UUID, status string) error
+	CountProductsByBox(ctx context.Context, boxID uuid.UUID) (int, error)
+	GetSKUByBarcode(ctx context.Context, barcode string) (*domain.SKU, error)
+	GetSKUByID(ctx context.Context, skuID uuid.UUID) (*domain.SKU, error)
+	InsertProduct(ctx context.Context, product *domain.Product) error
+	CountProductsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
+	CountExpectedItemsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
 	InsertReceivingGateLog(ctx context.Context, params *GateLogParams) error
+	InsertReceivingTableLog(ctx context.Context, params *TableLogParams) error
 }
 
 func NewService(repo receivingRepository) *Service {
@@ -64,7 +92,7 @@ type ScanTTNResult struct {
 	ReceivedCargoplaces int              `json:"received_cargoplaces"`
 }
 
-type ScanCargoplaceResult struct {
+type ScanGateCargoplaceResult struct {
 	CargoplaceID     uuid.UUID `json:"cargoplace_id"`
 	CargoplaceCode   string    `json:"cargoplace_code"`
 	Status           string    `json:"status"`
@@ -78,6 +106,48 @@ type AcceptShipmentResult struct {
 	Summary    progress  `json:"summary"`
 }
 
+type ScanTableCargoplaceResult struct {
+	CargoplaceID   uuid.UUID     `json:"cargoplace_id"`
+	CargoplaceCode string        `json:"cargoplace_code"`
+	Status         string        `json:"status"`
+	ExpectedSKUs   []ExpectedSKU `json:"expected_skus"`
+	TotalExpected  int           `json:"total_expected"`
+}
+
+type ScanBoxResult struct {
+	BoxID      uuid.UUID `json:"box_id"`
+	BoxBarcode string    `json:"box_barcode"`
+	Status     string    `json:"status"`
+}
+
+type ScanSKUResult struct {
+	SKUID   uuid.UUID `json:"sku_id"`
+	SKUName string    `json:"sku_name"`
+	Barcode string    `json:"barcode"`
+	Message string    `json:"message"`
+}
+
+type ScanQRResult struct {
+	ProductID uuid.UUID            `json:"product_id"`
+	SKUID     uuid.UUID            `json:"sku_id"`
+	SKUName   string               `json:"sku_name"`
+	QRCode    string               `json:"qr_code"`
+	Status    domain.ProductStatus `json:"status"`
+	Progress  receivingProgress    `json:"progress"`
+}
+
+type CloseBoxResult struct {
+	BoxID         uuid.UUID `json:"box_id"`
+	Status        string    `json:"status"`
+	ProductsInBox int       `json:"products_in_box"`
+}
+
+type ExpectedSKU struct {
+	SKUID       uuid.UUID `json:"sku_id"`
+	SKUName     string    `json:"sku_name"`
+	ExpectedQty int       `json:"expected_qty"`
+}
+
 type cargoplaceView struct {
 	CargoplaceID   uuid.UUID `json:"cargoplace_id"`
 	CargoplaceCode string    `json:"cargoplace_code"`
@@ -89,6 +159,11 @@ type progress struct {
 	Received    int `json:"received"`
 	Remaining   int `json:"remaining,omitempty"`
 	NotReceived int `json:"not_received,omitempty"`
+}
+
+type receivingProgress struct {
+	ReceivedInCargoplace int `json:"received_in_cargoplace"`
+	ExpectedInCargoplace int `json:"expected_in_cargoplace"`
 }
 
 func (s *Service) ScanTTN(ctx context.Context, operatorID uuid.UUID, ttnCode string) (*ScanTTNResult, error) {
@@ -109,7 +184,6 @@ func (s *Service) ScanTTN(ctx context.Context, operatorID uuid.UUID, ttnCode str
 	}
 
 	if shipment.Status == shipmentStatusCreated {
-		// we switch to the GATE_IN_PROGRESS status at the first TTN scan
 		if err := s.repo.UpdateShipmentStatus(ctx, shipment.ShipmentID, shipmentStatusGateInProgress); err != nil {
 			return nil, fmt.Errorf("receiving.Service.ScanTTN update shipment status: %w", err)
 		}
@@ -125,7 +199,7 @@ func (s *Service) ScanTTN(ctx context.Context, operatorID uuid.UUID, ttnCode str
 	}); err != nil {
 		return nil, fmt.Errorf("receiving.Service.ScanTTN insert log: %w", err)
 	}
-	// Load cargoplaces for response payload after shipment state transition is persisted.
+
 	cargoplaces, err := s.repo.ListCargoplacesByShipment(ctx, shipment.ShipmentID)
 	if err != nil {
 		return nil, fmt.Errorf("receiving.Service.ScanTTN list cargoplaces: %w", err)
@@ -159,7 +233,7 @@ func (s *Service) ScanCargoplace(
 	operatorID uuid.UUID,
 	shipmentID uuid.UUID,
 	cargoplaceCode string,
-) (*ScanCargoplaceResult, error) {
+) (*ScanGateCargoplaceResult, error) {
 	if operatorID == uuid.Nil || shipmentID == uuid.Nil || cargoplaceCode == "" {
 		return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", ErrInvalidInput)
 	}
@@ -215,7 +289,7 @@ func (s *Service) ScanCargoplace(
 		return nil, fmt.Errorf("receiving.Service.ScanCargoplace count received: %w", err)
 	}
 
-	return &ScanCargoplaceResult{
+	return &ScanGateCargoplaceResult{
 		CargoplaceID:     cp.CargoplaceID,
 		CargoplaceCode:   cp.CargoplaceCode,
 		Status:           cargoplaceStatusReceivedAtGate,
@@ -279,6 +353,300 @@ func (s *Service) AcceptShipment(
 			Received:    received,
 			NotReceived: total - received,
 		},
+	}, nil
+}
+
+func (s *Service) ScanTableCargoplace(
+	ctx context.Context,
+	operatorID uuid.UUID,
+	cargoplaceID uuid.UUID,
+) (*ScanTableCargoplaceResult, error) {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil {
+		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace: %w", ErrInvalidInput)
+	}
+
+	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace get cargoplace: %w", err)
+	}
+	if cargoplace.Status != cargoplaceStatusReceivedAtGate {
+		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace: %w", ErrCargoplaceNotReceivedAtGate)
+	}
+
+	if err := s.repo.UpdateCargoplaceStatus(ctx, cargoplaceID, cargoplaceStatusTableInProgress); err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace update cargoplace status: %w", err)
+	}
+
+	expectedSKUs, err := s.repo.ListExpectedSKUsByCargoplace(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace list expected skus: %w", err)
+	}
+
+	totalExpected := 0
+	for _, expectedSKU := range expectedSKUs {
+		totalExpected += expectedSKU.ExpectedQty
+	}
+
+	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
+		CargoplaceID: cargoplaceID,
+		OperatorID:   operatorID,
+		Action:       "SCAN_CARGOPLACE",
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace insert log: %w", err)
+	}
+
+	return &ScanTableCargoplaceResult{
+		CargoplaceID:   cargoplaceID,
+		CargoplaceCode: cargoplace.CargoplaceCode,
+		Status:         cargoplaceStatusTableInProgress,
+		ExpectedSKUs:   expectedSKUs,
+		TotalExpected:  totalExpected,
+	}, nil
+}
+
+func (s *Service) ScanBox(
+	ctx context.Context,
+	operatorID uuid.UUID,
+	cargoplaceID uuid.UUID,
+	boxBarcode string,
+) (*ScanBoxResult, error) {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || boxBarcode == "" {
+		return nil, fmt.Errorf("receiving.Service.ScanBox: %w", ErrInvalidInput)
+	}
+
+	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanBox get cargoplace: %w", err)
+	}
+	if cargoplace.Status != cargoplaceStatusTableInProgress {
+		return nil, fmt.Errorf("receiving.Service.ScanBox: %w", ErrCargoplaceNotInProgress)
+	}
+
+	box, err := s.repo.GetBoxByCargoplaceAndBarcode(ctx, cargoplaceID, boxBarcode)
+	switch {
+	case err == nil:
+		// Re-scanning an already open box is allowed.
+		// A closed box must not be reopened by scanning it again.
+		if box.Status != boxStatusOpen {
+			return nil, fmt.Errorf("receiving.Service.ScanBox: %w", ErrBoxNotOpen)
+		}
+	case errors.Is(err, ErrBoxNotFound):
+		// First scan for this barcode inside the cargoplace: create a new OPEN box.
+		box, err = s.repo.UpsertBox(ctx, cargoplaceID, boxBarcode, boxStatusOpen)
+		if err != nil {
+			return nil, fmt.Errorf("receiving.Service.ScanBox upsert box: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("receiving.Service.ScanBox get box by barcode: %w", err)
+	}
+
+	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
+		CargoplaceID: cargoplaceID,
+		BoxID:        &box.BoxID,
+		OperatorID:   operatorID,
+		Action:       "SCAN_BOX",
+		BoxBarcode:   &boxBarcode,
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanBox insert log: %w", err)
+	}
+
+	return &ScanBoxResult{
+		BoxID:      box.BoxID,
+		BoxBarcode: box.BoxBarcode,
+		Status:     box.Status,
+	}, nil
+}
+
+func (s *Service) ScanSKU(
+	ctx context.Context,
+	operatorID uuid.UUID,
+	cargoplaceID uuid.UUID,
+	boxID uuid.UUID,
+	barcode string,
+) (*ScanSKUResult, error) {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || boxID == uuid.Nil || barcode == "" {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU: %w", ErrInvalidInput)
+	}
+
+	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU get cargoplace: %w", err)
+	}
+	if cargoplace.Status != cargoplaceStatusTableInProgress {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU: %w", ErrCargoplaceNotInProgress)
+	}
+
+	box, err := s.repo.GetBoxByID(ctx, boxID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU get box: %w", err)
+	}
+	if box.CargoplaceID != cargoplaceID {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU: %w", ErrBoxNotInCargoplace)
+	}
+	if box.Status != boxStatusOpen {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU: %w", ErrBoxNotOpen)
+	}
+
+	sku, err := s.repo.GetSKUByBarcode(ctx, barcode)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU get sku by barcode: %w", err)
+	}
+
+	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
+		CargoplaceID: cargoplaceID,
+		BoxID:        &boxID,
+		OperatorID:   operatorID,
+		Action:       "SCAN_SKU",
+		SKUID:        &sku.SKUID,
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU insert log: %w", err)
+	}
+
+	return &ScanSKUResult{
+		SKUID:   sku.SKUID,
+		SKUName: sku.Name,
+		Barcode: barcode,
+		Message: "Наклейте QR на товар",
+	}, nil
+}
+
+func (s *Service) ScanQR(
+	ctx context.Context,
+	operatorID uuid.UUID,
+	cargoplaceID uuid.UUID,
+	boxID uuid.UUID,
+	skuID uuid.UUID,
+	qrCode string,
+) (*ScanQRResult, error) {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || boxID == uuid.Nil || skuID == uuid.Nil || qrCode == "" {
+		return nil, fmt.Errorf("receiving.Service.ScanQR: %w", ErrInvalidInput)
+	}
+
+	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanQR get cargoplace: %w", err)
+	}
+	if cargoplace.Status != cargoplaceStatusTableInProgress {
+		return nil, fmt.Errorf("receiving.Service.ScanQR: %w", ErrCargoplaceNotInProgress)
+	}
+
+	box, err := s.repo.GetBoxByID(ctx, boxID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanQR get box: %w", err)
+	}
+	if box.CargoplaceID != cargoplaceID {
+		return nil, fmt.Errorf("receiving.Service.ScanQR: %w", ErrBoxNotInCargoplace)
+	}
+	if box.Status != boxStatusOpen {
+		return nil, fmt.Errorf("receiving.Service.ScanQR: %w", ErrBoxNotOpen)
+	}
+
+	sku, err := s.repo.GetSKUByID(ctx, skuID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanQR get sku: %w", err)
+	}
+
+	productID := uuid.New()
+	product := &domain.Product{
+		ProductID:    productID,
+		SKUID:        sku.SKUID,
+		ShipmentID:   cargoplace.ShipmentID,
+		CargoplaceID: cargoplace.CargoplaceID,
+		BoxID:        &boxID,
+		QRCode:       qrCode,
+		Status:       domain.ProductStatusReceived,
+	}
+
+	if err := s.repo.InsertProduct(ctx, product); err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanQR insert product: %w", err)
+	}
+
+	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
+		CargoplaceID: cargoplaceID,
+		BoxID:        &boxID,
+		OperatorID:   operatorID,
+		Action:       "SCAN_QR",
+		SKUID:        &skuID,
+		QRCode:       &qrCode,
+		ProductID:    &productID,
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanQR insert log: %w", err)
+	}
+
+	receivedInCargoplace, err := s.repo.CountProductsByCargoplace(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanQR count products in cargoplace: %w", err)
+	}
+	expectedInCargoplace, err := s.repo.CountExpectedItemsByCargoplace(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanQR count expected items: %w", err)
+	}
+
+	return &ScanQRResult{
+		ProductID: productID,
+		SKUID:     sku.SKUID,
+		SKUName:   sku.Name,
+		QRCode:    qrCode,
+		Status:    domain.ProductStatusReceived,
+		Progress: receivingProgress{
+			ReceivedInCargoplace: receivedInCargoplace,
+			ExpectedInCargoplace: expectedInCargoplace,
+		},
+	}, nil
+}
+
+func (s *Service) CloseBox(
+	ctx context.Context,
+	operatorID uuid.UUID,
+	boxID uuid.UUID,
+) (*CloseBoxResult, error) {
+	if operatorID == uuid.Nil || boxID == uuid.Nil {
+		return nil, fmt.Errorf("receiving.Service.CloseBox: %w", ErrInvalidInput)
+	}
+
+	box, err := s.repo.GetBoxByID(ctx, boxID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.CloseBox get box: %w", err)
+	}
+	if box.Status != boxStatusOpen {
+		return nil, fmt.Errorf("receiving.Service.CloseBox: %w", ErrBoxNotOpen)
+	}
+
+	cargoplace, err := s.repo.GetCargoplaceByID(ctx, box.CargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.CloseBox get cargoplace: %w", err)
+	}
+	if cargoplace.Status != cargoplaceStatusTableInProgress {
+		return nil, fmt.Errorf("receiving.Service.CloseBox: %w", ErrCargoplaceNotInProgress)
+	}
+
+	if err := s.repo.UpdateBoxStatus(ctx, boxID, boxStatusClosed); err != nil {
+		return nil, fmt.Errorf("receiving.Service.CloseBox update box status: %w", err)
+	}
+
+	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
+		CargoplaceID: box.CargoplaceID,
+		BoxID:        &boxID,
+		OperatorID:   operatorID,
+		Action:       "CLOSE_BOX",
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return nil, fmt.Errorf("receiving.Service.CloseBox insert log: %w", err)
+	}
+
+	productsInBox, err := s.repo.CountProductsByBox(ctx, boxID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.CloseBox count products in box: %w", err)
+	}
+
+	return &CloseBoxResult{
+		BoxID:         boxID,
+		Status:        boxStatusClosed,
+		ProductsInBox: productsInBox,
 	}, nil
 }
 
