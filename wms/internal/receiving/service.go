@@ -2,8 +2,12 @@ package receiving
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,6 +46,8 @@ var (
 	ErrBarcodeNotFound             = errors.New("BARCODE_NOT_FOUND")
 	ErrSKUNotFound                 = errors.New("SKU_NOT_FOUND")
 	ErrQRAlreadyExists             = errors.New("QR_ALREADY_EXISTS")
+	ErrBinNotFound                 = errors.New("BIN_NOT_FOUND")
+	ErrBinNotBuffer                = errors.New("BIN_NOT_BUFFER")
 )
 
 type Service struct {
@@ -73,6 +79,9 @@ type receivingRepository interface {
 	GetSKUByBarcode(ctx context.Context, barcode string) (*domain.SKU, error)
 	GetSKUByID(ctx context.Context, skuID uuid.UUID) (*domain.SKU, error)
 	InsertProduct(ctx context.Context, product *domain.Product) error
+	GetBinByID(ctx context.Context, binID uuid.UUID) (*domain.Bin, error)
+	MoveReceivedProductsToBuffer(ctx context.Context, cargoplaceID uuid.UUID, bufferBinID uuid.UUID) (int, error)
+	CloseCargoplaceWithOutbox(ctx context.Context, params *CloseCargoplaceParams) (*CloseCargoplaceTxResult, error)
 	CountProductsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
 	CountExpectedItemsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
 	InsertReceivingGateLog(ctx context.Context, params *GateLogParams) error
@@ -142,10 +151,55 @@ type CloseBoxResult struct {
 	ProductsInBox int       `json:"products_in_box"`
 }
 
+type ScanBufferResult struct {
+	BufferBinID    uuid.UUID `json:"buffer_bin_id"`
+	BufferCode     string    `json:"buffer_code"`
+	ProductsPlaced int       `json:"products_placed"`
+}
+
+type CloseCargoplaceResult struct {
+	CargoplaceID        uuid.UUID              `json:"cargoplace_id"`
+	Status              string                 `json:"status"`
+	Summary             CloseCargoplaceSummary `json:"summary"`
+	OutboxEventsCreated int                    `json:"outbox_events_created"`
+}
+
+type CloseCargoplaceSummary struct {
+	ProductsReceived int             `json:"products_received"`
+	ProductsExpected int             `json:"products_expected"`
+	Shortage         int             `json:"shortage"`
+	ShortageBySKU    []ShortageBySKU `json:"shortage_by_sku"`
+}
+
 type ExpectedSKU struct {
 	SKUID       uuid.UUID `json:"sku_id"`
 	SKUName     string    `json:"sku_name"`
 	ExpectedQty int       `json:"expected_qty"`
+}
+
+type ReceivedSKUCount struct {
+	SKUID       uuid.UUID `json:"sku_id"`
+	SKUName     string    `json:"sku_name"`
+	ReceivedQty int       `json:"received_qty"`
+}
+
+type ShortageBySKU struct {
+	SKUName  string `json:"sku_name"`
+	Expected int    `json:"expected"`
+	Received int    `json:"received"`
+	Shortage int    `json:"shortage"`
+}
+
+type CloseCargoplaceParams struct {
+	CargoplaceID uuid.UUID
+	OperatorID   uuid.UUID
+	OccurredAt   time.Time
+}
+
+type CloseCargoplaceTxResult struct {
+	ExpectedSKUs        []ExpectedSKU
+	ReceivedSKUCounts   []ReceivedSKUCount
+	OutboxEventsCreated int
 }
 
 type cargoplaceView struct {
@@ -650,6 +704,94 @@ func (s *Service) CloseBox(
 	}, nil
 }
 
+func (s *Service) ScanBuffer(
+	ctx context.Context,
+	operatorID uuid.UUID,
+	cargoplaceID uuid.UUID,
+	bufferBinID uuid.UUID,
+) (*ScanBufferResult, error) {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || bufferBinID == uuid.Nil {
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", ErrInvalidInput)
+	}
+
+	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer get cargoplace: %w", err)
+	}
+	if cargoplace.Status != cargoplaceStatusTableInProgress {
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", ErrCargoplaceNotInProgress)
+	}
+
+	bufferBin, err := s.repo.GetBinByID(ctx, bufferBinID)
+	if err != nil {
+		if errors.Is(err, ErrBinNotFound) {
+			return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", err)
+		}
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer get bin: %w", err)
+	}
+	if !isBufferBin(bufferBin) {
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", ErrBinNotBuffer)
+	}
+
+	productsPlaced, err := s.repo.MoveReceivedProductsToBuffer(ctx, cargoplaceID, bufferBinID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer move products to buffer: %w", err)
+	}
+
+	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
+		CargoplaceID: cargoplaceID,
+		OperatorID:   operatorID,
+		Action:       "SCAN_BUFFER",
+		BufferBinID:  &bufferBinID,
+		OccurredAt:   time.Now().UTC(),
+	}); err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer insert log: %w", err)
+	}
+
+	return &ScanBufferResult{
+		BufferBinID:    bufferBinID,
+		BufferCode:     bufferBin.Code,
+		ProductsPlaced: productsPlaced,
+	}, nil
+}
+
+func (s *Service) CloseCargoplace(
+	ctx context.Context,
+	operatorID uuid.UUID,
+	cargoplaceID uuid.UUID,
+) (*CloseCargoplaceResult, error) {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil {
+		return nil, fmt.Errorf("receiving.Service.CloseCargoplace: %w", ErrInvalidInput)
+	}
+
+	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.CloseCargoplace get cargoplace: %w", err)
+	}
+	if cargoplace.Status != cargoplaceStatusTableInProgress {
+		return nil, fmt.Errorf("receiving.Service.CloseCargoplace: %w", ErrCargoplaceNotInProgress)
+	}
+
+	occurredAt := time.Now().UTC()
+	txResult, err := s.repo.CloseCargoplaceWithOutbox(ctx, &CloseCargoplaceParams{
+		CargoplaceID: cargoplaceID,
+		OperatorID:   operatorID,
+		OccurredAt:   occurredAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.CloseCargoplace close cargoplace with outbox: %w", err)
+	}
+
+	summary := buildCloseCargoplaceSummary(txResult.ExpectedSKUs, txResult.ReceivedSKUCounts)
+
+	return &CloseCargoplaceResult{
+		CargoplaceID:        cargoplaceID,
+		Status:              cargoplaceStatusTableClosed,
+		Summary:             summary,
+		OutboxEventsCreated: txResult.OutboxEventsCreated,
+	}, nil
+}
+
 func (s *Service) tryAutoCloseShipment(
 	ctx context.Context,
 	shipmentID uuid.UUID,
@@ -676,4 +818,76 @@ func (s *Service) tryAutoCloseShipment(
 	}
 
 	return nil
+}
+
+// buildCloseCargoplaceSummary compares the expected and received SKUs for a cargoplace and builds a summary including total counts and shortages by SKU.
+func buildCloseCargoplaceSummary(expectedSKUs []ExpectedSKU, receivedSKUs []ReceivedSKUCount) CloseCargoplaceSummary {
+	receivedBySKU := make(map[uuid.UUID]ReceivedSKUCount, len(receivedSKUs))
+	totalReceived := 0
+	for _, received := range receivedSKUs {
+		receivedBySKU[received.SKUID] = received
+		totalReceived += received.ReceivedQty
+	}
+
+	totalExpected := 0
+	totalShortage := 0
+	shortageBySKU := make([]ShortageBySKU, 0)
+	for _, expected := range expectedSKUs {
+		totalExpected += expected.ExpectedQty
+		receivedQty := 0
+		if received, ok := receivedBySKU[expected.SKUID]; ok {
+			receivedQty = received.ReceivedQty
+		}
+
+		shortage := expected.ExpectedQty - receivedQty
+		if shortage <= 0 {
+			continue
+		}
+
+		totalShortage += shortage
+		shortageBySKU = append(shortageBySKU, ShortageBySKU{
+			SKUName:  expected.SKUName,
+			Expected: expected.ExpectedQty,
+			Received: receivedQty,
+			Shortage: shortage,
+		})
+	}
+
+	return CloseCargoplaceSummary{
+		ProductsReceived: totalReceived,
+		ProductsExpected: totalExpected,
+		Shortage:         totalShortage,
+		ShortageBySKU:    shortageBySKU,
+	}
+}
+
+func isBufferBin(bin *domain.Bin) bool {
+	if bin == nil || bin.Section == nil {
+		return false
+	}
+
+	section := strings.ToUpper(strings.TrimSpace(*bin.Section))
+	return strings.Contains(section, "BUFFER")
+}
+
+func payloadHashForReceiving(productID uuid.UUID, cargoplaceID uuid.UUID) (string, error) {
+	payload := struct {
+		ProductID     uuid.UUID `json:"product_id"`
+		CargoplaceID  uuid.UUID `json:"cargoplace_id"`
+		AggregateType string    `json:"aggregate_type"`
+		EventType     string    `json:"event_type"`
+	}{
+		ProductID:     productID,
+		CargoplaceID:  cargoplaceID,
+		AggregateType: "receiving",
+		EventType:     "wms.receiving.v1",
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("receiving.payloadHashForReceiving marshal payload: %w", err)
+	}
+
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }

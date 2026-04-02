@@ -57,6 +57,15 @@ type closeBoxRequest struct {
 	BoxID string `json:"box_id"`
 }
 
+type scanBufferRequest struct {
+	CargoplaceID string `json:"cargoplace_id"`
+	BufferBinID  string `json:"buffer_bin_id"`
+}
+
+type closeCargoplaceRequest struct {
+	CargoplaceID string `json:"cargoplace_id"`
+}
+
 type envelope struct {
 	Success bool       `json:"success"`
 	Data    any        `json:"data"`
@@ -81,6 +90,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/table/scan-sku", h.ScanSKU).Methods(http.MethodPost)
 	router.HandleFunc("/table/scan-qr", h.ScanQR).Methods(http.MethodPost)
 	router.HandleFunc("/table/close-box", h.CloseBox).Methods(http.MethodPost)
+	router.HandleFunc("/table/scan-buffer", h.ScanBuffer).Methods(http.MethodPost)
+	router.HandleFunc("/table/close-cargoplace", h.CloseCargoplace).Methods(http.MethodPost)
 }
 
 // ScanTTN processes the scanning of a TTN code, updating shipment status and returning shipment details.
@@ -321,6 +332,70 @@ func (h *Handler) CloseBox(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
+// ScanBuffer handles the scanning of a cargoplace into a buffer bin, validating the input and updating the system state accordingly.
+func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req scanBufferRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	cargoplaceID, err := uuid.Parse(req.CargoplaceID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "cargoplace_id должен быть UUID")
+		return
+	}
+	bufferBinID, err := uuid.Parse(req.BufferBinID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "buffer_bin_id должен быть UUID")
+		return
+	}
+
+	result, err := h.svc.ScanBuffer(r.Context(), operatorID, cargoplaceID, bufferBinID)
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
+// CloseCargoplace finalizes the receiving process for a cargoplace, 
+// calculating the summary of received products vs expected, and updating the system state to reflect the completion of processing for that cargoplace.
+func (h *Handler) CloseCargoplace(w http.ResponseWriter, r *http.Request) {
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req closeCargoplaceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	cargoplaceID, err := uuid.Parse(req.CargoplaceID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "cargoplace_id должен быть UUID")
+		return
+	}
+
+	result, err := h.svc.CloseCargoplace(r.Context(), operatorID, cargoplaceID)
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
 // mapServiceError maps internal service errors to appropriate HTTP status codes and API error responses.
 func mapServiceError(err error) (status int, code, message string) {
 	switch {
@@ -352,6 +427,10 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusNotFound, "SKU_NOT_FOUND", "SKU не найден"
 	case errors.Is(err, ErrQRAlreadyExists):
 		return http.StatusConflict, "QR_ALREADY_EXISTS", "QR-код уже зарегистрирован"
+	case errors.Is(err, ErrBinNotFound):
+		return http.StatusNotFound, "BIN_NOT_FOUND", "Ячейка не найдена"
+	case errors.Is(err, ErrBinNotBuffer):
+		return http.StatusBadRequest, "BIN_NOT_BUFFER", "Ячейка не является буфером приёмки"
 	case errors.Is(err, ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
 	default:
