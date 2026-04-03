@@ -14,12 +14,44 @@ import (
 	"wms/internal/domain"
 )
 
+type dbTX interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 type Repository struct {
 	db *pgxpool.Pool
+	q  dbTX
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
-	return &Repository{db: db}
+	return &Repository{db: db, q: db}
+}
+
+func (r *Repository) WithTx(ctx context.Context, fn func(receivingRepository) error) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("receiving.Repository.WithTx begin: %w", err)
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	if err := fn(&Repository{db: r.db, q: tx}); err != nil {
+		return err
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("receiving.Repository.WithTx commit: %w", err)
+	}
+
+	committed = true
+	return nil
 }
 
 type GateLogParams struct {
@@ -53,7 +85,7 @@ func (r *Repository) GetShipmentByTTN(ctx context.Context, ttnCode string) (*dom
 		WHERE ttn_code = $1`
 
 	var shipment domain.InboundShipment
-	err := r.db.QueryRow(ctx, query, ttnCode).Scan(
+	err := r.q.QueryRow(ctx, query, ttnCode).Scan(
 		&shipment.ShipmentID,
 		&shipment.WarehouseID,
 		&shipment.TTNCode,
@@ -78,7 +110,7 @@ func (r *Repository) GetShipmentByID(ctx context.Context, shipmentID uuid.UUID) 
 		WHERE shipment_id = $1`
 
 	var shipment domain.InboundShipment
-	err := r.db.QueryRow(ctx, query, shipmentID).Scan(
+	err := r.q.QueryRow(ctx, query, shipmentID).Scan(
 		&shipment.ShipmentID,
 		&shipment.WarehouseID,
 		&shipment.TTNCode,
@@ -106,7 +138,7 @@ func (r *Repository) ListCargoplacesByShipment(
 		WHERE shipment_id = $1
 		ORDER BY cargoplace_code`
 
-	rows, err := r.db.Query(ctx, query, shipmentID)
+	rows, err := r.q.Query(ctx, query, shipmentID)
 	if err != nil {
 		return nil, fmt.Errorf("receiving.Repository.ListCargoplacesByShipment query: %w", err)
 	}
@@ -146,7 +178,7 @@ func (r *Repository) GetCargoplaceByShipmentAndCode(
 		WHERE shipment_id = $1 AND cargoplace_code = $2`
 
 	var cp domain.Cargoplace
-	err := r.db.QueryRow(ctx, query, shipmentID, cargoplaceCode).Scan(
+	err := r.q.QueryRow(ctx, query, shipmentID, cargoplaceCode).Scan(
 		&cp.CargoplaceID,
 		&cp.ShipmentID,
 		&cp.CargoplaceCode,
@@ -197,7 +229,7 @@ func (r *Repository) UpdateShipmentStatus(ctx context.Context, shipmentID uuid.U
 		SET status = $2
 		WHERE shipment_id = $1`
 
-	tag, err := r.db.Exec(ctx, query, shipmentID, status)
+	tag, err := r.q.Exec(ctx, query, shipmentID, status)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.UpdateShipmentStatus exec: %w", err)
 	}
@@ -219,7 +251,7 @@ func (r *Repository) UpdateCargoplaceReceivedAtGate(
 		SET status = $2, received_at_gate_at = $3
 		WHERE cargoplace_id = $1`
 
-	tag, err := r.db.Exec(ctx, query, cargoplaceID, status, receivedAt)
+	tag, err := r.q.Exec(ctx, query, cargoplaceID, status, receivedAt)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.UpdateCargoplaceReceivedAtGate exec: %w", err)
 	}
@@ -257,7 +289,7 @@ func (r *Repository) MarkExpectedAsNotReceived(
 		SET status = $2
 		WHERE shipment_id = $1 AND status = 'EXPECTED'`
 
-	if _, err := r.db.Exec(ctx, query, shipmentID, notReceivedStatus); err != nil {
+	if _, err := r.q.Exec(ctx, query, shipmentID, notReceivedStatus); err != nil {
 		return fmt.Errorf("receiving.Repository.MarkExpectedAsNotReceived exec: %w", err)
 	}
 	return nil
@@ -270,7 +302,7 @@ func (r *Repository) CountCargoplaces(ctx context.Context, shipmentID uuid.UUID)
 		WHERE shipment_id = $1`
 
 	var total int
-	if err := r.db.QueryRow(ctx, query, shipmentID).Scan(&total); err != nil {
+	if err := r.q.QueryRow(ctx, query, shipmentID).Scan(&total); err != nil {
 		return 0, fmt.Errorf("receiving.Repository.CountCargoplaces scan: %w", err)
 	}
 	return total, nil
@@ -283,7 +315,7 @@ func (r *Repository) CountCargoplacesByStatus(ctx context.Context, shipmentID uu
 		WHERE shipment_id = $1 AND status = $2`
 
 	var total int
-	if err := r.db.QueryRow(ctx, query, shipmentID, status).Scan(&total); err != nil {
+	if err := r.q.QueryRow(ctx, query, shipmentID, status).Scan(&total); err != nil {
 		return 0, fmt.Errorf("receiving.Repository.CountCargoplacesByStatus scan: %w", err)
 	}
 	return total, nil
@@ -557,7 +589,7 @@ func (r *Repository) InsertReceivingGateLog(ctx context.Context, params *GateLog
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
-	_, err := r.db.Exec(
+	_, err := r.q.Exec(
 		ctx,
 		query,
 		params.TTNCode,
