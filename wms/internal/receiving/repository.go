@@ -29,19 +29,20 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db, q: db}
 }
 
-func (r *Repository) WithTx(ctx context.Context, fn func(receivingRepository) error) (err error) {
+func (r *Repository) WithTx(ctx context.Context, fn func(receivingRepository) error) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.WithTx begin: %w", err)
 	}
 
+	committed := false
 	defer func() {
-		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) && err == nil {
-			err = fmt.Errorf("receiving.Repository.WithTx rollback: %w", rollbackErr)
+		if !committed {
+			_ = tx.Rollback(ctx)
 		}
 	}()
 
-	if err = fn(&Repository{db: r.db, q: tx}); err != nil {
+	if err := fn(&Repository{db: r.db, q: tx}); err != nil {
 		return err
 	}
 
@@ -49,6 +50,7 @@ func (r *Repository) WithTx(ctx context.Context, fn func(receivingRepository) er
 		return fmt.Errorf("receiving.Repository.WithTx commit: %w", err)
 	}
 
+	committed = true
 	return nil
 }
 
