@@ -43,6 +43,10 @@ type mockReceivingRepo struct {
 	countByStatusRequestedStatus string
 }
 
+func (m *mockReceivingRepo) WithTx(_ context.Context, fn func(receivingRepository) error) error {
+	return fn(m)
+}
+
 func (m *mockReceivingRepo) GetShipmentByTTN(_ context.Context, _ string) (*domain.InboundShipment, error) {
 	if m.shipmentByTTNErr != nil {
 		return nil, m.shipmentByTTNErr
