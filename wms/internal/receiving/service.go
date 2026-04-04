@@ -78,6 +78,7 @@ type receivingRepository interface {
 	InsertProduct(ctx context.Context, product *domain.Product) error
 	GetBinByID(ctx context.Context, binID uuid.UUID) (*domain.Bin, error)
 	MoveReceivedProductsToBuffer(ctx context.Context, cargoplaceID uuid.UUID, bufferBinID uuid.UUID) (int, error)
+	ScanBufferWithLog(ctx context.Context, cargoplaceID uuid.UUID, bufferBinID uuid.UUID, logParams *TableLogParams) (int, error)
 	CloseCargoplaceWithOutbox(ctx context.Context, params *CloseCargoplaceParams) (*CloseCargoplaceTxResult, error)
 	CountProductsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
 	CountExpectedItemsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
@@ -755,19 +756,15 @@ func (s *Service) ScanBuffer(
 		return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", ErrBinNotBuffer)
 	}
 
-	productsPlaced, err := s.repo.MoveReceivedProductsToBuffer(ctx, cargoplaceID, bufferBinID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanBuffer move products to buffer: %w", err)
-	}
-
-	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
+	productsPlaced, err := s.repo.ScanBufferWithLog(ctx, cargoplaceID, bufferBinID, &TableLogParams{
 		CargoplaceID: cargoplaceID,
 		OperatorID:   operatorID,
 		Action:       "SCAN_BUFFER",
 		BufferBinID:  &bufferBinID,
 		OccurredAt:   time.Now().UTC(),
-	}); err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanBuffer insert log: %w", err)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer scan buffer with log: %w", err)
 	}
 
 	return &ScanBufferResult{

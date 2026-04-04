@@ -586,12 +586,47 @@ func (r *Repository) MoveReceivedProductsToBuffer(
 ) (int, error) {
 	const query = `
 		UPDATE wms_inventory.products
-		SET bin_id = $2
+		SET bin_id = $2, updated_at = now()
 		WHERE cargoplace_id = $1 AND status = 'RECEIVED'`
 
 	tag, err := r.db.Exec(ctx, query, cargoplaceID, bufferBinID)
 	if err != nil {
 		return 0, fmt.Errorf("receiving.Repository.MoveReceivedProductsToBuffer exec: %w", err)
+	}
+
+	return int(tag.RowsAffected()), nil
+}
+
+func (r *Repository) ScanBufferWithLog(
+	ctx context.Context,
+	cargoplaceID uuid.UUID,
+	bufferBinID uuid.UUID,
+	logParams *TableLogParams,
+) (int, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog begin tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	const moveQuery = `
+		UPDATE wms_inventory.products
+		SET bin_id = $2, updated_at = now()
+		WHERE cargoplace_id = $1 AND status = 'RECEIVED'`
+
+	tag, err := tx.Exec(ctx, moveQuery, cargoplaceID, bufferBinID)
+	if err != nil {
+		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog move products: %w", err)
+	}
+
+	if err := r.insertReceivingTableLogTx(ctx, tx, logParams); err != nil {
+		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog insert log: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog commit tx: %w", err)
 	}
 
 	return int(tag.RowsAffected()), nil
@@ -710,7 +745,7 @@ func (r *Repository) CloseCargoplaceWithOutbox(
 
 	const updateCargoplaceQuery = `
 		UPDATE wms_inventory.cargoplaces
-		SET status = $2
+		SET status = $2, updated_at = now()
 		WHERE cargoplace_id = $1 AND status = $3`
 
 	tag, err := tx.Exec(

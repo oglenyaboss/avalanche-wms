@@ -64,6 +64,9 @@ type mockReceivingRepo struct {
 	insertProductErr             error
 	moveProductsToBufferCount    int
 	moveProductsToBufferErr      error
+	scanBufferWithLogCount       int
+	scanBufferWithLogErr         error
+	scanBufferWithLogParams      *TableLogParams
 	productsInCargoplace         int
 	productsInCargoplaceErr      error
 	expectedItemsInCargoplace    int
@@ -285,6 +288,22 @@ func (m *mockReceivingRepo) MoveReceivedProductsToBuffer(_ context.Context, _ uu
 		return 0, m.moveProductsToBufferErr
 	}
 	return m.moveProductsToBufferCount, nil
+}
+
+func (m *mockReceivingRepo) ScanBufferWithLog(
+	_ context.Context,
+	_ uuid.UUID,
+	_ uuid.UUID,
+	logParams *TableLogParams,
+) (int, error) {
+	if logParams != nil {
+		paramsCopy := *logParams
+		m.scanBufferWithLogParams = &paramsCopy
+	}
+	if m.scanBufferWithLogErr != nil {
+		return 0, m.scanBufferWithLogErr
+	}
+	return m.scanBufferWithLogCount, nil
 }
 
 func (m *mockReceivingRepo) CountExpectedItemsByCargoplace(_ context.Context, _ uuid.UUID) (int, error) {
@@ -715,7 +734,7 @@ func TestServiceScanBufferSuccess(t *testing.T) {
 			Code:    "BUFFER-01",
 			Section: &section,
 		},
-		moveProductsToBufferCount: 4,
+		scanBufferWithLogCount: 4,
 	}
 
 	result, err := NewService(repo).ScanBuffer(context.Background(), uuid.New(), cargoplaceID, bufferBinID)
@@ -725,11 +744,11 @@ func TestServiceScanBufferSuccess(t *testing.T) {
 	if result.BufferCode != "BUFFER-01" || result.ProductsPlaced != 4 {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if len(repo.insertReceivingTableLogs) != 1 || repo.insertReceivingTableLogs[0].Action != "SCAN_BUFFER" {
-		t.Fatalf("expected SCAN_BUFFER log, got %+v", repo.insertReceivingTableLogs)
+	if repo.scanBufferWithLogParams == nil || repo.scanBufferWithLogParams.Action != "SCAN_BUFFER" {
+		t.Fatalf("expected SCAN_BUFFER log params, got %+v", repo.scanBufferWithLogParams)
 	}
-	if repo.insertReceivingTableLogs[0].BufferBinID == nil || *repo.insertReceivingTableLogs[0].BufferBinID != bufferBinID {
-		t.Fatalf("expected buffer_bin_id to be logged, got %+v", repo.insertReceivingTableLogs[0])
+	if repo.scanBufferWithLogParams.BufferBinID == nil || *repo.scanBufferWithLogParams.BufferBinID != bufferBinID {
+		t.Fatalf("expected buffer_bin_id to be logged, got %+v", repo.scanBufferWithLogParams)
 	}
 }
 
