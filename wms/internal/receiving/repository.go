@@ -204,7 +204,7 @@ func (r *Repository) GetCargoplaceByID(ctx context.Context, cargoplaceID uuid.UU
 		WHERE cargoplace_id = $1`
 
 	var cp domain.Cargoplace
-	err := r.db.QueryRow(ctx, query, cargoplaceID).Scan(
+	err := r.q.QueryRow(ctx, query, cargoplaceID).Scan(
 		&cp.CargoplaceID,
 		&cp.ShipmentID,
 		&cp.CargoplaceCode,
@@ -268,7 +268,7 @@ func (r *Repository) UpdateCargoplaceStatus(ctx context.Context, cargoplaceID uu
 		SET status = $2
 		WHERE cargoplace_id = $1`
 
-	tag, err := r.db.Exec(ctx, query, cargoplaceID, status)
+	tag, err := r.q.Exec(ctx, query, cargoplaceID, status)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.UpdateCargoplaceStatus exec: %w", err)
 	}
@@ -329,7 +329,7 @@ func (r *Repository) ListExpectedSKUsByCargoplace(ctx context.Context, cargoplac
 		WHERE ecs.cargoplace_id = $1
 		ORDER BY s.name`
 
-	rows, err := r.db.Query(ctx, query, cargoplaceID)
+	rows, err := r.q.Query(ctx, query, cargoplaceID)
 	if err != nil {
 		return nil, fmt.Errorf("receiving.Repository.ListExpectedSKUsByCargoplace query: %w", err)
 	}
@@ -361,10 +361,11 @@ func (r *Repository) UpsertBox(
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (cargoplace_id, box_barcode)
 		DO UPDATE SET status = EXCLUDED.status
+		WHERE wms_inventory.boxes.status != 'CLOSED'
 		RETURNING box_id, cargoplace_id, box_barcode, status, created_at, updated_at`
 
 	var box domain.Box
-	err := r.db.QueryRow(ctx, query, uuid.New(), cargoplaceID, boxBarcode, status).Scan(
+	err := r.q.QueryRow(ctx, query, uuid.New(), cargoplaceID, boxBarcode, status).Scan(
 		&box.BoxID,
 		&box.CargoplaceID,
 		&box.BoxBarcode,
@@ -373,6 +374,9 @@ func (r *Repository) UpsertBox(
 		&box.UpdatedAt,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("receiving.Repository.UpsertBox: %w", ErrBoxNotOpen)
+		}
 		return nil, fmt.Errorf("receiving.Repository.UpsertBox scan: %w", err)
 	}
 
@@ -386,7 +390,7 @@ func (r *Repository) GetBoxByID(ctx context.Context, boxID uuid.UUID) (*domain.B
 		WHERE box_id = $1`
 
 	var box domain.Box
-	err := r.db.QueryRow(ctx, query, boxID).Scan(
+	err := r.q.QueryRow(ctx, query, boxID).Scan(
 		&box.BoxID,
 		&box.CargoplaceID,
 		&box.BoxBarcode,
@@ -415,7 +419,7 @@ func (r *Repository) GetBoxByCargoplaceAndBarcode(
 		WHERE cargoplace_id = $1 AND box_barcode = $2`
 
 	var box domain.Box
-	err := r.db.QueryRow(ctx, query, cargoplaceID, boxBarcode).Scan(
+	err := r.q.QueryRow(ctx, query, cargoplaceID, boxBarcode).Scan(
 		&box.BoxID,
 		&box.CargoplaceID,
 		&box.BoxBarcode,
@@ -439,7 +443,7 @@ func (r *Repository) UpdateBoxStatus(ctx context.Context, boxID uuid.UUID, statu
 		SET status = $2
 		WHERE box_id = $1`
 
-	tag, err := r.db.Exec(ctx, query, boxID, status)
+	tag, err := r.q.Exec(ctx, query, boxID, status)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.UpdateBoxStatus exec: %w", err)
 	}
@@ -457,7 +461,7 @@ func (r *Repository) CountProductsByBox(ctx context.Context, boxID uuid.UUID) (i
 		WHERE box_id = $1`
 
 	var total int
-	if err := r.db.QueryRow(ctx, query, boxID).Scan(&total); err != nil {
+	if err := r.q.QueryRow(ctx, query, boxID).Scan(&total); err != nil {
 		return 0, fmt.Errorf("receiving.Repository.CountProductsByBox scan: %w", err)
 	}
 	return total, nil
@@ -471,7 +475,7 @@ func (r *Repository) GetSKUByBarcode(ctx context.Context, barcode string) (*doma
 		WHERE sb.barcode = $1`
 
 	var sku domain.SKU
-	err := r.db.QueryRow(ctx, query, barcode).Scan(
+	err := r.q.QueryRow(ctx, query, barcode).Scan(
 		&sku.SKUID,
 		&sku.Name,
 		&sku.Description,
@@ -496,7 +500,7 @@ func (r *Repository) GetSKUByID(ctx context.Context, skuID uuid.UUID) (*domain.S
 		WHERE sku_id = $1`
 
 	var sku domain.SKU
-	err := r.db.QueryRow(ctx, query, skuID).Scan(
+	err := r.q.QueryRow(ctx, query, skuID).Scan(
 		&sku.SKUID,
 		&sku.Name,
 		&sku.Description,
@@ -527,7 +531,7 @@ func (r *Repository) InsertProduct(ctx context.Context, product *domain.Product)
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`
 
-	_, err := r.db.Exec(
+	_, err := r.q.Exec(
 		ctx,
 		query,
 		product.ProductID,
@@ -556,7 +560,7 @@ func (r *Repository) CountProductsByCargoplace(ctx context.Context, cargoplaceID
 		WHERE cargoplace_id = $1`
 
 	var total int
-	if err := r.db.QueryRow(ctx, query, cargoplaceID).Scan(&total); err != nil {
+	if err := r.q.QueryRow(ctx, query, cargoplaceID).Scan(&total); err != nil {
 		return 0, fmt.Errorf("receiving.Repository.CountProductsByCargoplace scan: %w", err)
 	}
 	return total, nil
@@ -569,7 +573,7 @@ func (r *Repository) CountExpectedItemsByCargoplace(ctx context.Context, cargopl
 		WHERE cargoplace_id = $1`
 
 	var total int
-	if err := r.db.QueryRow(ctx, query, cargoplaceID).Scan(&total); err != nil {
+	if err := r.q.QueryRow(ctx, query, cargoplaceID).Scan(&total); err != nil {
 		return 0, fmt.Errorf("receiving.Repository.CountExpectedItemsByCargoplace scan: %w", err)
 	}
 	return total, nil
@@ -625,7 +629,7 @@ func (r *Repository) InsertReceivingTableLog(ctx context.Context, params *TableL
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
 
-	_, err := r.db.Exec(
+	_, err := r.q.Exec(
 		ctx,
 		query,
 		uuid.New(),

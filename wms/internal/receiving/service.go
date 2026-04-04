@@ -53,11 +53,7 @@ type receivingRepository interface {
 	GetShipmentByTTN(ctx context.Context, ttnCode string) (*domain.InboundShipment, error)
 	GetShipmentByID(ctx context.Context, shipmentID uuid.UUID) (*domain.InboundShipment, error)
 	ListCargoplacesByShipment(ctx context.Context, shipmentID uuid.UUID) ([]domain.Cargoplace, error)
-	GetCargoplaceByShipmentAndCode(
-		ctx context.Context,
-		shipmentID uuid.UUID,
-		cargoplaceCode string,
-	) (*domain.Cargoplace, error)
+	GetCargoplaceByShipmentAndCode(ctx context.Context, shipmentID uuid.UUID, cargoplaceCode string) (*domain.Cargoplace, error)
 	GetCargoplaceByID(ctx context.Context, cargoplaceID uuid.UUID) (*domain.Cargoplace, error)
 	UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, status string) error
 	UpdateCargoplaceReceivedAtGate(ctx context.Context, cargoplaceID uuid.UUID, status string, receivedAt time.Time) error
@@ -580,21 +576,27 @@ func (s *Service) ScanQR(
 		Status:       domain.ProductStatusReceived,
 	}
 
-	if err := s.repo.InsertProduct(ctx, product); err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanQR insert product: %w", err)
-	}
+	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		if err := txRepo.InsertProduct(ctx, product); err != nil {
+			return fmt.Errorf("receiving.Service.ScanQR insert product: %w", err)
+		}
 
-	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
-		CargoplaceID: cargoplaceID,
-		BoxID:        &boxID,
-		OperatorID:   operatorID,
-		Action:       "SCAN_QR",
-		SKUID:        &skuID,
-		QRCode:       &qrCode,
-		ProductID:    &productID,
-		OccurredAt:   time.Now().UTC(),
+		if err := txRepo.InsertReceivingTableLog(ctx, &TableLogParams{
+			CargoplaceID: cargoplaceID,
+			BoxID:        &boxID,
+			OperatorID:   operatorID,
+			Action:       "SCAN_QR",
+			SKUID:        &skuID,
+			QRCode:       &qrCode,
+			ProductID:    &productID,
+			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			return fmt.Errorf("receiving.Service.ScanQR insert log: %w", err)
+		}
+
+		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanQR insert log: %w", err)
+		return nil, err
 	}
 
 	receivedInCargoplace, err := s.repo.CountProductsByCargoplace(ctx, cargoplaceID)
