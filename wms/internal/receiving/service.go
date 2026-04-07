@@ -304,7 +304,7 @@ func (s *Service) countShipmentProgress(
 	ctx context.Context,
 	repo receivingRepository,
 	shipmentID uuid.UUID,
-) (total int, received int, err error) {
+) (total, received int, err error) {
 	total, err = repo.CountCargoplaces(ctx, shipmentID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("count total: %w", err)
