@@ -54,29 +54,6 @@ func (r *Repository) WithTx(ctx context.Context, fn func(receivingRepository) er
 	return nil
 }
 
-type GateLogParams struct {
-	TTNCode        *string
-	CargoplaceCode *string
-	ShipmentID     *uuid.UUID
-	CargoplaceID   *uuid.UUID
-	OperatorID     uuid.UUID
-	Action         string
-	OccurredAt     time.Time
-}
-
-type TableLogParams struct {
-	CargoplaceID uuid.UUID
-	BoxID        *uuid.UUID
-	OperatorID   uuid.UUID
-	Action       string
-	BoxBarcode   *string
-	SKUID        *uuid.UUID
-	QRCode       *string
-	ProductID    *uuid.UUID
-	BufferBinID  *uuid.UUID
-	OccurredAt   time.Time
-}
-
 // GetShipmentByTTN retrieves an inbound shipment from the database based on the provided TTN code.
 func (r *Repository) GetShipmentByTTN(ctx context.Context, ttnCode string) (*domain.InboundShipment, error) {
 	const query = `
@@ -560,7 +537,7 @@ func (r *Repository) GetBinByID(ctx context.Context, binID uuid.UUID) (*domain.B
 		WHERE bin_id = $1`
 
 	var bin domain.Bin
-	err := r.db.QueryRow(ctx, query, binID).Scan(
+	err := r.q.QueryRow(ctx, query, binID).Scan(
 		&bin.BinID,
 		&bin.WarehouseID,
 		&bin.Code,
@@ -589,7 +566,7 @@ func (r *Repository) MoveReceivedProductsToBuffer(
 		SET bin_id = $2, updated_at = now()
 		WHERE cargoplace_id = $1 AND status = 'RECEIVED'`
 
-	tag, err := r.db.Exec(ctx, query, cargoplaceID, bufferBinID)
+	tag, err := r.q.Exec(ctx, query, cargoplaceID, bufferBinID)
 	if err != nil {
 		return 0, fmt.Errorf("receiving.Repository.MoveReceivedProductsToBuffer exec: %w", err)
 	}
@@ -860,6 +837,7 @@ func (r *Repository) listProductIDsByCargoplaceTx(
 		SELECT product_id
 		FROM wms_inventory.products
 		WHERE cargoplace_id = $1
+			AND status = 'RECEIVED'
 		ORDER BY product_id`
 
 	rows, err := tx.Query(ctx, query, cargoplaceID)
