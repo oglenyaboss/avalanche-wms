@@ -357,8 +357,6 @@ func TestServiceScanCargoplaceAutoClosesShipmentWhenAllReceived(t *testing.T) {
 	}
 }
 
-
-
 func TestServiceAcceptShipmentMarksMissingAsNotReceived(t *testing.T) {
 	shipmentID := uuid.New()
 	operatorID := uuid.New()

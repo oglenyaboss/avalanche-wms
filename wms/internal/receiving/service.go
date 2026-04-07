@@ -304,13 +304,13 @@ func (s *Service) countShipmentProgress(
 	ctx context.Context,
 	repo receivingRepository,
 	shipmentID uuid.UUID,
-) (int, int, error) {
-	total, err := repo.CountCargoplaces(ctx, shipmentID)
+) (total int, received int, err error) {
+	total, err = repo.CountCargoplaces(ctx, shipmentID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("count total: %w", err)
 	}
 
-	received, err := repo.CountCargoplacesByStatus(ctx, shipmentID, cargoplaceStatusReceivedAtGate)
+	received, err = repo.CountCargoplacesByStatus(ctx, shipmentID, cargoplaceStatusReceivedAtGate)
 	if err != nil {
 		return 0, 0, fmt.Errorf("count received: %w", err)
 	}
