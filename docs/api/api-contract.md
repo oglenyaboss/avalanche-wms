@@ -121,6 +121,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
 **Ошибки:**
 | Код | HTTP | Когда |
 |-----|------|-------|
+| `SHIPMENT_NOT_FOUND` | 404 | Поставка с указанным `shipment_id` не найдена |
 | `CARGOPLACE_NOT_IN_SHIPMENT` | 400 | Грузоместо не принадлежит этой TTN |
 | `CARGOPLACE_ALREADY_RECEIVED` | 409 | Грузоместо уже отсканировано |
 | `SHIPMENT_NOT_IN_PROGRESS` | 409 | Поставка не в статусе GATE_IN_PROGRESS |
@@ -128,6 +129,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
 **Побочные эффекты:**
 - UPDATE `cargoplaces.status` → RECEIVED_AT_GATE, `received_at_gate_at` = now()
 - INSERT `receiving_gate` (action=SCAN_CARGOPLACE)
+- Если это последнее ожидаемое грузоместо, поставка автоматически закрывается в той же транзакции
 
 ---
 
@@ -161,6 +163,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
 **Ошибки:**
 | Код | HTTP | Когда |
 |-----|------|-------|
+| `SHIPMENT_NOT_FOUND` | 404 | Поставка с указанным `shipment_id` не найдена |
 | `SHIPMENT_NOT_IN_PROGRESS` | 409 | Поставка не в статусе GATE_IN_PROGRESS |
 
 **Побочные эффекты:**

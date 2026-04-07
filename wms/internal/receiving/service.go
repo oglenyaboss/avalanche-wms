@@ -32,10 +32,11 @@ const (
 
 var (
 	ErrTTNNotFound                 = errors.New("TTN_NOT_FOUND")
+	ErrShipmentNotFound            = errors.New("SHIPMENT_NOT_FOUND")
 	ErrShipmentAlreadyClosed       = errors.New("SHIPMENT_ALREADY_CLOSED")
 	ErrShipmentNotInProgress       = errors.New("SHIPMENT_NOT_IN_PROGRESS")
 	ErrCargoplaceNotInShipment     = errors.New("CARGOPLACE_NOT_IN_SHIPMENT")
-	ErrCargoplaceAlreadyReceive    = errors.New("CARGOPLACE_ALREADY_RECEIVED")
+	ErrCargoplaceAlreadyReceived   = errors.New("CARGOPLACE_ALREADY_RECEIVED")
 	ErrInvalidInput                = errors.New("INVALID_INPUT")
 	ErrCargoplaceNotFound          = errors.New("CARGOPLACE_NOT_FOUND")
 	ErrCargoplaceNotReceivedAtGate = errors.New("CARGOPLACE_NOT_RECEIVED_AT_GATE")
@@ -209,8 +210,8 @@ type cargoplaceView struct {
 type progress struct {
 	Total       int `json:"total"`
 	Received    int `json:"received"`
-	Remaining   int `json:"remaining,omitempty"`
-	NotReceived int `json:"not_received,omitempty"`
+	Remaining   int `json:"remaining"`
+	NotReceived int `json:"not_received"`
 }
 
 type receivingProgress struct {
@@ -314,10 +315,11 @@ func (s *Service) ScanCargoplace(
 	}
 
 	if cp.Status == cargoplaceStatusReceivedAtGate {
-		return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", ErrCargoplaceAlreadyReceive)
+		return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", ErrCargoplaceAlreadyReceived)
 	}
 
 	receivedAt := time.Now().UTC()
+	var total, received int
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
 		if err := txRepo.UpdateCargoplaceReceivedAtGate(
 			ctx,
@@ -340,18 +342,18 @@ func (s *Service) ScanCargoplace(
 			return fmt.Errorf("receiving.Service.ScanCargoplace insert log: %w", err)
 		}
 
+		total, received, err = s.countShipmentProgress(ctx, txRepo, shipmentID)
+		if err != nil {
+			return fmt.Errorf("receiving.Service.ScanCargoplace count progress: %w", err)
+		}
+
+		if err := s.tryAutoCloseShipment(ctx, txRepo, shipment.ShipmentID, shipment.TTNCode, total, received, operatorID); err != nil {
+			return err
+		}
+
 		return nil
 	}); err != nil {
 		return nil, err
-	}
-
-	total, err := s.repo.CountCargoplaces(ctx, shipmentID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanCargoplace count total: %w", err)
-	}
-	received, err := s.repo.CountCargoplacesByStatus(ctx, shipmentID, cargoplaceStatusReceivedAtGate)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanCargoplace count received: %w", err)
 	}
 
 	return &ScanGateCargoplaceResult{
@@ -364,7 +366,7 @@ func (s *Service) ScanCargoplace(
 			Received:  received,
 			Remaining: total - received,
 		},
-	}, s.tryAutoCloseShipment(ctx, shipment.ShipmentID, shipment.TTNCode, total, received, operatorID)
+	}, nil
 }
 
 func (s *Service) AcceptShipment(
@@ -384,6 +386,7 @@ func (s *Service) AcceptShipment(
 		return nil, fmt.Errorf("receiving.Service.AcceptShipment: %w", ErrShipmentNotInProgress)
 	}
 
+	var total, received int
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
 		if err := txRepo.MarkExpectedAsNotReceived(ctx, shipmentID, cargoplaceStatusNotReceived); err != nil {
 			return fmt.Errorf("receiving.Service.AcceptShipment mark not received: %w", err)
@@ -402,18 +405,14 @@ func (s *Service) AcceptShipment(
 			return fmt.Errorf("receiving.Service.AcceptShipment insert log: %w", err)
 		}
 
+		total, received, err = s.countShipmentProgress(ctx, txRepo, shipmentID)
+		if err != nil {
+			return fmt.Errorf("receiving.Service.AcceptShipment count progress: %w", err)
+		}
+
 		return nil
 	}); err != nil {
 		return nil, err
-	}
-
-	total, err := s.repo.CountCargoplaces(ctx, shipmentID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.AcceptShipment count total: %w", err)
-	}
-	received, err := s.repo.CountCargoplacesByStatus(ctx, shipmentID, cargoplaceStatusReceivedAtGate)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.AcceptShipment count received: %w", err)
 	}
 
 	return &AcceptShipmentResult{
@@ -444,10 +443,6 @@ func (s *Service) ScanTableCargoplace(
 		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace: %w", ErrCargoplaceNotReceivedAtGate)
 	}
 
-	if err := s.repo.UpdateCargoplaceStatus(ctx, cargoplaceID, cargoplaceStatusTableInProgress); err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace update cargoplace status: %w", err)
-	}
-
 	expectedSKUs, err := s.repo.ListExpectedSKUsByCargoplace(ctx, cargoplaceID)
 	if err != nil {
 		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace list expected skus: %w", err)
@@ -458,13 +453,23 @@ func (s *Service) ScanTableCargoplace(
 		totalExpected += expectedSKU.ExpectedQty
 	}
 
-	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
-		CargoplaceID: cargoplaceID,
-		OperatorID:   operatorID,
-		Action:       "SCAN_CARGOPLACE",
-		OccurredAt:   time.Now().UTC(),
+	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		if err := txRepo.UpdateCargoplaceStatus(ctx, cargoplaceID, cargoplaceStatusTableInProgress); err != nil {
+			return fmt.Errorf("receiving.Service.ScanTableCargoplace update cargoplace status: %w", err)
+		}
+
+		if err := txRepo.InsertReceivingTableLog(ctx, &TableLogParams{
+			CargoplaceID: cargoplaceID,
+			OperatorID:   operatorID,
+			Action:       "SCAN_CARGOPLACE",
+			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			return fmt.Errorf("receiving.Service.ScanTableCargoplace insert log: %w", err)
+		}
+
+		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace insert log: %w", err)
+		return nil, err
 	}
 
 	return &ScanTableCargoplaceResult{
@@ -497,30 +502,44 @@ func (s *Service) ScanBox(
 	box, err := s.repo.GetBoxByCargoplaceAndBarcode(ctx, cargoplaceID, boxBarcode)
 	switch {
 	case err == nil:
-		// Re-scanning an already open box is allowed.
-		// A closed box must not be reopened by scanning it again.
 		if box.Status != boxStatusOpen {
 			return nil, fmt.Errorf("receiving.Service.ScanBox: %w", ErrBoxNotOpen)
 		}
+
+		if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
+			CargoplaceID: cargoplaceID,
+			BoxID:        &box.BoxID,
+			OperatorID:   operatorID,
+			Action:       "SCAN_BOX",
+			BoxBarcode:   &boxBarcode,
+			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			return nil, fmt.Errorf("receiving.Service.ScanBox insert log: %w", err)
+		}
 	case errors.Is(err, ErrBoxNotFound):
-		// First scan for this barcode inside the cargoplace: create a new OPEN box.
-		box, err = s.repo.UpsertBox(ctx, cargoplaceID, boxBarcode, boxStatusOpen)
-		if err != nil {
-			return nil, fmt.Errorf("receiving.Service.ScanBox upsert box: %w", err)
+		if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+			box, err = txRepo.UpsertBox(ctx, cargoplaceID, boxBarcode, boxStatusOpen)
+			if err != nil {
+				return fmt.Errorf("receiving.Service.ScanBox upsert box: %w", err)
+			}
+
+			if err := txRepo.InsertReceivingTableLog(ctx, &TableLogParams{
+				CargoplaceID: cargoplaceID,
+				BoxID:        &box.BoxID,
+				OperatorID:   operatorID,
+				Action:       "SCAN_BOX",
+				BoxBarcode:   &boxBarcode,
+				OccurredAt:   time.Now().UTC(),
+			}); err != nil {
+				return fmt.Errorf("receiving.Service.ScanBox insert log: %w", err)
+			}
+
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("receiving.Service.ScanBox get box by barcode: %w", err)
-	}
-
-	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
-		CargoplaceID: cargoplaceID,
-		BoxID:        &box.BoxID,
-		OperatorID:   operatorID,
-		Action:       "SCAN_BOX",
-		BoxBarcode:   &boxBarcode,
-		OccurredAt:   time.Now().UTC(),
-	}); err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanBox insert log: %w", err)
 	}
 
 	return &ScanBoxResult{
@@ -701,18 +720,24 @@ func (s *Service) CloseBox(
 		return nil, fmt.Errorf("receiving.Service.CloseBox: %w", ErrCargoplaceNotInProgress)
 	}
 
-	if err := s.repo.UpdateBoxStatus(ctx, boxID, boxStatusClosed); err != nil {
-		return nil, fmt.Errorf("receiving.Service.CloseBox update box status: %w", err)
-	}
+	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		if err := txRepo.UpdateBoxStatus(ctx, boxID, boxStatusClosed); err != nil {
+			return fmt.Errorf("receiving.Service.CloseBox update box status: %w", err)
+		}
 
-	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
-		CargoplaceID: box.CargoplaceID,
-		BoxID:        &boxID,
-		OperatorID:   operatorID,
-		Action:       "CLOSE_BOX",
-		OccurredAt:   time.Now().UTC(),
+		if err := txRepo.InsertReceivingTableLog(ctx, &TableLogParams{
+			CargoplaceID: box.CargoplaceID,
+			BoxID:        &boxID,
+			OperatorID:   operatorID,
+			Action:       "CLOSE_BOX",
+			OccurredAt:   time.Now().UTC(),
+		}); err != nil {
+			return fmt.Errorf("receiving.Service.CloseBox insert log: %w", err)
+		}
+
+		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("receiving.Service.CloseBox insert log: %w", err)
+		return nil, err
 	}
 
 	productsInBox, err := s.repo.CountProductsByBox(ctx, boxID)
@@ -811,8 +836,27 @@ func (s *Service) CloseCargoplace(
 	}, nil
 }
 
+func (s *Service) countShipmentProgress(
+	ctx context.Context,
+	repo receivingRepository,
+	shipmentID uuid.UUID,
+) (total, received int, err error) {
+	total, err = repo.CountCargoplaces(ctx, shipmentID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("count total: %w", err)
+	}
+
+	received, err = repo.CountCargoplacesByStatus(ctx, shipmentID, cargoplaceStatusReceivedAtGate)
+	if err != nil {
+		return 0, 0, fmt.Errorf("count received: %w", err)
+	}
+
+	return total, received, nil
+}
+
 func (s *Service) tryAutoCloseShipment(
 	ctx context.Context,
+	repo receivingRepository,
 	shipmentID uuid.UUID,
 	ttnCode string,
 	total, received int,
@@ -822,23 +866,21 @@ func (s *Service) tryAutoCloseShipment(
 		return nil
 	}
 
-	return s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
-		if err := txRepo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed); err != nil {
-			return fmt.Errorf("receiving.Service.tryAutoCloseShipment close shipment: %w", err)
-		}
+	if err := repo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed); err != nil {
+		return fmt.Errorf("receiving.Service.tryAutoCloseShipment close shipment: %w", err)
+	}
 
-		if err := txRepo.InsertReceivingGateLog(ctx, &GateLogParams{
-			TTNCode:    &ttnCode,
-			ShipmentID: &shipmentID,
-			OperatorID: operatorID,
-			Action:     "SHIPMENT_ACCEPTED",
-			OccurredAt: time.Now().UTC(),
-		}); err != nil {
-			return fmt.Errorf("receiving.Service.tryAutoCloseShipment insert log: %w", err)
-		}
+	if err := repo.InsertReceivingGateLog(ctx, &GateLogParams{
+		TTNCode:    &ttnCode,
+		ShipmentID: &shipmentID,
+		OperatorID: operatorID,
+		Action:     "SHIPMENT_ACCEPTED",
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("receiving.Service.tryAutoCloseShipment insert log: %w", err)
+	}
 
-		return nil
-	})
+	return nil
 }
 
 // buildCloseCargoplaceSummary compares the expected and received SKUs for a cargoplace and builds a summary including total counts and shortages by SKU.

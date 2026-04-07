@@ -401,13 +401,15 @@ func mapServiceError(err error) (status int, code, message string) {
 	switch {
 	case errors.Is(err, ErrTTNNotFound):
 		return http.StatusNotFound, "TTN_NOT_FOUND", "TTN не найдена"
+	case errors.Is(err, ErrShipmentNotFound):
+		return http.StatusNotFound, "SHIPMENT_NOT_FOUND", "Поставка не найдена"
 	case errors.Is(err, ErrShipmentAlreadyClosed):
 		return http.StatusConflict, "SHIPMENT_ALREADY_CLOSED", "Поставка уже закрыта"
 	case errors.Is(err, ErrShipmentNotInProgress):
 		return http.StatusConflict, "SHIPMENT_NOT_IN_PROGRESS", "Поставка не в статусе GATE_IN_PROGRESS"
 	case errors.Is(err, ErrCargoplaceNotInShipment):
 		return http.StatusBadRequest, "CARGOPLACE_NOT_IN_SHIPMENT", "Грузоместо не принадлежит данной поставке"
-	case errors.Is(err, ErrCargoplaceAlreadyReceive):
+	case errors.Is(err, ErrCargoplaceAlreadyReceived):
 		return http.StatusConflict, "CARGOPLACE_ALREADY_RECEIVED", "Грузоместо уже отсканировано"
 	case errors.Is(err, ErrCargoplaceNotFound):
 		return http.StatusNotFound, "CARGOPLACE_NOT_FOUND", "Грузоместо не найдено"
