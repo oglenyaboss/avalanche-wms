@@ -2,6 +2,7 @@ package receiving
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -41,10 +42,48 @@ type mockReceivingRepo struct {
 	countCargoplacesShipmentID   uuid.UUID
 	countByStatusShipmentID      uuid.UUID
 	countByStatusRequestedStatus string
+	withTxCalls                  int
+	inTx                         bool
+	countTotalCalledInTx         bool
+	countByStatusCalledInTx      bool
+	insertReceivingGateLogCalls  int
+	insertLogErrOnCall           int
 }
 
 func (m *mockReceivingRepo) WithTx(_ context.Context, fn func(receivingRepository) error) error {
-	return fn(m)
+	m.withTxCalls++
+	shipmentByTTNBefore := cloneShipment(m.shipmentByTTN)
+	shipmentByIDBefore := cloneShipment(m.shipmentByID)
+	cargoplaceBefore := cloneCargoplace(m.cargoplace)
+	m.inTx = true
+	defer func() {
+		m.inTx = false
+	}()
+	if err := fn(m); err != nil {
+		m.shipmentByTTN = shipmentByTTNBefore
+		m.shipmentByID = shipmentByIDBefore
+		m.cargoplace = cargoplaceBefore
+		return err
+	}
+	return nil
+}
+
+func cloneShipment(shipment *domain.InboundShipment) *domain.InboundShipment {
+	if shipment == nil {
+		return nil
+	}
+
+	copy := *shipment
+	return &copy
+}
+
+func cloneCargoplace(cp *domain.Cargoplace) *domain.Cargoplace {
+	if cp == nil {
+		return nil
+	}
+
+	copy := *cp
+	return &copy
 }
 
 func (m *mockReceivingRepo) GetShipmentByTTN(_ context.Context, _ string) (*domain.InboundShipment, error) {
@@ -90,6 +129,12 @@ func (m *mockReceivingRepo) UpdateShipmentStatus(_ context.Context, shipmentID u
 	if m.updateShipmentStatusErr != nil {
 		return m.updateShipmentStatusErr
 	}
+	if m.shipmentByTTN != nil && m.shipmentByTTN.ShipmentID == shipmentID {
+		m.shipmentByTTN.Status = status
+	}
+	if m.shipmentByID != nil && m.shipmentByID.ShipmentID == shipmentID {
+		m.shipmentByID.Status = status
+	}
 	return nil
 }
 
@@ -104,6 +149,10 @@ func (m *mockReceivingRepo) UpdateCargoplaceReceivedAtGate(
 	m.updateCargoplaceReceivedAt = receivedAt
 	if m.updateCargoplaceErr != nil {
 		return m.updateCargoplaceErr
+	}
+	if m.cargoplace != nil && m.cargoplace.CargoplaceID == cargoplaceID {
+		m.cargoplace.Status = status
+		m.cargoplace.ReceivedAtGateAt = &receivedAt
 	}
 	return nil
 }
@@ -123,6 +172,9 @@ func (m *mockReceivingRepo) MarkExpectedAsNotReceived(
 
 func (m *mockReceivingRepo) CountCargoplaces(_ context.Context, shipmentID uuid.UUID) (int, error) {
 	m.countCargoplacesShipmentID = shipmentID
+	if m.inTx {
+		m.countTotalCalledInTx = true
+	}
 	if m.countTotalErr != nil {
 		return 0, m.countTotalErr
 	}
@@ -132,6 +184,9 @@ func (m *mockReceivingRepo) CountCargoplaces(_ context.Context, shipmentID uuid.
 func (m *mockReceivingRepo) CountCargoplacesByStatus(_ context.Context, shipmentID uuid.UUID, status string) (int, error) {
 	m.countByStatusShipmentID = shipmentID
 	m.countByStatusRequestedStatus = status
+	if m.inTx {
+		m.countByStatusCalledInTx = true
+	}
 	if m.countByStatusErr != nil {
 		return 0, m.countByStatusErr
 	}
@@ -139,6 +194,10 @@ func (m *mockReceivingRepo) CountCargoplacesByStatus(_ context.Context, shipment
 }
 
 func (m *mockReceivingRepo) InsertReceivingGateLog(_ context.Context, params *GateLogParams) error {
+	m.insertReceivingGateLogCalls++
+	if m.insertLogErrOnCall > 0 && m.insertReceivingGateLogCalls == m.insertLogErrOnCall {
+		return errors.New("forced log failure")
+	}
 	m.insertReceivingGateLogs = append(m.insertReceivingGateLogs, *params)
 	if m.insertReceivingGateLogErr != nil {
 		return m.insertReceivingGateLogErr
@@ -229,6 +288,9 @@ func TestServiceScanCargoplaceSuccess(t *testing.T) {
 	if len(repo.insertReceivingGateLogs) != 1 || repo.insertReceivingGateLogs[0].Action != "SCAN_CARGOPLACE" {
 		t.Fatalf("expected SCAN_CARGOPLACE log, got %+v", repo.insertReceivingGateLogs)
 	}
+	if !repo.countTotalCalledInTx || !repo.countByStatusCalledInTx {
+		t.Fatalf("expected progress counts inside transaction, got %+v", repo)
+	}
 	if result.Progress.Total != 3 || result.Progress.Received != 1 || result.Progress.Remaining != 2 {
 		t.Fatalf("unexpected progress: %+v", result.Progress)
 	}
@@ -251,8 +313,8 @@ func TestServiceScanCargoplaceRejectsAlreadyReceived(t *testing.T) {
 	}
 
 	_, err := NewService(repo).ScanCargoplace(context.Background(), uuid.New(), shipmentID, "CP-001")
-	if !errors.Is(err, ErrCargoplaceAlreadyReceive) {
-		t.Fatalf("expected ErrCargoplaceAlreadyReceive, got %v", err)
+	if !errors.Is(err, ErrCargoplaceAlreadyReceived) {
+		t.Fatalf("expected ErrCargoplaceAlreadyReceived, got %v", err)
 	}
 }
 
@@ -281,6 +343,9 @@ func TestServiceScanCargoplaceAutoClosesShipmentWhenAllReceived(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
+	if repo.withTxCalls != 1 {
+		t.Fatalf("expected auto-close to use the existing transaction, got %d transactions", repo.withTxCalls)
+	}
 	if len(repo.updateShipmentStatusCalls) != 1 {
 		t.Fatalf("expected auto-close shipment update, got %d", len(repo.updateShipmentStatusCalls))
 	}
@@ -291,6 +356,8 @@ func TestServiceScanCargoplaceAutoClosesShipmentWhenAllReceived(t *testing.T) {
 		t.Fatalf("expected SHIPMENT_ACCEPTED auto-close log, got %+v", repo.insertReceivingGateLogs[1])
 	}
 }
+
+
 
 func TestServiceAcceptShipmentMarksMissingAsNotReceived(t *testing.T) {
 	shipmentID := uuid.New()
@@ -320,6 +387,9 @@ func TestServiceAcceptShipmentMarksMissingAsNotReceived(t *testing.T) {
 	if len(repo.insertReceivingGateLogs) != 1 || repo.insertReceivingGateLogs[0].Action != "SHIPMENT_ACCEPTED" {
 		t.Fatalf("expected SHIPMENT_ACCEPTED log, got %+v", repo.insertReceivingGateLogs)
 	}
+	if !repo.countTotalCalledInTx || !repo.countByStatusCalledInTx {
+		t.Fatalf("expected summary counts inside transaction, got %+v", repo)
+	}
 	if result.Status != shipmentStatusGateClosed || result.Summary.NotReceived != 1 {
 		t.Fatalf("unexpected result: %+v", result)
 	}
@@ -337,5 +407,40 @@ func TestServiceAcceptShipmentRejectsShipmentOutsideGateProgress(t *testing.T) {
 	_, err := NewService(repo).AcceptShipment(context.Background(), uuid.New(), repo.shipmentByID.ShipmentID)
 	if !errors.Is(err, ErrShipmentNotInProgress) {
 		t.Fatalf("expected ErrShipmentNotInProgress, got %v", err)
+	}
+}
+
+func TestServiceScanCargoplaceReturnsShipmentNotFound(t *testing.T) {
+	repo := &mockReceivingRepo{
+		shipmentByIDErr: ErrShipmentNotFound,
+	}
+
+	_, err := NewService(repo).ScanCargoplace(context.Background(), uuid.New(), uuid.New(), "CP-001")
+	if !errors.Is(err, ErrShipmentNotFound) {
+		t.Fatalf("expected ErrShipmentNotFound, got %v", err)
+	}
+}
+
+func TestProgressJSONIncludesZeroValues(t *testing.T) {
+	payload, err := json.Marshal(progress{
+		Total:       1,
+		Received:    1,
+		Remaining:   0,
+		NotReceived: 0,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	var actual map[string]any
+	if err := json.Unmarshal(payload, &actual); err != nil {
+		t.Fatalf("expected valid json, got %v", err)
+	}
+
+	if _, ok := actual["remaining"]; !ok {
+		t.Fatalf("expected remaining to be present, got %s", payload)
+	}
+	if _, ok := actual["not_received"]; !ok {
+		t.Fatalf("expected not_received to be present, got %s", payload)
 	}
 }

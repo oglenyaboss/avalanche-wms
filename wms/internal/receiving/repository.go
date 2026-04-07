@@ -107,7 +107,7 @@ func (r *Repository) GetShipmentByID(ctx context.Context, shipmentID uuid.UUID) 
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("receiving.Repository.GetShipmentByID: %w", ErrTTNNotFound)
+			return nil, fmt.Errorf("receiving.Repository.GetShipmentByID: %w", ErrShipmentNotFound)
 		}
 		return nil, fmt.Errorf("receiving.Repository.GetShipmentByID scan: %w", err)
 	}
@@ -195,7 +195,7 @@ func (r *Repository) UpdateShipmentStatus(ctx context.Context, shipmentID uuid.U
 		return fmt.Errorf("receiving.Repository.UpdateShipmentStatus exec: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("receiving.Repository.UpdateShipmentStatus: %w", ErrTTNNotFound)
+		return fmt.Errorf("receiving.Repository.UpdateShipmentStatus: %w", ErrShipmentNotFound)
 	}
 
 	return nil
