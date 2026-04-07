@@ -88,6 +88,11 @@ func (m *mockReceivingRepo) WithTx(_ context.Context, fn func(receivingRepositor
 	shipmentByTTNBefore := cloneShipment(m.shipmentByTTN)
 	shipmentByIDBefore := cloneShipment(m.shipmentByID)
 	cargoplaceBefore := cloneCargoplace(m.cargoplace)
+	cargoplaceByIDBefore := cloneCargoplace(m.cargoplaceByID)
+	boxBefore := cloneBox(m.box)
+	boxByBarcodeBefore := cloneBox(m.boxByBarcode)
+	gateLogsBefore := append([]GateLogParams(nil), m.insertReceivingGateLogs...)
+	tableLogsBefore := append([]TableLogParams(nil), m.insertReceivingTableLogs...)
 	m.inTx = true
 	defer func() {
 		m.inTx = false
@@ -96,6 +101,11 @@ func (m *mockReceivingRepo) WithTx(_ context.Context, fn func(receivingRepositor
 		m.shipmentByTTN = shipmentByTTNBefore
 		m.shipmentByID = shipmentByIDBefore
 		m.cargoplace = cargoplaceBefore
+		m.cargoplaceByID = cargoplaceByIDBefore
+		m.box = boxBefore
+		m.boxByBarcode = boxByBarcodeBefore
+		m.insertReceivingGateLogs = gateLogsBefore
+		m.insertReceivingTableLogs = tableLogsBefore
 		return err
 	}
 	return nil
@@ -116,6 +126,15 @@ func cloneCargoplace(cp *domain.Cargoplace) *domain.Cargoplace {
 	}
 
 	copy := *cp
+	return &copy
+}
+
+func cloneBox(box *domain.Box) *domain.Box {
+	if box == nil {
+		return nil
+	}
+
+	copy := *box
 	return &copy
 }
 
@@ -203,6 +222,9 @@ func (m *mockReceivingRepo) UpdateCargoplaceStatus(_ context.Context, cargoplace
 	if m.updateCargoplaceStatusErr != nil {
 		return m.updateCargoplaceStatusErr
 	}
+	if m.cargoplaceByID != nil && m.cargoplaceByID.CargoplaceID == cargoplaceID {
+		m.cargoplaceByID.Status = status
+	}
 	return nil
 }
 
@@ -256,6 +278,7 @@ func (m *mockReceivingRepo) UpsertBox(_ context.Context, cargoplaceID uuid.UUID,
 	if m.upsertBoxErr != nil {
 		return nil, m.upsertBoxErr
 	}
+	m.boxByBarcode = m.upsertedBox
 	return m.upsertedBox, nil
 }
 
@@ -282,6 +305,9 @@ func (m *mockReceivingRepo) UpdateBoxStatus(_ context.Context, boxID uuid.UUID, 
 	m.updateBoxStatusValue = status
 	if m.updateBoxStatusErr != nil {
 		return m.updateBoxStatusErr
+	}
+	if m.box != nil && m.box.BoxID == boxID {
+		m.box.Status = status
 	}
 	return nil
 }
@@ -611,6 +637,9 @@ func TestServiceScanTableCargoplaceSuccess(t *testing.T) {
 	if result.TotalExpected != 5 {
 		t.Fatalf("expected total_expected 5, got %d", result.TotalExpected)
 	}
+	if repo.withTxCalls != 1 {
+		t.Fatalf("expected ScanTableCargoplace to run in one transaction, got %d", repo.withTxCalls)
+	}
 	if repo.updateCargoplaceStatusID != cargoplaceID || repo.updateCargoplaceStatusValue != cargoplaceStatusTableInProgress {
 		t.Fatalf("unexpected cargoplace status update: %+v", repo)
 	}
@@ -637,6 +666,41 @@ func TestServiceScanSKURejectsClosedBox(t *testing.T) {
 	_, err := NewService(repo).ScanSKU(context.Background(), uuid.New(), cargoplaceID, boxID, "4607036430014")
 	if !errors.Is(err, ErrBoxNotOpen) {
 		t.Fatalf("expected ErrBoxNotOpen, got %v", err)
+	}
+}
+
+func TestServiceScanBoxCreatesNewBox(t *testing.T) {
+	cargoplaceID := uuid.New()
+	boxID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableInProgress,
+		},
+		boxByBarcodeErr: ErrBoxNotFound,
+		upsertedBox: &domain.Box{
+			BoxID:        boxID,
+			CargoplaceID: cargoplaceID,
+			BoxBarcode:   "BOX-TABLE-NEW",
+			Status:       boxStatusOpen,
+		},
+	}
+
+	result, err := NewService(repo).ScanBox(context.Background(), uuid.New(), cargoplaceID, "BOX-TABLE-NEW")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if repo.withTxCalls != 1 {
+		t.Fatalf("expected ScanBox to run in one transaction, got %d", repo.withTxCalls)
+	}
+	if repo.upsertBoxCargoplaceID != cargoplaceID || repo.upsertBoxBarcode != "BOX-TABLE-NEW" || repo.upsertBoxStatus != boxStatusOpen {
+		t.Fatalf("unexpected upsert args: %+v", repo)
+	}
+	if result.BoxID != boxID || result.Status != boxStatusOpen {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(repo.insertReceivingTableLogs) != 1 || repo.insertReceivingTableLogs[0].Action != "SCAN_BOX" {
+		t.Fatalf("expected SCAN_BOX log, got %+v", repo.insertReceivingTableLogs)
 	}
 }
 
@@ -725,6 +789,9 @@ func TestServiceCloseBoxSuccess(t *testing.T) {
 	result, err := NewService(repo).CloseBox(context.Background(), uuid.New(), boxID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
+	}
+	if repo.withTxCalls != 1 {
+		t.Fatalf("expected CloseBox to run in one transaction, got %d", repo.withTxCalls)
 	}
 	if repo.updateBoxStatusID != boxID || repo.updateBoxStatusValue != boxStatusClosed {
 		t.Fatalf("unexpected box update: %+v", repo)
