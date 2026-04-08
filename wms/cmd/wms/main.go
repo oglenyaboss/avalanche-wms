@@ -12,6 +12,7 @@ import (
 	kafkago "github.com/segmentio/kafka-go"
 
 	"wms/internal/assembly"
+	"wms/internal/auth"
 	"wms/internal/config"
 	"wms/internal/ledger"
 	"wms/internal/platform/kafka"
@@ -23,7 +24,10 @@ import (
 
 func main() {
 	ctx := context.Background()
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("WMS config invalid: %v", err)
+	}
 
 	// PostgreSQL
 	dbPool, err := postgres.NewPool(ctx, cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBName)
@@ -56,7 +60,7 @@ func main() {
 	// Module wiring: repositories → services → handlers
 	receivingRepo := receiving.NewRepository(dbPool)
 	receivingSvc := receiving.NewService(receivingRepo)
-	_ = receiving.NewHandler(receivingSvc)
+	receivingHandler := receiving.NewHandler(receivingSvc)
 
 	assemblyRepo := assembly.NewRepository(dbPool)
 	assemblySvc := assembly.NewService(assemblyRepo)
@@ -70,9 +74,17 @@ func main() {
 	shippingSvc := shipping.NewService(shippingRepo)
 	_ = shipping.NewHandler(shippingSvc)
 
+	authRepo := auth.NewRepository(dbPool)
+	authSvc := auth.NewService(authRepo, cfg.JWTSecret, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
+	authHandler := auth.NewHandler(authSvc)
+
 	// Router
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
+	authHandler.RegisterRoutes(r)
+	receivingRouter := r.PathPrefix("/receiving").Subrouter()
+	receivingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	receivingHandler.RegisterRoutes(receivingRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {

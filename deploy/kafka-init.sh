@@ -4,6 +4,7 @@ set -euo pipefail
 KAFKA_BROKER="${KAFKA_BROKER:-kafka:9092}"
 
 TOPICS=(
+  "__debezium-heartbeat.wms"
   "wms.receiving.v1"
   "wms.putaway.v1"
   "wms.picking.v1"

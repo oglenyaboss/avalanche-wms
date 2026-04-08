@@ -13,6 +13,11 @@ services:
       POSTGRES_DB: ${DB_NAME:-wms_blockchain_db}
       KAFKA_BROKER: kafka:9092
       LEDGER_ADAPTER_URL: http://ledger-adapter:8085
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env or environment}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
+    ports:
+      - "8081:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,6 +49,7 @@ services:
       postgres -c wal_level=logical
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./deploy/seed.sql:/deploy/seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-root} -d ${DB_NAME:-wms_blockchain_db}"]
       interval: 5s
@@ -65,9 +71,11 @@ services:
       DB_CONTAINER: ""
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD:-debezium}
+      SEED_DATA: ${SEED_DATA:-true}
     volumes:
       - ./wms/migrations:/wms/migrations:ro
       - ./deploy/db-init.sh:/db-init.sh:ro
+      - ./deploy/seed.sql:/deploy/seed.sql:ro
     entrypoint: ["bash", "/db-init.sh"]
     depends_on:
       postgres:
@@ -138,6 +146,8 @@ services:
     ports:
       - "8083:8083"
       - "9012:9012"
+    env_file:
+      - .env
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: debezium-connect
@@ -150,6 +160,9 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
 
       ERRORS_DEADLETTERQUEUE_TOPIC_NAME: debezium_dlq
       ERRORS_DEADLETTERQUEUE_TOPIC_REPLICATION_FACTOR: 1

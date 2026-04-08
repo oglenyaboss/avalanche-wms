@@ -16,6 +16,18 @@
 | created_at  | timestamptz | Время создания |
 | updated_at  | timestamptz | Время последнего обновления |
 
+## `sku_barcodes`（маппинг штрихкодов на SKU）
+
+| Имя поля   | Тип                | Описание |
+| ---------- | ------------------ | -------- |
+| id         | bigserial (PK)     | Суррогатный первичный ключ |
+| sku_id     | uuid (FK - skus)   | Ссылка на SKU |
+| barcode    | text UNIQUE        | Глобально уникальный штрихкод товара |
+| created_at | timestamptz        | Время создания |
+
+- many-to-one: один SKU может иметь несколько barcode
+- Используется на этапе `SCAN_SKU` для определения SKU по штрихкоду
+
 
 ## `warehouses`（таблица складов）
 
@@ -215,6 +227,7 @@
 | id              | bigserial (PK)       |                                     |
 | event_id        | uuid                 |                                     |
 | product_id      | uuid (FK → products) |                                     |
+| from_bin_id     | uuid (FK → bins)     | Исходная буферная ячейка |
 | bin_id          | uuid (FK → bins)     |                                     |
 | operator_id     | uuid (FK - users)    | Оператор |
 | onchain_status  | text                 | PENDING_ONCHAIN / ONCHAIN_COMMITTED |
@@ -223,6 +236,7 @@
 | created_at      | timestamptz          |                                     |
 
 - До putaway product должен находиться в buffer
+- `from_bin_id` хранит источник перемещения для полного аудит-трейла
 - После putaway поле product.bin_id обновляется на целевую ячейку
 
 ---

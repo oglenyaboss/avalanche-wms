@@ -1,4 +1,4 @@
-.PHONY: help up down build logs lint test tidy vendor init migrate
+.PHONY: help up down build logs lint test tidy vendor init migrate seed
 
 COMPOSE := docker compose
 
@@ -65,9 +65,32 @@ init: ## Run full infrastructure init (DB migrations + seed + Kafka topics)
 migrate: ## Run database migrations only
 	$(COMPOSE) run --rm db-init bash /wms/migrations/migrate.sh
 
+seed: ## Re-seed development data
+	$(COMPOSE) exec postgres psql -U $${DB_USER:-root} -d $${DB_NAME:-wms_blockchain_db} -f /deploy/seed.sql
+
 # ── Pre-commit ──────────────────────────────────────────
 hooks-install: ## Install pre-commit hooks
 	pre-commit install
 
 hooks-run: ## Run pre-commit on all files
 	pre-commit run --all-files
+
+# ── Debezium Connector ──────────────────────────────────
+
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
+
+.PHONY: register-connector connector-status delete-connector
+
+register-connector:
+	@curl -X POST http://localhost:8083/connectors \
+  		-H "Content-Type: application/json" \
+  		-d @deploy/debezium/connectors/postgres-connector.json
+
+connector-status:
+	@curl http://localhost:8083/connectors/outbox-connector/status
+
+delete-connector:
+	@curl -X DELETE http://localhost:8083/connectors/outbox-connector
