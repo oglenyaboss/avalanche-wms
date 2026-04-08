@@ -74,7 +74,6 @@ type receivingRepository interface {
 	GetSKUByID(ctx context.Context, skuID uuid.UUID) (*domain.SKU, error)
 	InsertProduct(ctx context.Context, product *domain.Product) error
 	GetBinByID(ctx context.Context, binID uuid.UUID) (*domain.Bin, error)
-	MoveReceivedProductsToBuffer(ctx context.Context, cargoplaceID uuid.UUID, bufferBinID uuid.UUID) (int, error)
 	ScanBufferWithLog(ctx context.Context, cargoplaceID uuid.UUID, bufferBinID uuid.UUID, logParams *TableLogParams) (int, error)
 	CloseCargoplaceWithOutbox(ctx context.Context, params *CloseCargoplaceParams) (*CloseCargoplaceTxResult, error)
 	CountProductsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
@@ -210,9 +209,10 @@ func (s *Service) ScanCargoplace(
 			return fmt.Errorf("receiving.Service.ScanCargoplace insert log: %w", err)
 		}
 
-		total, received, err = s.countShipmentProgress(ctx, txRepo, shipmentID)
-		if err != nil {
-			return fmt.Errorf("receiving.Service.ScanCargoplace count progress: %w", err)
+		var countErr error
+		total, received, countErr = s.countShipmentProgress(ctx, txRepo, shipmentID)
+		if countErr != nil {
+			return fmt.Errorf("receiving.Service.ScanCargoplace count progress: %w", countErr)
 		}
 
 		if err := s.tryAutoCloseShipment(ctx, txRepo, shipment.ShipmentID, shipment.TTNCode, total, received, operatorID); err != nil {
@@ -273,9 +273,10 @@ func (s *Service) AcceptShipment(
 			return fmt.Errorf("receiving.Service.AcceptShipment insert log: %w", err)
 		}
 
-		total, received, err = s.countShipmentProgress(ctx, txRepo, shipmentID)
-		if err != nil {
-			return fmt.Errorf("receiving.Service.AcceptShipment count progress: %w", err)
+		var countErr error
+		total, received, countErr = s.countShipmentProgress(ctx, txRepo, shipmentID)
+		if countErr != nil {
+			return fmt.Errorf("receiving.Service.AcceptShipment count progress: %w", countErr)
 		}
 
 		return nil
@@ -649,14 +650,18 @@ func (s *Service) ScanBuffer(
 		return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", ErrBinNotBuffer)
 	}
 
-	productsPlaced, err := s.repo.ScanBufferWithLog(ctx, cargoplaceID, bufferBinID, &TableLogParams{
-		CargoplaceID: cargoplaceID,
-		OperatorID:   operatorID,
-		Action:       "SCAN_BUFFER",
-		BufferBinID:  &bufferBinID,
-		OccurredAt:   time.Now().UTC(),
-	})
-	if err != nil {
+	var productsPlaced int
+	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		var txErr error
+		productsPlaced, txErr = txRepo.ScanBufferWithLog(ctx, cargoplaceID, bufferBinID, &TableLogParams{
+			CargoplaceID: cargoplaceID,
+			OperatorID:   operatorID,
+			Action:       "SCAN_BUFFER",
+			BufferBinID:  &bufferBinID,
+			OccurredAt:   time.Now().UTC(),
+		})
+		return txErr
+	}); err != nil {
 		return nil, fmt.Errorf("receiving.Service.ScanBuffer scan buffer with log: %w", err)
 	}
 

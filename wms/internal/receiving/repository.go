@@ -556,54 +556,24 @@ func (r *Repository) GetBinByID(ctx context.Context, binID uuid.UUID) (*domain.B
 	return &bin, nil
 }
 
-func (r *Repository) MoveReceivedProductsToBuffer(
-	ctx context.Context,
-	cargoplaceID uuid.UUID,
-	bufferBinID uuid.UUID,
-) (int, error) {
-	const query = `
-		UPDATE wms_inventory.products
-		SET bin_id = $2, updated_at = now()
-		WHERE cargoplace_id = $1 AND status = 'RECEIVED'`
-
-	tag, err := r.q.Exec(ctx, query, cargoplaceID, bufferBinID)
-	if err != nil {
-		return 0, fmt.Errorf("receiving.Repository.MoveReceivedProductsToBuffer exec: %w", err)
-	}
-
-	return int(tag.RowsAffected()), nil
-}
-
 func (r *Repository) ScanBufferWithLog(
 	ctx context.Context,
 	cargoplaceID uuid.UUID,
 	bufferBinID uuid.UUID,
 	logParams *TableLogParams,
 ) (int, error) {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog begin tx: %w", err)
-	}
-	defer func() {
-		_ = tx.Rollback(ctx)
-	}()
-
 	const moveQuery = `
 		UPDATE wms_inventory.products
 		SET bin_id = $2, updated_at = now()
 		WHERE cargoplace_id = $1 AND status = 'RECEIVED'`
 
-	tag, err := tx.Exec(ctx, moveQuery, cargoplaceID, bufferBinID)
+	tag, err := r.q.Exec(ctx, moveQuery, cargoplaceID, bufferBinID)
 	if err != nil {
 		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog move products: %w", err)
 	}
 
-	if err := r.insertReceivingTableLogTx(ctx, tx, logParams); err != nil {
+	if err := r.InsertReceivingTableLog(ctx, logParams); err != nil {
 		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog insert log: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog commit tx: %w", err)
 	}
 
 	return int(tag.RowsAffected()), nil
@@ -924,7 +894,7 @@ func (r *Repository) listReceivedProductCountsBySKUTx(
 		SELECT p.sku_id, s.name, COUNT(*)::int AS received_qty
 		FROM wms_inventory.products p
 		JOIN wms_inventory.skus s ON s.sku_id = p.sku_id
-		WHERE p.cargoplace_id = $1
+		WHERE p.cargoplace_id = $1 AND p.status = 'RECEIVED'
 		GROUP BY p.sku_id, s.name
 		ORDER BY s.name`
 

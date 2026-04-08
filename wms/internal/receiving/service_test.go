@@ -63,8 +63,6 @@ type mockReceivingRepo struct {
 	binByIDErr                   error
 	insertedProduct              *domain.Product
 	insertProductErr             error
-	moveProductsToBufferCount    int
-	moveProductsToBufferErr      error
 	scanBufferWithLogCount       int
 	scanBufferWithLogErr         error
 	scanBufferWithLogParams      *TableLogParams
@@ -362,13 +360,6 @@ func (m *mockReceivingRepo) CountProductsByCargoplace(_ context.Context, _ uuid.
 		return 0, m.productsInCargoplaceErr
 	}
 	return m.productsInCargoplace, nil
-}
-
-func (m *mockReceivingRepo) MoveReceivedProductsToBuffer(_ context.Context, _ uuid.UUID, _ uuid.UUID) (int, error) {
-	if m.moveProductsToBufferErr != nil {
-		return 0, m.moveProductsToBufferErr
-	}
-	return m.moveProductsToBufferCount, nil
 }
 
 func (m *mockReceivingRepo) ScanBufferWithLog(

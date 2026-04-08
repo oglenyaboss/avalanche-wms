@@ -59,7 +59,7 @@ func isBufferBin(bin *domain.Bin) bool {
 	}
 
 	section := strings.ToUpper(strings.TrimSpace(*bin.Section))
-	return strings.Contains(section, "BUFFER")
+	return section == "BUFFER"
 }
 
 func payloadHashForReceiving(productID, cargoplaceID uuid.UUID) (string, error) {
