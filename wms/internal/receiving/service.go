@@ -287,9 +287,10 @@ func (s *Service) ScanCargoplace(
 			return fmt.Errorf("receiving.Service.ScanCargoplace insert log: %w", err)
 		}
 
-		total, received, err = s.countShipmentProgress(ctx, txRepo, shipmentID)
-		if err != nil {
-			return fmt.Errorf("receiving.Service.ScanCargoplace count progress: %w", err)
+		var countErr error
+		total, received, countErr = s.countShipmentProgress(ctx, txRepo, shipmentID)
+		if countErr != nil {
+			return fmt.Errorf("receiving.Service.ScanCargoplace count progress: %w", countErr)
 		}
 
 		if err := s.tryAutoCloseShipment(ctx, txRepo, shipment.ShipmentID, shipment.TTNCode, total, received, operatorID); err != nil {
@@ -350,9 +351,10 @@ func (s *Service) AcceptShipment(
 			return fmt.Errorf("receiving.Service.AcceptShipment insert log: %w", err)
 		}
 
-		total, received, err = s.countShipmentProgress(ctx, txRepo, shipmentID)
-		if err != nil {
-			return fmt.Errorf("receiving.Service.AcceptShipment count progress: %w", err)
+		var countErr error
+		total, received, countErr = s.countShipmentProgress(ctx, txRepo, shipmentID)
+		if countErr != nil {
+			return fmt.Errorf("receiving.Service.AcceptShipment count progress: %w", countErr)
 		}
 
 		return nil
@@ -451,13 +453,15 @@ func (s *Service) ScanBox(
 			return nil, fmt.Errorf("receiving.Service.ScanBox: %w", ErrBoxNotOpen)
 		}
 
-		if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
-			CargoplaceID: cargoplaceID,
-			BoxID:        &box.BoxID,
-			OperatorID:   operatorID,
-			Action:       "SCAN_BOX",
-			BoxBarcode:   &boxBarcode,
-			OccurredAt:   time.Now().UTC(),
+		if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+			return txRepo.InsertReceivingTableLog(ctx, &TableLogParams{
+				CargoplaceID: cargoplaceID,
+				BoxID:        &box.BoxID,
+				OperatorID:   operatorID,
+				Action:       "SCAN_BOX",
+				BoxBarcode:   &boxBarcode,
+				OccurredAt:   time.Now().UTC(),
+			})
 		}); err != nil {
 			return nil, fmt.Errorf("receiving.Service.ScanBox insert log: %w", err)
 		}
@@ -529,13 +533,15 @@ func (s *Service) ScanSKU(
 		return nil, fmt.Errorf("receiving.Service.ScanSKU get sku by barcode: %w", err)
 	}
 
-	if err := s.repo.InsertReceivingTableLog(ctx, &TableLogParams{
-		CargoplaceID: cargoplaceID,
-		BoxID:        &boxID,
-		OperatorID:   operatorID,
-		Action:       "SCAN_SKU",
-		SKUID:        &sku.SKUID,
-		OccurredAt:   time.Now().UTC(),
+	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		return txRepo.InsertReceivingTableLog(ctx, &TableLogParams{
+			CargoplaceID: cargoplaceID,
+			BoxID:        &boxID,
+			OperatorID:   operatorID,
+			Action:       "SCAN_SKU",
+			SKUID:        &sku.SKUID,
+			OccurredAt:   time.Now().UTC(),
+		})
 	}); err != nil {
 		return nil, fmt.Errorf("receiving.Service.ScanSKU insert log: %w", err)
 	}
