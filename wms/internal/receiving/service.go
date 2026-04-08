@@ -216,9 +216,10 @@ func (s *Service) ScanCargoplace(
 			return fmt.Errorf("receiving.Service.ScanCargoplace insert log: %w", err)
 		}
 
-		total, received, err = s.countShipmentProgress(ctx, txRepo, shipmentID)
-		if err != nil {
-			return fmt.Errorf("receiving.Service.ScanCargoplace count progress: %w", err)
+		var countErr error
+		total, received, countErr = s.countShipmentProgress(ctx, txRepo, shipmentID)
+		if countErr != nil {
+			return fmt.Errorf("receiving.Service.ScanCargoplace count progress: %w", countErr)
 		}
 
 		if err := s.tryAutoCloseShipment(ctx, txRepo, shipment.ShipmentID, shipment.TTNCode, total, received, operatorID); err != nil {
@@ -279,9 +280,10 @@ func (s *Service) AcceptShipment(
 			return fmt.Errorf("receiving.Service.AcceptShipment insert log: %w", err)
 		}
 
-		total, received, err = s.countShipmentProgress(ctx, txRepo, shipmentID)
-		if err != nil {
-			return fmt.Errorf("receiving.Service.AcceptShipment count progress: %w", err)
+		var countErr error
+		total, received, countErr = s.countShipmentProgress(ctx, txRepo, shipmentID)
+		if countErr != nil {
+			return fmt.Errorf("receiving.Service.AcceptShipment count progress: %w", countErr)
 		}
 
 		return nil
