@@ -59,12 +59,19 @@ type mockReceivingRepo struct {
 	skuByBarcodeErr              error
 	skuByID                      *domain.SKU
 	skuByIDErr                   error
+	binByID                      *domain.Bin
+	binByIDErr                   error
 	insertedProduct              *domain.Product
 	insertProductErr             error
+	scanBufferWithLogCount       int
+	scanBufferWithLogErr         error
+	scanBufferWithLogParams      *TableLogParams
 	productsInCargoplace         int
 	productsInCargoplaceErr      error
 	expectedItemsInCargoplace    int
 	expectedItemsInCargoplaceErr error
+	closeCargoplaceTxResult      *CloseCargoplaceTxResult
+	closeCargoplaceOutboxErr     error
 	insertReceivingGateLogs      []GateLogParams
 	insertReceivingGateLogErr    error
 	insertReceivingTableLogs     []TableLogParams
@@ -333,6 +340,13 @@ func (m *mockReceivingRepo) GetSKUByID(_ context.Context, _ uuid.UUID) (*domain.
 	return m.skuByID, nil
 }
 
+func (m *mockReceivingRepo) GetBinByID(_ context.Context, _ uuid.UUID) (*domain.Bin, error) {
+	if m.binByIDErr != nil {
+		return nil, m.binByIDErr
+	}
+	return m.binByID, nil
+}
+
 func (m *mockReceivingRepo) InsertProduct(_ context.Context, product *domain.Product) error {
 	m.insertedProduct = product
 	if m.insertProductErr != nil {
@@ -348,11 +362,37 @@ func (m *mockReceivingRepo) CountProductsByCargoplace(_ context.Context, _ uuid.
 	return m.productsInCargoplace, nil
 }
 
+func (m *mockReceivingRepo) ScanBufferWithLog(
+	_ context.Context,
+	_ uuid.UUID,
+	_ uuid.UUID,
+	logParams *TableLogParams,
+) (int, error) {
+	if logParams != nil {
+		paramsCopy := *logParams
+		m.scanBufferWithLogParams = &paramsCopy
+	}
+	if m.scanBufferWithLogErr != nil {
+		return 0, m.scanBufferWithLogErr
+	}
+	return m.scanBufferWithLogCount, nil
+}
+
 func (m *mockReceivingRepo) CountExpectedItemsByCargoplace(_ context.Context, _ uuid.UUID) (int, error) {
 	if m.expectedItemsInCargoplaceErr != nil {
 		return 0, m.expectedItemsInCargoplaceErr
 	}
 	return m.expectedItemsInCargoplace, nil
+}
+
+func (m *mockReceivingRepo) CloseCargoplaceWithOutbox(
+	_ context.Context,
+	_ *CloseCargoplaceParams,
+) (*CloseCargoplaceTxResult, error) {
+	if m.closeCargoplaceOutboxErr != nil {
+		return nil, m.closeCargoplaceOutboxErr
+	}
+	return m.closeCargoplaceTxResult, nil
 }
 
 func (m *mockReceivingRepo) InsertReceivingGateLog(_ context.Context, params *GateLogParams) error {
@@ -836,6 +876,114 @@ func TestServiceCloseBoxRejectsCargoplaceOutsideProgress(t *testing.T) {
 	}
 
 	_, err := NewService(repo).CloseBox(context.Background(), uuid.New(), boxID)
+	if !errors.Is(err, ErrCargoplaceNotInProgress) {
+		t.Fatalf("expected ErrCargoplaceNotInProgress, got %v", err)
+	}
+}
+
+func TestServiceScanBufferSuccess(t *testing.T) {
+	cargoplaceID := uuid.New()
+	bufferBinID := uuid.New()
+	section := "BUFFER"
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableInProgress,
+		},
+		binByID: &domain.Bin{
+			BinID:   bufferBinID,
+			Code:    "BUFFER-01",
+			Section: &section,
+		},
+		scanBufferWithLogCount: 4,
+	}
+
+	result, err := NewService(repo).ScanBuffer(context.Background(), uuid.New(), cargoplaceID, bufferBinID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.BufferCode != "BUFFER-01" || result.ProductsPlaced != 4 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if repo.scanBufferWithLogParams == nil || repo.scanBufferWithLogParams.Action != "SCAN_BUFFER" {
+		t.Fatalf("expected SCAN_BUFFER log params, got %+v", repo.scanBufferWithLogParams)
+	}
+	if repo.scanBufferWithLogParams.BufferBinID == nil || *repo.scanBufferWithLogParams.BufferBinID != bufferBinID {
+		t.Fatalf("expected buffer_bin_id to be logged, got %+v", repo.scanBufferWithLogParams)
+	}
+}
+
+func TestServiceScanBufferRejectsNonBufferBin(t *testing.T) {
+	cargoplaceID := uuid.New()
+	section := "A"
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableInProgress,
+		},
+		binByID: &domain.Bin{
+			BinID:   uuid.New(),
+			Code:    "A-01-01",
+			Section: &section,
+		},
+	}
+
+	_, err := NewService(repo).ScanBuffer(context.Background(), uuid.New(), cargoplaceID, repo.binByID.BinID)
+	if !errors.Is(err, ErrBinNotBuffer) {
+		t.Fatalf("expected ErrBinNotBuffer, got %v", err)
+	}
+}
+
+func TestServiceCloseCargoplaceSuccess(t *testing.T) {
+	cargoplaceID := uuid.New()
+	skuAID := uuid.New()
+	skuBID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableInProgress,
+		},
+		closeCargoplaceTxResult: &CloseCargoplaceTxResult{
+			ExpectedSKUs: []ExpectedSKU{
+				{SKUID: skuAID, SKUName: "SKU-A", ExpectedQty: 5},
+				{SKUID: skuBID, SKUName: "SKU-B", ExpectedQty: 3},
+			},
+			ReceivedSKUCounts: []ReceivedSKUCount{
+				{SKUID: skuAID, SKUName: "SKU-A", ReceivedQty: 4},
+				{SKUID: skuBID, SKUName: "SKU-B", ReceivedQty: 3},
+			},
+			OutboxEventsCreated: 7,
+		},
+	}
+
+	result, err := NewService(repo).CloseCargoplace(context.Background(), uuid.New(), cargoplaceID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Status != cargoplaceStatusTableClosed {
+		t.Fatalf("expected TABLE_CLOSED, got %s", result.Status)
+	}
+	if result.Summary.ProductsExpected != 8 || result.Summary.ProductsReceived != 7 || result.Summary.Shortage != 1 {
+		t.Fatalf("unexpected summary: %+v", result.Summary)
+	}
+	if len(result.Summary.ShortageBySKU) != 1 || result.Summary.ShortageBySKU[0].SKUName != "SKU-A" {
+		t.Fatalf("unexpected shortage breakdown: %+v", result.Summary.ShortageBySKU)
+	}
+	if result.OutboxEventsCreated != 7 {
+		t.Fatalf("expected 7 outbox events, got %d", result.OutboxEventsCreated)
+	}
+}
+
+func TestServiceCloseCargoplaceRejectsStatusOutsideProgress(t *testing.T) {
+	cargoplaceID := uuid.New()
+	repo := &mockReceivingRepo{
+		cargoplaceByID: &domain.Cargoplace{
+			CargoplaceID: cargoplaceID,
+			Status:       cargoplaceStatusTableClosed,
+		},
+	}
+
+	_, err := NewService(repo).CloseCargoplace(context.Background(), uuid.New(), cargoplaceID)
 	if !errors.Is(err, ErrCargoplaceNotInProgress) {
 		t.Fatalf("expected ErrCargoplaceNotInProgress, got %v", err)
 	}

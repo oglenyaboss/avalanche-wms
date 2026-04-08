@@ -218,6 +218,115 @@ JOIN wms_inventory.cargoplaces c
 JOIN wms_inventory.skus s ON s.name = v.sku_name
 ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
+-- 8.6) Dedicated dataset for scan-buffer and close-cargoplace
+-- This cargoplace is already TABLE_IN_PROGRESS and has RECEIVED products without bin_id,
+-- so buffer placement and outbox creation can be tested immediately.
+INSERT INTO wms_inventory.inbound_shipments (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  w.warehouse_id,
+  'ТТН-2026-TABLE-002',
+  'GATE_CLOSED',
+  now(),
+  now()
+FROM wms_inventory.warehouses w
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT (ttn_code) DO NOTHING;
+
+INSERT INTO wms_inventory.cargoplaces (
+  cargoplace_id,
+  shipment_id,
+  cargoplace_code,
+  status,
+  received_at_gate_at,
+  created_at,
+  updated_at
+)
+SELECT
+  gen_random_uuid(),
+  sh.shipment_id,
+  'CP-TABLE-002',
+  'TABLE_IN_PROGRESS',
+  now() - interval '45 minutes',
+  now(),
+  now()
+FROM wms_inventory.inbound_shipments sh
+WHERE sh.ttn_code = 'ТТН-2026-TABLE-002'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO wms_inventory.boxes (box_id, cargoplace_id, box_barcode, status, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  c.cargoplace_id,
+  'BOX-TABLE-201',
+  'CLOSED',
+  now(),
+  now()
+FROM wms_inventory.inbound_shipments sh
+JOIN wms_inventory.cargoplaces c
+  ON c.shipment_id = sh.shipment_id
+WHERE sh.ttn_code = 'ТТН-2026-TABLE-002'
+  AND c.cargoplace_code = 'CP-TABLE-002'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO wms_inventory.expected_cargoplace_skus (cargoplace_id, sku_id, expected_qty)
+SELECT
+  c.cargoplace_id,
+  s.sku_id,
+  v.expected_qty
+FROM (
+  VALUES
+    ('CP-TABLE-002', 'Кроссовки Nike Air Max 90', 2),
+    ('CP-TABLE-002', 'Футболка Adidas Originals', 2)
+) AS v(cargoplace_code, sku_name, expected_qty)
+JOIN wms_inventory.inbound_shipments sh ON sh.ttn_code = 'ТТН-2026-TABLE-002'
+JOIN wms_inventory.cargoplaces c
+  ON c.shipment_id = sh.shipment_id
+ AND c.cargoplace_code = v.cargoplace_code
+JOIN wms_inventory.skus s ON s.name = v.sku_name
+ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
+
+INSERT INTO wms_inventory.products (
+  product_id,
+  sku_id,
+  shipment_id,
+  cargoplace_id,
+  box_id,
+  qr_code,
+  bin_id,
+  order_id,
+  status,
+  created_at,
+  updated_at
+)
+SELECT
+  gen_random_uuid(),
+  s.sku_id,
+  sh.shipment_id,
+  c.cargoplace_id,
+  b.box_id,
+  v.qr_code,
+  NULL,
+  NULL,
+  'RECEIVED'::wms_inventory.product_status,
+  now(),
+  now()
+FROM (
+  VALUES
+    ('QR-TABLE-2001', 'Кроссовки Nike Air Max 90'),
+    ('QR-TABLE-2002', 'Кроссовки Nike Air Max 90'),
+    ('QR-TABLE-2003', 'Футболка Adidas Originals')
+) AS v(qr_code, sku_name)
+JOIN wms_inventory.inbound_shipments sh ON sh.ttn_code = 'ТТН-2026-TABLE-002'
+JOIN wms_inventory.cargoplaces c
+  ON c.shipment_id = sh.shipment_id
+ AND c.cargoplace_code = 'CP-TABLE-002'
+JOIN wms_inventory.skus s ON s.name = v.sku_name
+LEFT JOIN wms_inventory.boxes b
+  ON b.cargoplace_id = c.cargoplace_id
+ AND b.box_barcode = 'BOX-TABLE-201'
+ON CONFLICT (qr_code) DO NOTHING;
+
 -- 9) Orders (customer = existing admin user)
 INSERT INTO wms_inventory.orders (order_id, external_order_no, customer_id, warehouse_id, status, created_at, updated_at)
 SELECT

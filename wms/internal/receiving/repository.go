@@ -54,29 +54,6 @@ func (r *Repository) WithTx(ctx context.Context, fn func(receivingRepository) er
 	return nil
 }
 
-type GateLogParams struct {
-	TTNCode        *string
-	CargoplaceCode *string
-	ShipmentID     *uuid.UUID
-	CargoplaceID   *uuid.UUID
-	OperatorID     uuid.UUID
-	Action         string
-	OccurredAt     time.Time
-}
-
-type TableLogParams struct {
-	CargoplaceID uuid.UUID
-	BoxID        *uuid.UUID
-	OperatorID   uuid.UUID
-	Action       string
-	BoxBarcode   *string
-	SKUID        *uuid.UUID
-	QRCode       *string
-	ProductID    *uuid.UUID
-	BufferBinID  *uuid.UUID
-	OccurredAt   time.Time
-}
-
 // GetShipmentByTTN retrieves an inbound shipment from the database based on the provided TTN code.
 func (r *Repository) GetShipmentByTTN(ctx context.Context, ttnCode string) (*domain.InboundShipment, error) {
 	const query = `
@@ -553,6 +530,55 @@ func (r *Repository) InsertProduct(ctx context.Context, product *domain.Product)
 	return nil
 }
 
+func (r *Repository) GetBinByID(ctx context.Context, binID uuid.UUID) (*domain.Bin, error) {
+	const query = `
+		SELECT bin_id, warehouse_id, code, section, volume, created_at, updated_at
+		FROM wms_inventory.bins
+		WHERE bin_id = $1`
+
+	var bin domain.Bin
+	err := r.q.QueryRow(ctx, query, binID).Scan(
+		&bin.BinID,
+		&bin.WarehouseID,
+		&bin.Code,
+		&bin.Section,
+		&bin.Volume,
+		&bin.CreatedAt,
+		&bin.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("receiving.Repository.GetBinByID: %w", ErrBinNotFound)
+		}
+		return nil, fmt.Errorf("receiving.Repository.GetBinByID scan: %w", err)
+	}
+
+	return &bin, nil
+}
+
+func (r *Repository) ScanBufferWithLog(
+	ctx context.Context,
+	cargoplaceID uuid.UUID,
+	bufferBinID uuid.UUID,
+	logParams *TableLogParams,
+) (int, error) {
+	const moveQuery = `
+		UPDATE wms_inventory.products
+		SET bin_id = $2, updated_at = now()
+		WHERE cargoplace_id = $1 AND status = 'RECEIVED'`
+
+	tag, err := r.q.Exec(ctx, moveQuery, cargoplaceID, bufferBinID)
+	if err != nil {
+		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog move products: %w", err)
+	}
+
+	if err := r.InsertReceivingTableLog(ctx, logParams); err != nil {
+		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog insert log: %w", err)
+	}
+
+	return int(tag.RowsAffected()), nil
+}
+
 func (r *Repository) CountProductsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error) {
 	const query = `
 		SELECT COUNT(*)
@@ -646,6 +672,296 @@ func (r *Repository) InsertReceivingTableLog(ctx context.Context, params *TableL
 	)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.InsertReceivingTableLog exec: %w", err)
+	}
+
+	return nil
+}
+
+// CloseCargoplaceWithOutbox
+func (r *Repository) CloseCargoplaceWithOutbox(
+	ctx context.Context,
+	params *CloseCargoplaceParams,
+) (*CloseCargoplaceTxResult, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox begin tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	const updateCargoplaceQuery = `
+		UPDATE wms_inventory.cargoplaces
+		SET status = $2, updated_at = now()
+		WHERE cargoplace_id = $1 AND status = $3`
+
+	tag, err := tx.Exec(
+		ctx,
+		updateCargoplaceQuery,
+		params.CargoplaceID,
+		cargoplaceStatusTableClosed,
+		cargoplaceStatusTableInProgress,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox update cargoplace: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		exists, err := r.cargoplaceExistsTx(ctx, tx, params.CargoplaceID)
+		if err != nil {
+			return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox check cargoplace existence: %w", err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox: %w", ErrCargoplaceNotFound)
+		}
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox: %w", ErrCargoplaceNotInProgress)
+	}
+
+	expectedSKUs, err := r.listExpectedSKUsByCargoplaceTx(ctx, tx, params.CargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox list expected skus: %w", err)
+	}
+
+	receivedSKUCounts, err := r.listReceivedProductCountsBySKUTx(ctx, tx, params.CargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox list received skus: %w", err)
+	}
+
+	if err := r.insertReceivingTableLogTx(ctx, tx, &TableLogParams{
+		CargoplaceID: params.CargoplaceID,
+		OperatorID:   params.OperatorID,
+		Action:       "CLOSE_CARGO",
+		OccurredAt:   params.OccurredAt,
+	}); err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox insert log: %w", err)
+	}
+
+	productIDs, err := r.listProductIDsByCargoplaceTx(ctx, tx, params.CargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox list product ids: %w", err)
+	}
+
+	if err := r.insertOutboxEventsTx(ctx, tx, params.CargoplaceID, productIDs); err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox insert outbox events: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox commit tx: %w", err)
+	}
+
+	return &CloseCargoplaceTxResult{
+		ExpectedSKUs:        expectedSKUs,
+		ReceivedSKUCounts:   receivedSKUCounts,
+		OutboxEventsCreated: len(productIDs),
+	}, nil
+}
+
+func (r *Repository) insertReceivingTableLogTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	params *TableLogParams,
+) error {
+	const query = `
+		INSERT INTO wms_ops.receiving_table (
+			event_id,
+			cargoplace_id,
+			box_id,
+			operator_id,
+			action,
+			box_barcode,
+			sku_id,
+			qr_code,
+			product_id,
+			buffer_bin_id,
+			occurred_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+
+	_, err := tx.Exec(
+		ctx,
+		query,
+		uuid.New(),
+		params.CargoplaceID,
+		params.BoxID,
+		params.OperatorID,
+		params.Action,
+		params.BoxBarcode,
+		params.SKUID,
+		params.QRCode,
+		params.ProductID,
+		params.BufferBinID,
+		params.OccurredAt,
+	)
+	if err != nil {
+		return fmt.Errorf("receiving.Repository.insertReceivingTableLogTx exec: %w", err)
+	}
+
+	return nil
+}
+
+func (r *Repository) listProductIDsByCargoplaceTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cargoplaceID uuid.UUID,
+) ([]uuid.UUID, error) {
+	const query = `
+		SELECT product_id
+		FROM wms_inventory.products
+		WHERE cargoplace_id = $1
+			AND status = 'RECEIVED'
+		ORDER BY product_id`
+
+	rows, err := tx.Query(ctx, query, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.listProductIDsByCargoplaceTx query: %w", err)
+	}
+	defer rows.Close()
+
+	productIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var productID uuid.UUID
+		if err := rows.Scan(&productID); err != nil {
+			return nil, fmt.Errorf("receiving.Repository.listProductIDsByCargoplaceTx scan: %w", err)
+		}
+		productIDs = append(productIDs, productID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("receiving.Repository.listProductIDsByCargoplaceTx rows: %w", err)
+	}
+
+	return productIDs, nil
+}
+
+func (r *Repository) cargoplaceExistsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cargoplaceID uuid.UUID,
+) (bool, error) {
+	const query = `
+		SELECT EXISTS(
+			SELECT 1
+			FROM wms_inventory.cargoplaces
+			WHERE cargoplace_id = $1
+		)`
+
+	var exists bool
+	if err := tx.QueryRow(ctx, query, cargoplaceID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("receiving.Repository.cargoplaceExistsTx scan: %w", err)
+	}
+
+	return exists, nil
+}
+
+func (r *Repository) listExpectedSKUsByCargoplaceTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cargoplaceID uuid.UUID,
+) ([]ExpectedSKU, error) {
+	const query = `
+		SELECT ecs.sku_id, s.name, ecs.expected_qty
+		FROM wms_inventory.expected_cargoplace_skus ecs
+		JOIN wms_inventory.skus s ON s.sku_id = ecs.sku_id
+		WHERE ecs.cargoplace_id = $1
+		ORDER BY s.name`
+
+	rows, err := tx.Query(ctx, query, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.listExpectedSKUsByCargoplaceTx query: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]ExpectedSKU, 0)
+	for rows.Next() {
+		var item ExpectedSKU
+		if err := rows.Scan(&item.SKUID, &item.SKUName, &item.ExpectedQty); err != nil {
+			return nil, fmt.Errorf("receiving.Repository.listExpectedSKUsByCargoplaceTx scan: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("receiving.Repository.listExpectedSKUsByCargoplaceTx rows: %w", err)
+	}
+
+	return items, nil
+}
+
+func (r *Repository) listReceivedProductCountsBySKUTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cargoplaceID uuid.UUID,
+) ([]ReceivedSKUCount, error) {
+	const query = `
+		-- Count actually created products in the cargoplace, grouped by SKU, for shortage reconciliation.
+		SELECT p.sku_id, s.name, COUNT(*)::int AS received_qty
+		FROM wms_inventory.products p
+		JOIN wms_inventory.skus s ON s.sku_id = p.sku_id
+		WHERE p.cargoplace_id = $1 AND p.status = 'RECEIVED'
+		GROUP BY p.sku_id, s.name
+		ORDER BY s.name`
+
+	rows, err := tx.Query(ctx, query, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.listReceivedProductCountsBySKUTx query: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]ReceivedSKUCount, 0)
+	for rows.Next() {
+		var item ReceivedSKUCount
+		if err := rows.Scan(&item.SKUID, &item.SKUName, &item.ReceivedQty); err != nil {
+			return nil, fmt.Errorf("receiving.Repository.listReceivedProductCountsBySKUTx scan: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("receiving.Repository.listReceivedProductCountsBySKUTx rows: %w", err)
+	}
+
+	return items, nil
+}
+
+func (r *Repository) insertOutboxEventsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cargoplaceID uuid.UUID,
+	productIDs []uuid.UUID,
+) error {
+	if len(productIDs) == 0 {
+		return nil
+	}
+
+	eventIDs := make([]uuid.UUID, 0, len(productIDs))
+	aggregateIDs := make([]uuid.UUID, 0, len(productIDs))
+	payloadHashes := make([]string, 0, len(productIDs))
+
+	for _, productID := range productIDs {
+		payloadHash, err := payloadHashForReceiving(productID, cargoplaceID)
+		if err != nil {
+			return fmt.Errorf("receiving.Repository.insertOutboxEventsTx build payload hash: %w", err)
+		}
+
+		eventIDs = append(eventIDs, uuid.New())
+		aggregateIDs = append(aggregateIDs, productID)
+		payloadHashes = append(payloadHashes, payloadHash)
+	}
+
+	const query = `
+		INSERT INTO public.outbox_events (
+			event_id,
+			aggregate_id,
+			aggregate_type,
+			event_type,
+			payload_hash
+		)
+		SELECT
+			event_id,
+			aggregate_id,
+			'receiving',
+			'wms.receiving.v1',
+			payload_hash
+		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
+
+	if _, err := tx.Exec(ctx, query, eventIDs, aggregateIDs, payloadHashes); err != nil {
+		return fmt.Errorf("receiving.Repository.insertOutboxEventsTx exec: %w", err)
 	}
 
 	return nil
