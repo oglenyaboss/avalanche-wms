@@ -22,13 +22,39 @@ type scanTTNRequest struct {
 	TTNCode string `json:"ttn_code"`
 }
 
-type scanCargoplaceRequest struct {
+type scanGateCargoplaceRequest struct {
 	ShipmentID     string `json:"shipment_id"`
 	CargoplaceCode string `json:"cargoplace_code"`
 }
 
 type acceptShipmentRequest struct {
 	ShipmentID string `json:"shipment_id"`
+}
+
+type scanTableCargoplaceRequest struct {
+	CargoplaceID string `json:"cargoplace_id"`
+}
+
+type scanBoxRequest struct {
+	CargoplaceID string `json:"cargoplace_id"`
+	BoxBarcode   string `json:"box_barcode"`
+}
+
+type scanSKURequest struct {
+	CargoplaceID string `json:"cargoplace_id"`
+	BoxID        string `json:"box_id"`
+	Barcode      string `json:"barcode"`
+}
+
+type scanQRRequest struct {
+	CargoplaceID string `json:"cargoplace_id"`
+	BoxID        string `json:"box_id"`
+	SKUID        string `json:"sku_id"`
+	QRCode       string `json:"qr_code"`
+}
+
+type closeBoxRequest struct {
+	BoxID string `json:"box_id"`
 }
 
 type envelope struct {
@@ -50,6 +76,11 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/gate/scan-ttn", h.ScanTTN).Methods(http.MethodPost)
 	router.HandleFunc("/gate/scan-cargoplace", h.ScanCargoplace).Methods(http.MethodPost)
 	router.HandleFunc("/gate/accept-shipment", h.AcceptShipment).Methods(http.MethodPost)
+	router.HandleFunc("/table/scan-cargoplace", h.ScanTableCargoplace).Methods(http.MethodPost)
+	router.HandleFunc("/table/scan-box", h.ScanBox).Methods(http.MethodPost)
+	router.HandleFunc("/table/scan-sku", h.ScanSKU).Methods(http.MethodPost)
+	router.HandleFunc("/table/scan-qr", h.ScanQR).Methods(http.MethodPost)
+	router.HandleFunc("/table/close-box", h.CloseBox).Methods(http.MethodPost)
 }
 
 // ScanTTN processes the scanning of a TTN code, updating shipment status and returning shipment details.
@@ -75,14 +106,14 @@ func (h *Handler) ScanTTN(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
-// ScanCargoplace handles the HTTP request for scanning a cargoplace within a shipment
+// ScanCargoplace handles the HTTP request for scanning a cargoplace within a shipment.
 func (h *Handler) ScanCargoplace(w http.ResponseWriter, r *http.Request) {
 	operatorID, ok := requireOperator(w, r)
 	if !ok {
 		return
 	}
 
-	var req scanCargoplaceRequest
+	var req scanGateCargoplaceRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
 		return
@@ -133,6 +164,163 @@ func (h *Handler) AcceptShipment(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
+// ScanTableCargoplace processes the scanning of a cargoplace at the sorting table,
+// updating its status and returning details for further processing.
+func (h *Handler) ScanTableCargoplace(w http.ResponseWriter, r *http.Request) {
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req scanTableCargoplaceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	cargoplaceID, err := uuid.Parse(req.CargoplaceID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "cargoplace_id должен быть UUID")
+		return
+	}
+
+	result, err := h.svc.ScanTableCargoplace(r.Context(), operatorID, cargoplaceID)
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
+func (h *Handler) ScanBox(w http.ResponseWriter, r *http.Request) {
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req scanBoxRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	cargoplaceID, err := uuid.Parse(req.CargoplaceID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "cargoplace_id должен быть UUID")
+		return
+	}
+
+	result, err := h.svc.ScanBox(r.Context(), operatorID, cargoplaceID, req.BoxBarcode)
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
+func (h *Handler) ScanSKU(w http.ResponseWriter, r *http.Request) {
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req scanSKURequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	cargoplaceID, err := uuid.Parse(req.CargoplaceID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "cargoplace_id должен быть UUID")
+		return
+	}
+	boxID, err := uuid.Parse(req.BoxID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "box_id должен быть UUID")
+		return
+	}
+
+	result, err := h.svc.ScanSKU(r.Context(), operatorID, cargoplaceID, boxID, req.Barcode)
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
+func (h *Handler) ScanQR(w http.ResponseWriter, r *http.Request) {
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req scanQRRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	cargoplaceID, err := uuid.Parse(req.CargoplaceID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "cargoplace_id должен быть UUID")
+		return
+	}
+	boxID, err := uuid.Parse(req.BoxID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "box_id должен быть UUID")
+		return
+	}
+	skuID, err := uuid.Parse(req.SKUID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "sku_id должен быть UUID")
+		return
+	}
+
+	result, err := h.svc.ScanQR(r.Context(), operatorID, cargoplaceID, boxID, skuID, req.QRCode)
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
+func (h *Handler) CloseBox(w http.ResponseWriter, r *http.Request) {
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req closeBoxRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	boxID, err := uuid.Parse(req.BoxID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "box_id должен быть UUID")
+		return
+	}
+
+	result, err := h.svc.CloseBox(r.Context(), operatorID, boxID)
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
 // mapServiceError maps internal service errors to appropriate HTTP status codes and API error responses.
 func mapServiceError(err error) (status int, code, message string) {
 	switch {
@@ -148,6 +336,24 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusBadRequest, "CARGOPLACE_NOT_IN_SHIPMENT", "Грузоместо не принадлежит данной поставке"
 	case errors.Is(err, ErrCargoplaceAlreadyReceived):
 		return http.StatusConflict, "CARGOPLACE_ALREADY_RECEIVED", "Грузоместо уже отсканировано"
+	case errors.Is(err, ErrCargoplaceNotFound):
+		return http.StatusNotFound, "CARGOPLACE_NOT_FOUND", "Грузоместо не найдено"
+	case errors.Is(err, ErrCargoplaceNotReceivedAtGate):
+		return http.StatusConflict, "CARGOPLACE_NOT_RECEIVED_AT_GATE", "Грузоместо не в статусе RECEIVED_AT_GATE"
+	case errors.Is(err, ErrCargoplaceNotInProgress):
+		return http.StatusConflict, "CARGOPLACE_NOT_IN_PROGRESS", "Грузоместо не в статусе TABLE_IN_PROGRESS"
+	case errors.Is(err, ErrBoxNotFound):
+		return http.StatusNotFound, "BOX_NOT_FOUND", "Коробка не найдена"
+	case errors.Is(err, ErrBoxNotOpen):
+		return http.StatusConflict, "BOX_NOT_OPEN", "Коробка не открыта"
+	case errors.Is(err, ErrBoxNotInCargoplace):
+		return http.StatusBadRequest, "BOX_NOT_IN_CARGOPLACE", "Коробка не принадлежит грузоместу"
+	case errors.Is(err, ErrBarcodeNotFound):
+		return http.StatusNotFound, "BARCODE_NOT_FOUND", "Штрихкод не найден"
+	case errors.Is(err, ErrSKUNotFound):
+		return http.StatusNotFound, "SKU_NOT_FOUND", "SKU не найден"
+	case errors.Is(err, ErrQRAlreadyExists):
+		return http.StatusConflict, "QR_ALREADY_EXISTS", "QR-код уже зарегистрирован"
 	case errors.Is(err, ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
 	default:
@@ -201,7 +407,7 @@ func requireOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 
 	role := auth.UserRoleFromCtx(r.Context())
 	if role != domain.UserRoleOperator {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "Только оператор КПП может выполнять это действие")
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "Только оператор может выполнять это действие")
 		return uuid.Nil, false
 	}
 
