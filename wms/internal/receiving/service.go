@@ -58,9 +58,9 @@ type receivingRepository interface {
 	ListCargoplacesByShipment(ctx context.Context, shipmentID uuid.UUID) ([]domain.Cargoplace, error)
 	GetCargoplaceByShipmentAndCode(ctx context.Context, shipmentID uuid.UUID, cargoplaceCode string) (*domain.Cargoplace, error)
 	GetCargoplaceByID(ctx context.Context, cargoplaceID uuid.UUID) (*domain.Cargoplace, error)
-	UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, status string) error
-	UpdateCargoplaceReceivedAtGate(ctx context.Context, cargoplaceID uuid.UUID, status string, receivedAt time.Time) error
-	UpdateCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID, status string) error
+	UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, newStatus, expectedStatus string) error
+	UpdateCargoplaceReceivedAtGate(ctx context.Context, cargoplaceID uuid.UUID, newStatus, expectedStatus string, receivedAt time.Time) error
+	UpdateCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID, newStatus, expectedStatus string) error
 	MarkExpectedAsNotReceived(ctx context.Context, shipmentID uuid.UUID, notReceivedStatus string) error
 	CountCargoplaces(ctx context.Context, shipmentID uuid.UUID) (int, error)
 	CountCargoplacesByStatus(ctx context.Context, shipmentID uuid.UUID, status string) (int, error)
@@ -105,8 +105,10 @@ func (s *Service) ScanTTN(ctx context.Context, operatorID uuid.UUID, ttnCode str
 
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
 		if shipment.Status == shipmentStatusCreated {
-			// we switch to the GATE_IN_PROGRESS status at the first TTN scan
-			if err := txRepo.UpdateShipmentStatus(ctx, shipment.ShipmentID, shipmentStatusGateInProgress); err != nil {
+			if err := txRepo.UpdateShipmentStatus(ctx, shipment.ShipmentID, shipmentStatusGateInProgress, shipmentStatusCreated); err != nil {
+				if errors.Is(err, ErrShipmentNotFound) {
+					return fmt.Errorf("receiving.Service.ScanTTN: %w", ErrShipmentAlreadyClosed)
+				}
 				return fmt.Errorf("receiving.Service.ScanTTN update shipment status: %w", err)
 			}
 			shipment.Status = shipmentStatusGateInProgress
@@ -192,8 +194,12 @@ func (s *Service) ScanCargoplace(
 			ctx,
 			cp.CargoplaceID,
 			cargoplaceStatusReceivedAtGate,
+			cargoplaceStatusExpected,
 			receivedAt,
 		); err != nil {
+			if errors.Is(err, ErrCargoplaceAlreadyReceived) {
+				return err
+			}
 			return fmt.Errorf("receiving.Service.ScanCargoplace update cargoplace: %w", err)
 		}
 
@@ -259,7 +265,10 @@ func (s *Service) AcceptShipment(
 		if err := txRepo.MarkExpectedAsNotReceived(ctx, shipmentID, cargoplaceStatusNotReceived); err != nil {
 			return fmt.Errorf("receiving.Service.AcceptShipment mark not received: %w", err)
 		}
-		if err := txRepo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed); err != nil {
+		if err := txRepo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed, shipmentStatusGateInProgress); err != nil {
+			if errors.Is(err, ErrShipmentNotFound) {
+				return fmt.Errorf("receiving.Service.AcceptShipment: %w", ErrShipmentNotInProgress)
+			}
 			return fmt.Errorf("receiving.Service.AcceptShipment close shipment: %w", err)
 		}
 
@@ -323,7 +332,10 @@ func (s *Service) ScanTableCargoplace(
 	}
 
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
-		if err := txRepo.UpdateCargoplaceStatus(ctx, cargoplaceID, cargoplaceStatusTableInProgress); err != nil {
+		if err := txRepo.UpdateCargoplaceStatus(ctx, cargoplaceID, cargoplaceStatusTableInProgress, cargoplaceStatusReceivedAtGate); err != nil {
+			if errors.Is(err, ErrCargoplaceNotFound) {
+				return fmt.Errorf("receiving.Service.ScanTableCargoplace: %w", ErrCargoplaceNotReceivedAtGate)
+			}
 			return fmt.Errorf("receiving.Service.ScanTableCargoplace update cargoplace status: %w", err)
 		}
 
@@ -743,7 +755,7 @@ func (s *Service) tryAutoCloseShipment(
 		return nil
 	}
 
-	if err := repo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed); err != nil {
+	if err := repo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed, shipmentStatusGateInProgress); err != nil {
 		return fmt.Errorf("receiving.Service.tryAutoCloseShipment close shipment: %w", err)
 	}
 

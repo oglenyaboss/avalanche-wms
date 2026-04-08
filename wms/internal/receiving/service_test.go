@@ -190,7 +190,7 @@ func (m *mockReceivingRepo) GetCargoplaceByID(_ context.Context, _ uuid.UUID) (*
 	return m.cargoplaceByID, nil
 }
 
-func (m *mockReceivingRepo) UpdateShipmentStatus(_ context.Context, shipmentID uuid.UUID, status string) error {
+func (m *mockReceivingRepo) UpdateShipmentStatus(_ context.Context, shipmentID uuid.UUID, status, _ string) error {
 	m.updateShipmentStatusCalls = append(m.updateShipmentStatusCalls, shipmentID.String()+":"+status)
 	if m.updateShipmentStatusErr != nil {
 		return m.updateShipmentStatusErr
@@ -207,7 +207,7 @@ func (m *mockReceivingRepo) UpdateShipmentStatus(_ context.Context, shipmentID u
 func (m *mockReceivingRepo) UpdateCargoplaceReceivedAtGate(
 	_ context.Context,
 	cargoplaceID uuid.UUID,
-	status string,
+	status, _ string,
 	receivedAt time.Time,
 ) error {
 	m.updateCargoplaceID = cargoplaceID
@@ -223,7 +223,7 @@ func (m *mockReceivingRepo) UpdateCargoplaceReceivedAtGate(
 	return nil
 }
 
-func (m *mockReceivingRepo) UpdateCargoplaceStatus(_ context.Context, cargoplaceID uuid.UUID, status string) error {
+func (m *mockReceivingRepo) UpdateCargoplaceStatus(_ context.Context, cargoplaceID uuid.UUID, status, _ string) error {
 	m.updateCargoplaceStatusID = cargoplaceID
 	m.updateCargoplaceStatusValue = status
 	if m.updateCargoplaceStatusErr != nil {

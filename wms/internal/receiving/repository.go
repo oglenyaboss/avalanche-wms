@@ -200,13 +200,13 @@ func (r *Repository) GetCargoplaceByID(ctx context.Context, cargoplaceID uuid.UU
 	return &cp, nil
 }
 
-func (r *Repository) UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, status string) error {
+func (r *Repository) UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, newStatus, expectedStatus string) error {
 	const query = `
 		UPDATE wms_inventory.inbound_shipments
 		SET status = $2
-		WHERE shipment_id = $1`
+		WHERE shipment_id = $1 AND status = $3`
 
-	tag, err := r.q.Exec(ctx, query, shipmentID, status)
+	tag, err := r.q.Exec(ctx, query, shipmentID, newStatus, expectedStatus)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.UpdateShipmentStatus exec: %w", err)
 	}
@@ -220,32 +220,32 @@ func (r *Repository) UpdateShipmentStatus(ctx context.Context, shipmentID uuid.U
 func (r *Repository) UpdateCargoplaceReceivedAtGate(
 	ctx context.Context,
 	cargoplaceID uuid.UUID,
-	status string,
+	newStatus, expectedStatus string,
 	receivedAt time.Time,
 ) error {
 	const query = `
 		UPDATE wms_inventory.cargoplaces
 		SET status = $2, received_at_gate_at = $3
-		WHERE cargoplace_id = $1`
+		WHERE cargoplace_id = $1 AND status = $4`
 
-	tag, err := r.q.Exec(ctx, query, cargoplaceID, status, receivedAt)
+	tag, err := r.q.Exec(ctx, query, cargoplaceID, newStatus, receivedAt, expectedStatus)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.UpdateCargoplaceReceivedAtGate exec: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("receiving.Repository.UpdateCargoplaceReceivedAtGate: %w", ErrCargoplaceNotInShipment)
+		return fmt.Errorf("receiving.Repository.UpdateCargoplaceReceivedAtGate: %w", ErrCargoplaceAlreadyReceived)
 	}
 
 	return nil
 }
 
-func (r *Repository) UpdateCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID, status string) error {
+func (r *Repository) UpdateCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID, newStatus, expectedStatus string) error {
 	const query = `
 		UPDATE wms_inventory.cargoplaces
 		SET status = $2
-		WHERE cargoplace_id = $1`
+		WHERE cargoplace_id = $1 AND status = $3`
 
-	tag, err := r.q.Exec(ctx, query, cargoplaceID, status)
+	tag, err := r.q.Exec(ctx, query, cargoplaceID, newStatus, expectedStatus)
 	if err != nil {
 		return fmt.Errorf("receiving.Repository.UpdateCargoplaceStatus exec: %w", err)
 	}
