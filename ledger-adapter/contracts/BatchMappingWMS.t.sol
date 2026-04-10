@@ -2,7 +2,7 @@
 pragma solidity ^0.8.0;
 
 import "forge-std/Test.sol";
-import "./contract.sol";
+import "./BatchMappingWMS.sol";
 
 contract BatchMappingWMSTest is Test {
     BatchMappingWMS internal wms;
