@@ -76,9 +76,9 @@ func NewHandler(svc *Service) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(router *mux.Router) {
-	router.HandleFunc("/putaway/scan-buffer", h.ScanBuffer).Methods(http.MethodPost)
-	router.HandleFunc("/putaway/scan-product", h.ScanProduct).Methods(http.MethodPost)
-	router.HandleFunc("/putaway/scan-storage-bin", h.ScanStorageBin).Methods(http.MethodPost)
+	router.HandleFunc("/scan-buffer", h.ScanBuffer).Methods(http.MethodPost)
+	router.HandleFunc("/scan-product", h.ScanProduct).Methods(http.MethodPost)
+	router.HandleFunc("/scan-storage-bin", h.ScanStorageBin).Methods(http.MethodPost)
 }
 
 // Сканирование буфферной ячейки - выдает все товары, которые хранятся в данном буфере
@@ -251,6 +251,8 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "PRODUCT_NOT_IN_BUFFER", "Товар не находится в указанной буферной ячейке"
 	case errors.Is(err, ErrProductNotReceived):
 		return http.StatusConflict, "PRODUCT_NOT_RECEIVED", "Товар не в статусе RECEIVED"
+	case errors.Is(err, ErrInvalidInput):
+		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
 	default:
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"
 	}

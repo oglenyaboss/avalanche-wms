@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -160,7 +159,7 @@ func (r *Repository) GetSKUByProductID(ctx context.Context, productID uuid.UUID)
 	return &sku, nil
 }
 
-// UpdateProductStorage обновляет bin_id и статусс товара на STORED
+// UpdateProductStorage обновляет bin_id и статус товара на STORED
 func (r *Repository) UpdateProductStorage(ctx context.Context, productID, binID uuid.UUID) error {
 	const query = `
 		UPDATE wms_inventory.products
@@ -181,10 +180,10 @@ func (r *Repository) UpdateProductStorage(ctx context.Context, productID, binID 
 // InsertPutaway создает запись о размещении в wms_ops.putaway
 func (r *Repository) InsertPutaway(ctx context.Context, params *InsertPutawayParams) error {
 	const query = `
-		INSERT INTO wms_ops.putaways(event_id, product_id, bin_id, operator_id, onchain_status, occurred_at)
-		Values($1, $2, $3, $4, $5, $6)`
+		INSERT INTO wms_ops.putaways(event_id, product_id, from_bin_id, bin_id, operator_id, onchain_status, occurred_at)
+		VALUES($1, $2, $3, $4, $5, $6, $7)`
 
-	_, err := r.q.Exec(ctx, query, params.EventID, params.ProductID, params.BinID, params.OperatorID, params.OnChainStatus, params.OccurredAt)
+	_, err := r.q.Exec(ctx, query, params.EventID, params.ProductID, params.FromBinID, params.BinID, params.OperatorID, params.OnChainStatus, params.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("putaway.Repository.InsertPutaway exec: %w", err)
 	}
@@ -227,17 +226,23 @@ func (r *Repository) InsertOutboxEvents(ctx context.Context, params *OutboxEvent
 
 // payloadHashForPutaway создает хеш для outbox события
 func payloadHashForPutaway(productID, storageBinID uuid.UUID) (string, error) {
-	payload := map[string]interface{}{
-		"product_id":     productID.String(),
-		"storage_bin_id": storageBinID.String(),
-		"timestamp":      time.Now().UTC().Format(time.RFC3339),
+	payload := struct {
+		ProductID     uuid.UUID `json:"product_id"`
+		StorageBinID  uuid.UUID `json:"storage_bin_id"`
+		AggregateType string    `json:"aggregate_type"`
+		EventType     string    `json:"event_type"`
+	}{
+		ProductID:     productID,
+		StorageBinID:  storageBinID,
+		AggregateType: "putaway",
+		EventType:     "wms.putaway.v1",
 	}
 
-	data, err := json.Marshal(payload)
+	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal payload: %w", err)
+		return "", fmt.Errorf("putaway.payloadHashForPutaway marshal: %w", err)
 	}
 
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:]), nil
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }

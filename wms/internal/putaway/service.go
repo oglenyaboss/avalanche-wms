@@ -2,7 +2,6 @@ package putaway
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,17 +11,11 @@ import (
 	"wms/internal/domain"
 )
 
-var (
-	ErrBufferBinNotFound  = errors.New("BUFFER_BIN_NOT_FOUND")
-	ErrStorageBinNotFound = errors.New("STORAGE_BIN_NOT_FOUND")
-	ErrProductNotFound    = errors.New("PRODUCT_NOT_FOUND")
-	ErrProductNotInBuffer = errors.New("PRODUCT_NOT_IN_BUFFER")
-	ErrProductNotReceived = errors.New("PRODUCT_NOT_RECEIVED")
-	ErrInvalidInput       = errors.New("INVALID_INPUT")
-)
-
 type Service struct {
-	repo  putawayRepository
+	repo putawayRepository
+	// carts хранит выбранные операторами товары для счётчика cart_size в ответе ScanProduct.
+	// Источник истины — фронт, который хранит product_ids[] в стейте и отправляет их в ScanStorageBin.
+	// TODO(masштаб): при переходе на >1 инстанс вынести в Redis или убрать в пользу статуса PICKING в БД.
 	carts map[string][]uuid.UUID
 	mu    sync.RWMutex
 }
@@ -87,36 +80,38 @@ func (s *Service) AddToPutawayCart(ctx context.Context, operatorID, productID, b
 	var product *domain.Product
 	var sku *domain.SKU
 
-	err := s.repo.WithTx(ctx, func(txRepo putawayRepository) error {
-		var err error
-		product, err = txRepo.GetProductsByIDForUpdate(ctx, productID)
-		if err != nil {
-			return err
-		}
+	product, err := s.repo.GetProductsByIDForUpdate(ctx, productID)
+	if err != nil {
+		return nil, err
+	}
 
-		if product.BinID == nil || *product.BinID != bufferBinID {
-			return ErrProductNotInBuffer
-		}
+	if product.BinID == nil || *product.BinID != bufferBinID {
+		return nil, ErrProductNotInBuffer
+	}
 
-		if product.Status != "RECEIVED" {
-			return ErrProductNotReceived
-		}
+	if product.Status != "RECEIVED" {
+		return nil, ErrProductNotReceived
+	}
 
-		sku, err = txRepo.GetSKUByProductID(ctx, productID)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
+	sku, err = s.repo.GetSKUByProductID(ctx, productID)
 	if err != nil {
 		return nil, err
 	}
 
 	key := operatorID.String()
 	s.mu.Lock()
-	s.carts[key] = append(s.carts[key], productID)
+
+	alreadyInCart := false
+	for _, id := range s.carts[key] {
+		if id == productID {
+			alreadyInCart = true
+			break
+		}
+	}
+
+	if !alreadyInCart {
+		s.carts[key] = append(s.carts[key], productID)
+	}
 	cartSize := len(s.carts[key])
 	s.mu.Unlock()
 
@@ -145,6 +140,15 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 		}
 
 		for _, productID := range productsIDs {
+			product, err := txRepo.GetProductsByIDForUpdate(ctx, productID)
+			if err != nil {
+				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin get product %s: %w", productID, err)
+			}
+			if product.BinID == nil {
+				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin product %s: %w", productID, ErrProductNotInBuffer)
+			}
+			fromBinID := *product.BinID
+
 			if err := txRepo.UpdateProductStorage(ctx, productID, storageBinID); err != nil {
 				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin update product %s: %w", productID, err)
 			}
@@ -152,6 +156,7 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 			if err := txRepo.InsertPutaway(ctx, &InsertPutawayParams{
 				EventID:       uuid.New(),
 				ProductID:     productID,
+				FromBinID:     fromBinID,
 				BinID:         storageBinID,
 				OperatorID:    operatorID,
 				OnChainStatus: "PENDING_ONCHAIN",
@@ -188,4 +193,11 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 		ProductsPlaced:      placedCount,
 		OutboxEventsCreated: placedCount,
 	}, nil
+}
+
+func (s *Service) GetCartSize(operatorID uuid.UUID) int {
+	key := operatorID.String()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.carts[key])
 }

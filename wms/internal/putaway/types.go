@@ -9,6 +9,7 @@ import (
 type InsertPutawayParams struct {
 	EventID       uuid.UUID
 	ProductID     uuid.UUID
+	FromBinID     uuid.UUID
 	BinID         uuid.UUID
 	OperatorID    uuid.UUID
 	OnChainStatus string
