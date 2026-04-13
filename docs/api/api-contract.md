@@ -523,6 +523,10 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
 }
 ```
 
+> `storage_bin_id` — любая ячейка с `bins.section IS DISTINCT FROM 'BUFFER'`.
+> Размещение в буферную ячейку запрещено (см. соглашение `bins.section` в `docs/db/Database_ru_v2.md`).
+> Никакого whitelist по «типам» ячеек нет — словарь `section` открыт.
+
 **Response (200):**
 ```json
 {
@@ -576,7 +580,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
         "product_id": "uuid",
         "sku_name": "Ноутбук Lenovo X1",
         "from_bin_code": "M2-A-03",
-        "section": "MEZZANINE"
+        "section": "A"
       }
     ],
     "total_tasks": 5
@@ -617,7 +621,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
         "sku_name": "Ноутбук Lenovo X1",
         "qr_code": "WMS-QR-2026-00001234",
         "from_bin_code": "M2-A-03",
-        "section": "MEZZANINE",
+        "section": "A",
         "status": "PENDING"
       }
     ],
