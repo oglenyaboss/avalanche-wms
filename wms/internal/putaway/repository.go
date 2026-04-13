@@ -73,12 +73,14 @@ func (r *Repository) GetBufferBinByID(ctx context.Context, bufferBinID uuid.UUID
 	return &bin, nil
 }
 
-// GetStorageBinID возвращает ячейку хранения по ID (полноценную ячейку, а не буффер)
+// GetStorageBinID возвращает ячейку хранения по ID (любая ячейка кроме буфера).
+// Поле bins.section — произвольная метка зоны склада. Зарезервирован только токен 'BUFFER',
+// размещение в который через putaway запрещено. Прочие значения рассматриваются как зоны хранения.
 func (r *Repository) GetStorageBinByID(ctx context.Context, storageBinID uuid.UUID) (*domain.Bin, error) {
 	const query = `
 		SELECT bin_id, warehouse_id, code, section, volume, created_at, updated_at
 		FROM wms_inventory.bins
-		WHERE bin_id = $1 AND section IN ('MEZZANINE', 'RACK', 'SHELF')`
+		WHERE bin_id = $1 AND section IS DISTINCT FROM 'BUFFER'`
 	var bin domain.Bin
 	err := r.q.QueryRow(ctx, query, storageBinID).Scan(&bin.BinID, &bin.WarehouseID, &bin.Code, &bin.Section, &bin.Volume, &bin.CreatedAt, &bin.UpdatedAt)
 	if err != nil {
