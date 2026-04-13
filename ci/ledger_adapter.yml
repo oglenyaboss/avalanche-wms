@@ -19,6 +19,8 @@ ledger_adapter_test:
         - ledger-adapter/**/*
   script:
     - cd ledger-adapter
+    - apk add --no-cache build-base
+    - export CGO_ENABLED=1
     - go test -race -count=1 ./...
 
 ledger_adapter_build_&_deploy:
