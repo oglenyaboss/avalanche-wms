@@ -23,17 +23,28 @@ CHAIN_ID=$(cast chain-id --rpc-url "$RPC_URL")
 echo "==> C-Chain ready, chainID=$CHAIN_ID"
 
 # Idempotency: skip deploy if shared/contract_addr.txt points to a live contract.
+# Транзиентная RPC-ошибка при `cast code` НЕ должна приводить к слепому redeploy —
+# это orphan'ит старый контракт под тем же ewoq-nonce'ом.
 if [ -s /shared/contract_addr.txt ]; then
-  EXISTING=$(cat /shared/contract_addr.txt)
-  CODE=$(cast code "$EXISTING" --rpc-url "$RPC_URL" 2>/dev/null || true)
-  if [ "${#CODE}" -gt 4 ]; then
-    echo "==> Contract already deployed at $EXISTING — skipping redeploy"
-    # Re-persist auxiliary files in case they were cleared
-    echo -n "$RPC_URL"   > /shared/rpc_url.txt
-    echo -n "$EWOQ_KEY"  > /shared/deployer_key.txt
-    exit 0
+  # `tr -d` — защита от случайного trailing newline (nano и пр. редакторы).
+  EXISTING=$(tr -d '[:space:]' < /shared/contract_addr.txt)
+  if [ -z "$EXISTING" ]; then
+    echo "==> /shared/contract_addr.txt is whitespace-only, treating as empty"
+  else
+    if ! CODE=$(cast code "$EXISTING" --rpc-url "$RPC_URL" 2>&1); then
+      echo "FATAL: cast code for $EXISTING failed: $CODE"
+      echo "       refusing to redeploy blindly — fix RPC or wipe shared_state volume"
+      exit 1
+    fi
+    if [ "${#CODE}" -gt 4 ]; then
+      echo "==> Contract already deployed at $EXISTING — skipping redeploy"
+      # Re-persist auxiliary files in case they were cleared
+      echo -n "$RPC_URL"   > /shared/rpc_url.txt
+      echo -n "$EWOQ_KEY"  > /shared/deployer_key.txt
+      exit 0
+    fi
+    echo "==> Stale contract_addr.txt ($EXISTING has no code), redeploying"
   fi
-  echo "==> Stale contract_addr.txt ($EXISTING has no code), redeploying"
 fi
 
 cd /contracts

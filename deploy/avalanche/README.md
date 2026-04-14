@@ -39,7 +39,7 @@ docker compose --profile test down -v
 
 ## Prerequisites
 
-- Docker Compose **v2.20+** (нужно для `depends_on.required: false` на `ledger-adapter` → `contract-deploy`). Docker Desktop 4.26+ подходит.
+- Docker Compose **v2.22+** (`depends_on.required: false` пришёл с Compose Spec 1.20 / Compose v2.22, Oct 2023). Docker Desktop 4.26+ подходит.
 - Экспонируем RPC (9650) только на `127.0.0.1` — по-дефолту не доступен с LAN/публичного интерфейса.
 
 ## Prefunded accounts

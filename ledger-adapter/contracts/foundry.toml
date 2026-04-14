@@ -2,7 +2,10 @@
 src = "."
 out = "out"
 libs = []
+remappings = []
 solc_version = "0.8.23"
+evm_version = "paris"
+via_ir = false
 optimizer = true
 optimizer_runs = 200
 
