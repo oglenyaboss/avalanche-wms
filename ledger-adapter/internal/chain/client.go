@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -14,187 +13,139 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-
-	"ledger-adapter/internal/config"
 )
 
-// Client wraps an Ethereum client with contract interaction helpers.
+// Client обёртка над ethclient с методами для BatchMappingWMS.
 type Client struct {
 	eth          *ethclient.Client
-	privateKey   string
+	privateKey   *ecdsa.PrivateKey
+	fromAddress  common.Address
 	contractAddr common.Address
 	parsedABI    abi.ABI
 }
 
-// NewClient creates a new chain Client from the application config.
-func NewClient(cfg *config.Config) (*Client, error) {
-	eth, err := ethclient.Dial(cfg.RpcURL)
+// NewClient подключается к RPC, парсит приватник и ABI.
+func NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error) {
+	eth, err := ethclient.Dial(rpcURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to RPC: %v", err)
+		return nil, fmt.Errorf("dial rpc %q: %w", rpcURL, err)
 	}
+
+	pk, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
+	if err != nil {
+		eth.Close()
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+
+	pubECDSA, ok := pk.Public().(*ecdsa.PublicKey)
+	if !ok {
+		eth.Close()
+		return nil, fmt.Errorf("cast public key to ECDSA failed")
+	}
+	from := crypto.PubkeyToAddress(*pubECDSA)
 
 	parsed, err := abi.JSON(strings.NewReader(ContractABI))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse ABI: %v", err)
+		eth.Close()
+		return nil, fmt.Errorf("parse abi: %w", err)
 	}
 
 	return &Client{
 		eth:          eth,
-		privateKey:   cfg.PrivateKey,
-		contractAddr: common.HexToAddress(cfg.ContractAddr),
+		privateKey:   pk,
+		fromAddress:  from,
+		contractAddr: common.HexToAddress(contractAddr),
 		parsedABI:    parsed,
 	}, nil
 }
 
-// Close closes the underlying ethclient connection.
-func (c *Client) Close() {
-	c.eth.Close()
+// Close закрывает RPC-соединение.
+func (c *Client) Close() { c.eth.Close() }
+
+// FromAddress — адрес, из-под которого клиент подписывает tx.
+func (c *Client) FromAddress() common.Address { return c.fromAddress }
+
+// topicToMethod маппит WMS kafka-topic'и в solidity-методы BatchMappingWMS.
+var topicToMethod = map[string]string{
+	"wms.receiving.v1": "batchAccept",
+	"wms.putaway.v1":   "batchPutAway",
+	"wms.picking.v1":   "batchPick",
+	"wms.shipping.v1":  "batchShip",
 }
 
-// GetMessage calls the getMessage view function on the contract.
-func (c *Client) GetMessage() (string, error) {
-	data, err := c.parsedABI.Pack("getMessage")
-	if err != nil {
-		return "", fmt.Errorf("failed to pack data: %v", err)
-	}
-
-	addr := c.contractAddr
-	res, err := c.eth.CallContract(context.Background(), ethereum.CallMsg{
-		To:   &addr,
-		Data: data,
-	}, nil)
-	if err != nil {
-		return "", fmt.Errorf("contract call failed: %v", err)
-	}
-
-	var message string
-	err = c.parsedABI.UnpackIntoInterface(&message, "getMessage", res)
-	if err != nil {
-		return "", fmt.Errorf("failed to unpack with ABI: %v", err)
-	}
-
-	return message, nil
-}
-
-// SetMessage sends a setMessage transaction to the contract.
-func (c *Client) SetMessage(newMessage string) (*types.Receipt, error) {
-	data, err := c.parsedABI.Pack("setMessage", newMessage)
-	if err != nil {
-		return nil, err
-	}
-	return c.sendTx(data)
-}
-
-// AddMessage sends an addMessage transaction to the contract.
-func (c *Client) AddMessage(addition string) (*types.Receipt, error) {
-	data, err := c.parsedABI.Pack("addMessage", addition)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse ABI: %v", err)
-	}
-	return c.sendTx(data)
-}
-
-// ViewLogs queries contract event logs for a specific block number.
-func (c *Client) ViewLogs(blockNum int) ([]types.Log, error) {
-	event, ok := c.parsedABI.Events["setlogs"]
+// BatchCall отправляет batch-tx по имени topic'а. Диспатчер для consumer.
+func (c *Client) BatchCall(ctx context.Context, topic string, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
+	method, ok := topicToMethod[topic]
 	if !ok {
-		return nil, fmt.Errorf("failed to find event")
+		return common.Hash{}, fmt.Errorf("unknown topic: %s", topic)
 	}
-	filter := ethereum.FilterQuery{
-		FromBlock: big.NewInt(int64(blockNum)),
-		ToBlock:   big.NewInt(int64(blockNum)),
-		Addresses: []common.Address{c.contractAddr},
-		Topics: [][]common.Hash{
-			{event.ID},
-		},
-	}
-	logs, err := c.eth.FilterLogs(context.Background(), filter)
-	if err != nil {
-		return nil, err
-	}
-	return logs, nil
+	return c.sendMethod(ctx, method, eventIDs, itemIDs)
 }
 
-// ParseReceipt formats a transaction receipt as a human-readable string.
-func (c *Client) ParseReceipt(rec *types.Receipt) string {
-	return fmt.Sprintf(
-		"TxHash:%s\nContractAddress:%s\nGasUsed:%d\nBlockHash:%s\nBlockNumber:%s\nTransactionIndex:%d\n",
-		rec.TxHash,
-		rec.ContractAddress.String(),
-		rec.GasUsed,
-		rec.BlockHash.String(),
-		rec.BlockNumber.String(),
-		rec.TransactionIndex)
+// BatchAccept / BatchPutAway / BatchPick / BatchShip — explicit wrappers.
+// Удобнее для ручного использования (тесты, CLI, ad-hoc) чем BatchCall по строке.
+
+func (c *Client) BatchAccept(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
+	return c.sendMethod(ctx, "batchAccept", eventIDs, itemIDs)
 }
 
-// PrettifiedData extracts the meaningful portion from ABI-encoded log data.
-func PrettifiedData(x []byte) []byte {
-	l := x[63]
-	return x[64 : 64+l]
+func (c *Client) BatchPutAway(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
+	return c.sendMethod(ctx, "batchPutAway", eventIDs, itemIDs)
 }
 
-// sendTx is a shared helper for signing and sending transactions.
-func (c *Client) sendTx(data []byte) (*types.Receipt, error) {
-	privKey, err := crypto.HexToECDSA(c.privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %v", err)
-	}
-	publicKey := privKey.Public()
-	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("error casting public key to ECDSA")
-	}
-	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+func (c *Client) BatchPick(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
+	return c.sendMethod(ctx, "batchPick", eventIDs, itemIDs)
+}
 
-	nonce, err := c.eth.PendingNonceAt(context.Background(), fromAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %v", err)
-	}
+func (c *Client) BatchShip(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
+	return c.sendMethod(ctx, "batchShip", eventIDs, itemIDs)
+}
 
-	gasPrice, err := c.eth.SuggestGasPrice(context.Background())
+// TransactionReceipt проксирует ethclient — нужно чтобы Client удовлетворял
+// ReceiptFetcher интерфейсу из receipt.go.
+func (c *Client) TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error) {
+	return c.eth.TransactionReceipt(ctx, h)
+}
+
+func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (common.Hash, error) {
+	data, err := c.parsedABI.Pack(method, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get gas price: %v", err)
+		return common.Hash{}, fmt.Errorf("pack %s: %w", method, err)
 	}
 
-	addr := c.contractAddr
-	gasLimit, err := c.eth.EstimateGas(context.Background(), ethereum.CallMsg{
-		From: fromAddress,
-		To:   &addr,
+	nonce, err := c.eth.PendingNonceAt(ctx, c.fromAddress)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("nonce: %w", err)
+	}
+
+	gasPrice, err := c.eth.SuggestGasPrice(ctx)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("gas price: %w", err)
+	}
+
+	gasLimit, err := c.eth.EstimateGas(ctx, ethereum.CallMsg{
+		From: c.fromAddress,
+		To:   &c.contractAddr,
 		Data: data,
 	})
 	if err != nil {
-		gasLimit = 100000
+		// EstimateGas reverts на невалидных state transitions → fail loudly, не догадываясь limit.
+		return common.Hash{}, fmt.Errorf("estimate gas for %s (tx would revert?): %w", method, err)
 	}
 
-	tx := types.NewTransaction(
-		nonce,
-		c.contractAddr,
-		big.NewInt(0),
-		gasLimit,
-		gasPrice,
-		data,
-	)
-
-	chainID, err := c.eth.ChainID(context.Background())
+	chainID, err := c.eth.ChainID(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get chain ID: %v", err)
+		return common.Hash{}, fmt.Errorf("chain id: %w", err)
 	}
 
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privKey)
+	tx := types.NewTransaction(nonce, c.contractAddr, big.NewInt(0), gasLimit, gasPrice, data)
+	signed, err := types.SignTx(tx, types.NewEIP155Signer(chainID), c.privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+		return common.Hash{}, fmt.Errorf("sign tx: %w", err)
 	}
 
-	err = c.eth.SendTransaction(context.Background(), signedTx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send transaction: %v", err)
+	if err := c.eth.SendTransaction(ctx, signed); err != nil {
+		return common.Hash{}, fmt.Errorf("send tx: %w", err)
 	}
-
-	time.Sleep(1 * time.Second)
-
-	info, err := c.eth.TransactionReceipt(context.Background(), signedTx.Hash())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get receipt: %#+v", err)
-	}
-	return info, nil
+	return signed.Hash(), nil
 }
