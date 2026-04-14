@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -16,12 +17,18 @@ import (
 )
 
 // Client обёртка над ethclient с методами для BatchMappingWMS.
+//
+// sendMu сериализует nonce-critical секцию в sendMethod — все 4 topic-consumer
+// goroutine'ы шарят один *Client с одним fromAddress, и без мьютекса могут
+// параллельно получить одинаковый PendingNonceAt → один tx вытеснит другой или
+// node вернёт "nonce too low". См. go-review MR !35 C1.
 type Client struct {
 	eth          *ethclient.Client
 	privateKey   *ecdsa.PrivateKey
 	fromAddress  common.Address
 	contractAddr common.Address
 	parsedABI    abi.ABI
+	sendMu       sync.Mutex
 }
 
 // NewClient подключается к RPC, парсит приватник и ABI.
@@ -112,6 +119,12 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("pack %s: %w", method, err)
 	}
+
+	// Сериализуем nonce-fetch + sign + send: 4 topic-consumer'а шарят один
+	// fromAddress. Hot path быстрый (<200ms типично), EstimateGas и ChainID
+	// можно было бы вынести наружу, но простота > микро-оптимизация.
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 
 	nonce, err := c.eth.PendingNonceAt(ctx, c.fromAddress)
 	if err != nil {
