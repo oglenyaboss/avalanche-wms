@@ -3,6 +3,7 @@ package chain
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // fakeRPCError реализует rpc.Error — тип который go-ethereum возвращает для
@@ -63,5 +64,37 @@ func TestErrChainSentinels_DistinctFromEachOther(t *testing.T) {
 	}
 	if errors.Is(ErrChainTransient, ErrChainRevert) {
 		t.Error("ErrChainTransient should not satisfy Is(ErrChainRevert)")
+	}
+}
+
+func TestClient_SendMu_SerializesConcurrentCalls(t *testing.T) {
+	// Смоук-тест для C1 фикса (MR !35): мьютекс sendMu в *Client должен
+	// реально блокировать параллельный доступ. Прямо тестировать sendMethod
+	// без мокания concrete *ethclient.Client нельзя, поэтому проверяем сам
+	// мьютекс через прямое взаимодействие с полем (in-package test).
+	// Race-detector в остальных тестах ловит реальные гонки; этот тест —
+	// гарантия что поле осталось в struct и что Lock()/Unlock() работают.
+	var c Client
+	locked := make(chan struct{})
+	released := make(chan struct{})
+
+	go func() {
+		c.sendMu.Lock()
+		close(locked)
+		time.Sleep(50 * time.Millisecond)
+		c.sendMu.Unlock()
+		close(released)
+	}()
+
+	<-locked
+	// Try to acquire from main goroutine — should block until released.
+	start := time.Now()
+	c.sendMu.Lock()
+	elapsed := time.Since(start)
+	c.sendMu.Unlock()
+	<-released
+
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("sendMu should have blocked ~50ms; blocked for %s", elapsed)
 	}
 }
