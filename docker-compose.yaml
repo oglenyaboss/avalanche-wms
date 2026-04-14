@@ -271,6 +271,12 @@ services:
       RPC_URL: ${RPC_URL:-http://localhost:8545}
       PRIVATE_KEY: ${PRIVATE_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
       CONTRACT_ADDR: ${CONTRACT_ADDR:-0x0000000000000000000000000000000000000000}
+      # test-profile overrides via shared volume (silently ignored if files absent)
+      RPC_URL_FILE: /shared/rpc_url.txt
+      CONTRACT_ADDR_FILE: /shared/contract_addr.txt
+      PRIVATE_KEY_FILE: /shared/deployer_key.txt
+    volumes:
+      - shared_state:/shared:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
       interval: 30s
@@ -282,12 +288,62 @@ services:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
+      contract-deploy:
+        condition: service_completed_successfully
+        required: false
+    networks:
+      - app_network
+
+  # ====== test profile: local Avalanche (C-Chain) ======
+
+  avalanchego:
+    build:
+      context: ./deploy/avalanche
+    platform: linux/amd64
+    profiles: [test]
+    container_name: avalanchego
+    volumes:
+      - ./deploy/avalanche/node-config.json:/avalanche/node-config.json:ro
+      - avalanche_data:/root/.avalanchego
+    ports:
+      # bind to loopback only — prefunded ewoq key with 50M AVAX should not
+      # be exposed on LAN/public interfaces on shared dev machines.
+      - "127.0.0.1:9650:9650"
+      - "127.0.0.1:9651:9651"
+    command: ["./avalanchego", "--config-file=/avalanche/node-config.json"]
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - |
+          curl -sf -X POST -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+            http://localhost:9650/ext/bc/C/rpc | grep -q '"result":"0x'
+      interval: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      - app_network
+
+  contract-deploy:
+    build:
+      context: ./deploy/contracts
+    profiles: [test]
+    container_name: contract_deploy
+    depends_on:
+      avalanchego:
+        condition: service_healthy
+    volumes:
+      - ./ledger-adapter/contracts:/contracts:ro
+      - shared_state:/shared
+    restart: "no"
     networks:
       - app_network
 
 volumes:
   postgres_data:
   kafka_data:
+  avalanche_data:
+  shared_state:
 
 networks:
   app_network:
