@@ -67,7 +67,7 @@ func TestLoad_MissingRequired(t *testing.T) {
 		t.Fatal("expected error for missing required, got nil")
 	}
 	// Первый в списке required — KAFKA_BROKERS
-	if want := "KAFKA_BROKERS"; !contains(err.Error(), want) {
+	if want := "KAFKA_BROKERS"; !strings.Contains(err.Error(), want) {
 		t.Errorf("expected error to mention %q, got %v", want, err)
 	}
 }
@@ -83,7 +83,7 @@ func TestLoad_OnlyKafkaSet_OtherRequiredStillFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !contains(err.Error(), "DB_URL") {
+	if !strings.Contains(err.Error(), "DB_URL") {
 		t.Errorf("expected DB_URL in error, got %v", err)
 	}
 }
@@ -233,13 +233,4 @@ func TestLoad_InvalidDurationFallsBackToDefault(t *testing.T) {
 	if cfg.BatchTimeout != 100*time.Millisecond {
 		t.Errorf("invalid duration should fall back: got %s", cfg.BatchTimeout)
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
