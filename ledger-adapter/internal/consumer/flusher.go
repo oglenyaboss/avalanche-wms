@@ -123,19 +123,25 @@ func (f *Flusher) Flush(ctx context.Context, topic string, msgs []*Message) erro
 	return nil
 }
 
-// recordFailure фиксирует неудачу в БД + публикует в DLQ. Если любая из
-// операций fails — возвращаем error → offsets НЕ коммитим → ретрай в
-// следующем цикле fetch. Это лучше чем тихо потерять event при падении
-// БД/kafka. Контракт идемпотентен (processedEventIds), поэтому повторный
-// chain call на уже revert'нувшемся event снова revert'нется → снова DLQ.
+// recordFailure публикует в DLQ ПЕРВЫМ (DLQ = permanent record of failure),
+// потом помечает row FAILED. Если любая из операций fails — возвращаем error
+// → offset НЕ коммитим → retry на следующем цикле. При сбое MarkFailed после
+// успешного DLQ событие имеет DLQ-запись но остаётся PENDING в DB — это
+// self-consistent (retry перезапишет DB state через MarkFailed). Обратный
+// порядок (MarkFailed first) мог бы оставить row=FAILED без DLQ-записи, что
+// хуже: после H3 filterAndMarkPending скипает FAILED, операторы не увидели
+// бы event в DLQ и узнавали о сбое только через БД-запрос.
+//
+// Контракт идемпотентен (processedEventIds), поэтому повторный chain call на
+// уже revert'нувшемся event снова revert'нется → снова recordFailure.
 func (f *Flusher) recordFailure(ctx context.Context, pending []*Message, ids []uuid.UUID, txHash, reason string) error {
-	if err := f.store.MarkFailed(ctx, ids, txHash, reason); err != nil {
-		f.log.Error("mark failed", "reason", reason, "err", err)
-		return fmt.Errorf("mark failed: %w", err)
-	}
 	if err := f.dlq.PublishAll(ctx, pending, reason); err != nil {
 		f.log.Error("dlq publish", "reason", reason, "err", err)
 		return fmt.Errorf("dlq publish: %w", err)
+	}
+	if err := f.store.MarkFailed(ctx, ids, txHash, reason); err != nil {
+		f.log.Error("mark failed", "reason", reason, "err", err)
+		return fmt.Errorf("mark failed: %w", err)
 	}
 	return nil
 }

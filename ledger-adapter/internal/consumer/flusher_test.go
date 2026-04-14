@@ -308,7 +308,8 @@ func TestFlusher_PartialDuplicates_ProcessesOnlyNew(t *testing.T) {
 
 func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
 	// Когда chain revert'ит И DLQ down — Flush должен вернуть error, чтобы
-	// offsets не закоммитились. Иначе message потеряется.
+	// offsets не закоммитились. После reorder (DLQ first) MarkFailed НЕ
+	// вызывается при DLQ-сбое — short-circuit on error. Retry на next tick.
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted")
 	dq.publishErr = errors.New("kafka broker down")
@@ -318,19 +319,22 @@ func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
 	if err == nil {
 		t.Fatal("DLQ publish fail should propagate (transient, block offset commit)")
 	}
-	// MarkFailed всё же должен был выполниться (до DLQ)
-	if len(st.failed) != 2 {
-		t.Errorf("MarkFailed should have ran before DLQ attempt, got %d", len(st.failed))
+	// После reorder: DLQ вызывается первым, short-circuit — MarkFailed не должен
+	// был выполниться.
+	if len(st.failed) != 0 {
+		t.Errorf("MarkFailed should NOT run when DLQ fails (reordered), got %d", len(st.failed))
 	}
 	if len(st.committed) != 0 {
 		t.Errorf("no commits expected on DLQ fail, got %d", len(st.committed))
 	}
 }
 
-func TestFlusher_MarkFailedFails_ReturnsError_NoDLQ(t *testing.T) {
-	// Когда chain revert'ит И БД down на MarkFailed — Flush возвращает error,
-	// DLQ не пытаемся (бессмысленно без persistent-fail-record). Ретрай при
-	// следующем tick.
+func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) {
+	// После reorder: DLQ publish happens first. Если затем MarkFailed падает —
+	// Flush возвращает error (offsets не коммитятся), DLQ-запись уже есть,
+	// row остаётся PENDING. На retry DLQ опубликуется повторно (дубликат в
+	// DLQ-topic приемлем, consumer там должен быть idempotent), MarkFailed
+	// снова попытается и в итоге пройдёт.
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted")
 	st.failedErr = errors.New("db connection refused")
@@ -340,8 +344,12 @@ func TestFlusher_MarkFailedFails_ReturnsError_NoDLQ(t *testing.T) {
 	if err == nil {
 		t.Fatal("MarkFailed fail should propagate (transient, block offset commit)")
 	}
-	if len(dq.messages) != 0 {
-		t.Errorf("DLQ should not be attempted when MarkFailed fails, got %d", len(dq.messages))
+	// DLQ был первым, он успел отработать до того как упал MarkFailed.
+	if len(dq.messages) != 1 {
+		t.Errorf("DLQ should publish before MarkFailed (reordered), got %d", len(dq.messages))
+	}
+	if len(st.failed) != 0 {
+		t.Errorf("MarkFailed failed -> no rows marked, got %d", len(st.failed))
 	}
 }
 
