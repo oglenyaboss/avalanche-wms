@@ -8,9 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"ledger-adapter/internal/chain"
 	"ledger-adapter/internal/config"
@@ -41,7 +42,8 @@ func main() {
 
 // run собирает и запускает pipeline: config → store → chain client →
 // dlq producer → Flusher → N consumer goroutines + health HTTP server.
-// Блокирует до SIGTERM/SIGINT, потом graceful shutdown.
+// Блокирует до SIGTERM/SIGINT или до падения одного из consumer'ов, потом
+// graceful shutdown (errgroup cancel'ит остальные + HTTP shutdown).
 func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -77,24 +79,31 @@ func run(log *slog.Logger) error {
 
 	flusher := consumer.NewFlusher(cli, repo, prod, cfg.ReceiptPollTimeout, log)
 
-	var wg sync.WaitGroup
+	// errgroup: если любой consumer упадёт с ошибкой (не по ctx-cancel'у),
+	// gCtx cancel'ится и остальные тоже остановятся → run() вернёт ошибку
+	// → main() exit 1 → k8s рестартит pod. Без errgroup dead consumer молча
+	// выходил из горутины, остальные работали, pod жил — событие могло зависнуть.
+	g, gCtx := errgroup.WithContext(rootCtx)
 	for _, topic := range topics {
 		t := topic
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		g.Go(func() error {
 			tlog := log.With("topic", t)
 			c := consumer.NewConsumer(brokers, t, cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, tlog)
-			if err := c.Run(rootCtx); err != nil && rootCtx.Err() == nil {
+			if err := c.Run(gCtx); err != nil && gCtx.Err() == nil {
 				tlog.Error("consumer stopped unexpectedly", "err", err)
+				return err
 			}
-		}()
+			return nil
+		})
 	}
 
 	srv := startHealthServer(log, cfg.Port)
 
-	<-rootCtx.Done()
-	log.Info("shutdown signal received")
+	// Ждём либо signal → rootCtx отменяется → gCtx отменяется → все consumer'ы
+	// выйдут чисто (g.Wait вернёт nil), либо падение consumer'а → gCtx
+	// отменится изнутри → g.Wait вернёт его error.
+	runErr := g.Wait()
+	log.Info("consumers stopped, shutting down http")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
@@ -102,7 +111,9 @@ func run(log *slog.Logger) error {
 		log.Error("http shutdown", "err", err)
 	}
 
-	wg.Wait()
+	if runErr != nil {
+		return runErr
+	}
 	log.Info("all consumers drained, bye")
 	return nil
 }
