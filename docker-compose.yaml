@@ -306,8 +306,10 @@ services:
       - ./deploy/avalanche/node-config.json:/avalanche/node-config.json:ro
       - avalanche_data:/root/.avalanchego
     ports:
-      - "9650:9650"
-      - "9651:9651"
+      # bind to loopback only — prefunded ewoq key with 50M AVAX should not
+      # be exposed on LAN/public interfaces on shared dev machines.
+      - "127.0.0.1:9650:9650"
+      - "127.0.0.1:9651:9651"
     command: ["./avalanchego", "--config-file=/avalanche/node-config.json"]
     healthcheck:
       test:
@@ -315,7 +317,7 @@ services:
         - |
           curl -sf -X POST -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
-            http://localhost:9650/ext/bc/C/rpc | grep -q '"result"'
+            http://localhost:9650/ext/bc/C/rpc | grep -q '"result":"0x'
       interval: 10s
       retries: 30
       start_period: 30s

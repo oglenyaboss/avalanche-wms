@@ -37,6 +37,11 @@ docker compose --profile test down -v
 | `Dockerfile` | avalanchego:v1.12.2 + curl + jq |
 | `node-config.json` | network-id=local, http-host=0.0.0.0, http-allowed-hosts=*, sybil-protection=false |
 
+## Prerequisites
+
+- Docker Compose **v2.20+** (нужно для `depends_on.required: false` на `ledger-adapter` → `contract-deploy`). Docker Desktop 4.26+ подходит.
+- Экспонируем RPC (9650) только на `127.0.0.1` — по-дефолту не доступен с LAN/публичного интерфейса.
+
 ## Prefunded accounts
 
 Local avalanchego префандит **ewoq** ключ на всех 3 chains:
@@ -44,7 +49,9 @@ Local avalanchego префандит **ewoq** ключ на всех 3 chains:
 - C-Chain addr: `0x8db97C7cEcE249c2b98bDC0226Cc4C2A57BF52FC`
 - Баланс: ~50M AVAX на C-Chain
 
-Этот ключ используется и для деплоя, и как signer для `ledger-adapter` в test-профиле. Детерминированный адрес контракта (ewoq + nonce=0 каждый раз).
+Этот ключ используется и для деплоя, и как signer для `ledger-adapter` в test-профиле.
+
+**Про идемпотентность:** `avalanche_data` volume персистит состояние между запусками, поэтому nonce ewoq-а растёт. `deploy.sh` проверяет `/shared/contract_addr.txt` и если там адрес с ненулевым bytecode — пропускает повторный деплой. Для полного сброса: `docker compose --profile test down -v`.
 
 ## Verify
 
