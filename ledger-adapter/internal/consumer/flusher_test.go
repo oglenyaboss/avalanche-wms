@@ -59,6 +59,7 @@ type stubStore struct {
 	failed    map[uuid.UUID]string
 	existsErr error
 	insertErr error
+	failedErr error
 }
 
 func newStubStore() *stubStore {
@@ -112,6 +113,9 @@ func (s *stubStore) MarkCommitted(_ context.Context, ids []uuid.UUID) error {
 func (s *stubStore) MarkFailed(_ context.Context, ids []uuid.UUID, _, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failedErr != nil {
+		return s.failedErr
+	}
 	for _, id := range ids {
 		s.failed[id] = reason
 	}
@@ -119,14 +123,18 @@ func (s *stubStore) MarkFailed(_ context.Context, ids []uuid.UUID, _, reason str
 }
 
 type stubDLQ struct {
-	mu       sync.Mutex
-	messages [][]*Message
-	reasons  []string
+	mu         sync.Mutex
+	messages   [][]*Message
+	reasons    []string
+	publishErr error
 }
 
 func (d *stubDLQ) PublishAll(_ context.Context, msgs []*Message, reason string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.publishErr != nil {
+		return d.publishErr
+	}
 	d.messages = append(d.messages, msgs)
 	d.reasons = append(d.reasons, reason)
 	return nil
@@ -269,5 +277,44 @@ func TestFlusher_PartialDuplicates_ProcessesOnlyNew(t *testing.T) {
 	}
 	if len(st.committed) != 1 {
 		t.Errorf("expected 1 commit (only new event), got %d", len(st.committed))
+	}
+}
+
+func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
+	// Когда chain revert'ит И DLQ down — Flush должен вернуть error, чтобы
+	// offsets не закоммитились. Иначе message потеряется.
+	f, ch, st, dq := newFlusherT()
+	ch.callErr = errors.New("execution reverted")
+	dq.publishErr = errors.New("kafka broker down")
+	msgs := makeMessages(2, "wms.putaway.v1", "putaway")
+
+	err := f.Flush(context.Background(), "wms.putaway.v1", msgs)
+	if err == nil {
+		t.Fatal("DLQ publish fail should propagate (transient, block offset commit)")
+	}
+	// MarkFailed всё же должен был выполниться (до DLQ)
+	if len(st.failed) != 2 {
+		t.Errorf("MarkFailed should have ran before DLQ attempt, got %d", len(st.failed))
+	}
+	if len(st.committed) != 0 {
+		t.Errorf("no commits expected on DLQ fail, got %d", len(st.committed))
+	}
+}
+
+func TestFlusher_MarkFailedFails_ReturnsError_NoDLQ(t *testing.T) {
+	// Когда chain revert'ит И БД down на MarkFailed — Flush возвращает error,
+	// DLQ не пытаемся (бессмысленно без persistent-fail-record). Ретрай при
+	// следующем tick.
+	f, ch, st, dq := newFlusherT()
+	ch.callErr = errors.New("execution reverted")
+	st.failedErr = errors.New("db connection refused")
+	msgs := makeMessages(1, "wms.picking.v1", "picking")
+
+	err := f.Flush(context.Background(), "wms.picking.v1", msgs)
+	if err == nil {
+		t.Fatal("MarkFailed fail should propagate (transient, block offset commit)")
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("DLQ should not be attempted when MarkFailed fails, got %d", len(dq.messages))
 	}
 }
