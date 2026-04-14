@@ -85,3 +85,46 @@ func TestBatcher_ConcurrentAdd(t *testing.T) {
 		t.Errorf("concurrent Add: got %d, want 50", got)
 	}
 }
+
+func TestBatcher_Unshift_PreservesOrder_ResetsTimer(t *testing.T) {
+	// Scenario: 2 retry-msgs unshift + 1 new Add → должны быть [retry1, retry2, new].
+	// И timer сбрасывается так, что сразу ShouldFlush = false.
+	b := NewBatcher(100, 50*time.Millisecond)
+
+	retry := []*Message{makeMsg(), makeMsg()}
+	newMsg := makeMsg()
+	b.Add(newMsg)
+
+	// Засыпаем достаточно чтобы timeout bы сработал ДО unshift'а
+	time.Sleep(70 * time.Millisecond)
+	if !b.ShouldFlush() {
+		t.Fatal("pre-unshift: should flush after timeout")
+	}
+
+	b.Unshift(retry)
+
+	// Unshift сбросил firstAt → timeout переотсчитывается
+	if b.ShouldFlush() {
+		t.Error("post-unshift: timer should reset, no immediate flush")
+	}
+
+	got := b.Drain()
+	if len(got) != 3 {
+		t.Fatalf("len: got %d, want 3", len(got))
+	}
+	if got[0] != retry[0] || got[1] != retry[1] || got[2] != newMsg {
+		t.Errorf("order wrong: expected [retry1, retry2, new], got positions %v/%v/%v",
+			got[0] == retry[0], got[1] == retry[1], got[2] == newMsg)
+	}
+}
+
+func TestBatcher_Unshift_EmptyNoOp(t *testing.T) {
+	b := NewBatcher(10, time.Second)
+	b.Add(makeMsg())
+	before := b.Len()
+	b.Unshift(nil)
+	b.Unshift([]*Message{})
+	if got := b.Len(); got != before {
+		t.Errorf("empty Unshift should not change Len, got %d → %d", before, got)
+	}
+}

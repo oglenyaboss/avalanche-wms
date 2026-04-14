@@ -58,6 +58,22 @@ func (b *Batcher) Drain() []*Message {
 	return out
 }
 
+// Unshift возвращает сообщения обратно в batcher — используется когда Flush
+// упал transient ошибкой. Предзапись (prepend), чтобы retry-сообщения
+// обрабатывались раньше новых Add'ов, пришедших за время fail-нувшего flush'а.
+//
+// firstAt сбрасывается в now() чтобы timeout не сработал мгновенно — даём
+// cool-down окно перед следующей попыткой.
+func (b *Batcher) Unshift(msgs []*Message) {
+	if len(msgs) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.msgs = append(msgs, b.msgs...)
+	b.firstAt = time.Now()
+}
+
 // Len — количество накопленных сообщений. Для тестов/логов.
 func (b *Batcher) Len() int {
 	b.mu.Lock()

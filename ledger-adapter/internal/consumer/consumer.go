@@ -123,14 +123,17 @@ func (c *Consumer) fetchLoop(ctx context.Context, msgCh chan<- kafka.Message, er
 }
 
 // flush дренирует batcher, отдаёт в flusher, коммитит kafka offsets. Offsets
-// коммитятся ТОЛЬКО после успешного flush — если flush вернул error (transient),
-// offsets остаются, и сообщения будут re-fetched при рестарте / retry.
+// коммитятся ТОЛЬКО после успешного flush. Если flush вернул error (transient):
+// сообщения unshift'аются обратно в batcher → будут retried при следующем
+// ShouldFlush. Без этого Drain выкидывал их навсегда до рестарта процесса.
 func (c *Consumer) flush(ctx context.Context) error {
 	msgs := c.batcher.Drain()
 	if len(msgs) == 0 {
 		return nil
 	}
 	if err := c.flusher.Flush(ctx, c.topic, msgs); err != nil {
+		c.log.Warn("flush failed — unshifting messages back for retry", "err", err, "n", len(msgs))
+		c.batcher.Unshift(msgs)
 		return err
 	}
 	kmsgs := make([]kafka.Message, len(msgs))
