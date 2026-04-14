@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"sync"
@@ -14,6 +15,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
+
+	"ledger-adapter/internal/chain"
 )
 
 // --- моки interfaces -----------------------------------------------------
@@ -400,5 +403,45 @@ func TestFlusher_FailedEventSkipped(t *testing.T) {
 	}
 	if len(ch.calls) != 0 {
 		t.Errorf("no chain call for FAILED event, got %d", len(ch.calls))
+	}
+}
+
+func TestFlusher_ChainTransientError_NoDLQ_ReturnsError(t *testing.T) {
+	// ErrChainTransient (RPC down) — не DLQ'им, возвращаем error → offsets
+	// не коммитятся → ретрай.
+	f, ch, st, dq := newFlusherT()
+	ch.callErr = fmt.Errorf("%w: dial failed", chain.ErrChainTransient)
+	msgs := makeMessages(2, "wms.receiving.v1", "receiving")
+
+	err := f.Flush(context.Background(), "wms.receiving.v1", msgs)
+	if err == nil {
+		t.Fatal("transient chain error should propagate")
+	}
+	if !errors.Is(err, chain.ErrChainTransient) {
+		t.Errorf("error chain should preserve ErrChainTransient, got %v", err)
+	}
+	if len(st.failed) != 0 {
+		t.Errorf("transient error should NOT mark FAILED, got %d", len(st.failed))
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("transient error should NOT publish DLQ, got %d", len(dq.messages))
+	}
+}
+
+func TestFlusher_ChainRevertError_GoesToDLQ(t *testing.T) {
+	// ErrChainRevert (terminal) — DLQ + MarkFailed, возвращаем nil (offsets
+	// commit'ятся).
+	f, ch, st, dq := newFlusherT()
+	ch.callErr = fmt.Errorf("%w: execution reverted: Duplicate eventId", chain.ErrChainRevert)
+	msgs := makeMessages(2, "wms.receiving.v1", "receiving")
+
+	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+		t.Fatalf("revert should return nil (DLQ success), got: %v", err)
+	}
+	if len(st.failed) != 2 {
+		t.Errorf("expected 2 MarkFailed, got %d", len(st.failed))
+	}
+	if len(dq.messages) != 1 {
+		t.Errorf("expected 1 DLQ publish, got %d", len(dq.messages))
 	}
 }

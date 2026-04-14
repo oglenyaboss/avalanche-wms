@@ -3,6 +3,7 @@ package chain
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -14,7 +15,30 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
+
+// ErrChainRevert — terminal ошибка chain call'а (state transition rejected
+// контрактом, EstimateGas не смог запустить tx). DLQ + MarkFailed + commit
+// offset — не пытаемся ретраить бесконечно.
+var ErrChainRevert = errors.New("chain revert")
+
+// ErrChainTransient — транзитивная ошибка (RPC недоступен, сетевой блип).
+// Не коммитим offset, повторим при следующем poll'е.
+var ErrChainTransient = errors.New("chain transient")
+
+// isRevertError определяет terminal revert vs transient network error.
+// Revert rpc-ошибки реализуют rpc.Error и обычно несут execution-reverted
+// текст. Для паранойи добавлен substring-fallback на случай несертифицированных
+// backend'ов (Avalanche subnet, Anvil с кастомным сообщением).
+func isRevertError(err error) bool {
+	var rpcErr rpc.Error
+	if errors.As(err, &rpcErr) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "execution reverted") || strings.Contains(msg, "revert")
+}
 
 // Client обёртка над ethclient с методами для BatchMappingWMS.
 //
@@ -142,8 +166,12 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 		Data: data,
 	})
 	if err != nil {
-		// EstimateGas reverts на невалидных state transitions → fail loudly, не догадываясь limit.
-		return common.Hash{}, fmt.Errorf("estimate gas for %s (tx would revert?): %w", method, err)
+		// Revert (контракт rejected state transition) — terminal, DLQ.
+		// Network/RPC blip — transient, retry при следующем tick.
+		if isRevertError(err) {
+			return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainRevert, method, err)
+		}
+		return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainTransient, method, err)
 	}
 
 	chainID, err := c.eth.ChainID(ctx)

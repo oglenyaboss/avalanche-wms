@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -85,7 +86,13 @@ func (f *Flusher) Flush(ctx context.Context, topic string, msgs []*Message) erro
 	ids, eventIDs, itemIDs := buildBatchArgs(pending)
 	txHash, err := f.chain.BatchCall(ctx, topic, eventIDs, itemIDs)
 	if err != nil {
-		// Terminal (revert при EstimateGas / bad tx) — DLQ + offset commit.
+		// Transient (RPC unreachable) → возвращаем error, не пишем FAILED/DLQ,
+		// offset не коммитим — ретрай.
+		if errors.Is(err, chain.ErrChainTransient) {
+			f.log.Warn("chain call transient error — will retry", "topic", topic, "err", err)
+			return fmt.Errorf("chain call transient: %w", err)
+		}
+		// Terminal (revert / bad tx / unknown) — DLQ + offset commit.
 		f.log.Error("chain call failed", "topic", topic, "err", err, "size", len(pending))
 		return f.recordFailure(ctx, pending, ids, "", err.Error())
 	}
