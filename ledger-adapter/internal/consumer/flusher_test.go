@@ -445,3 +445,27 @@ func TestFlusher_ChainRevertError_GoesToDLQ(t *testing.T) {
 		t.Errorf("expected 1 DLQ publish, got %d", len(dq.messages))
 	}
 }
+
+func TestFlusher_ChainTransientError_PropagatesAsError_NoDLQ(t *testing.T) {
+	// Regression guard для MR !35 M7: не-EstimateGas RPC error (например
+	// PendingNonceAt дропнулся из-за dial tcp refused) — должен быть
+	// classified как ErrChainTransient, НЕ терминальный → offsets не
+	// коммитим, DLQ/FAILED не пишем, retry при следующем tick.
+	f, ch, st, dq := newFlusherT()
+	ch.callErr = fmt.Errorf("%w: nonce: dial tcp: connection refused", chain.ErrChainTransient)
+	msgs := makeMessages(2, "wms.receiving.v1", "receiving")
+
+	err := f.Flush(context.Background(), "wms.receiving.v1", msgs)
+	if err == nil {
+		t.Fatal("transient chain error should propagate (no offset commit)")
+	}
+	if !errors.Is(err, chain.ErrChainTransient) {
+		t.Errorf("expected ErrChainTransient wrap, got %v", err)
+	}
+	if len(st.failed) != 0 {
+		t.Errorf("transient should NOT mark failed, got %d", len(st.failed))
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("transient should NOT publish DLQ, got %d", len(dq.messages))
+	}
+}

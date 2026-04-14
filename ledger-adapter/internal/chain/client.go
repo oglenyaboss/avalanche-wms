@@ -150,14 +150,18 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
+	// Все RPC sub-calls (PendingNonceAt, SuggestGasPrice, ChainID,
+	// SendTransaction) — чистая сеть/RPC, не contract-level revert. Оборачиваем
+	// через ErrChainTransient, чтобы Flusher classified их как retry-able и не
+	// слал в DLQ при транзитивном блипе. См. MR !35 M7.
 	nonce, err := c.eth.PendingNonceAt(ctx, c.fromAddress)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("nonce: %w", err)
+		return common.Hash{}, fmt.Errorf("%w: nonce: %v", ErrChainTransient, err)
 	}
 
 	gasPrice, err := c.eth.SuggestGasPrice(ctx)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("gas price: %w", err)
+		return common.Hash{}, fmt.Errorf("%w: gas price: %v", ErrChainTransient, err)
 	}
 
 	gasLimit, err := c.eth.EstimateGas(ctx, ethereum.CallMsg{
@@ -176,17 +180,19 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 
 	chainID, err := c.eth.ChainID(ctx)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("chain id: %w", err)
+		return common.Hash{}, fmt.Errorf("%w: chain id: %v", ErrChainTransient, err)
 	}
 
 	tx := types.NewTransaction(nonce, c.contractAddr, big.NewInt(0), gasLimit, gasPrice, data)
 	signed, err := types.SignTx(tx, types.NewEIP155Signer(chainID), c.privateKey)
 	if err != nil {
+		// Local crypto error — не chain-related. Оставляем raw, Flusher пометит
+		// как terminal (DLQ) — это адекватно: sign не падает transient'но.
 		return common.Hash{}, fmt.Errorf("sign tx: %w", err)
 	}
 
 	if err := c.eth.SendTransaction(ctx, signed); err != nil {
-		return common.Hash{}, fmt.Errorf("send tx: %w", err)
+		return common.Hash{}, fmt.Errorf("%w: send tx: %v", ErrChainTransient, err)
 	}
 	return signed.Hash(), nil
 }
