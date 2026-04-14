@@ -1,31 +1,137 @@
 package main
 
 import (
-	"fmt"
-	"log"
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"ledger-adapter/internal/chain"
 	"ledger-adapter/internal/config"
+	"ledger-adapter/internal/consumer"
+	"ledger-adapter/internal/dlq"
 	"ledger-adapter/internal/handler"
+	"ledger-adapter/internal/store"
 )
 
+// topics — WMS-topic'и которые слушает адаптер. Маппинг в solidity-методы
+// BatchMappingWMS — в chain.topicToMethod.
+var topics = []string{
+	"wms.receiving.v1",
+	"wms.putaway.v1",
+	"wms.picking.v1",
+	"wms.shipping.v1",
+}
+
 func main() {
-	cfg := config.Load()
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(log)
 
-	client, err := chain.NewClient(cfg)
+	if err := run(log); err != nil {
+		log.Error("ledger-adapter exited", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run собирает и запускает pipeline: config → store → chain client →
+// dlq producer → Flusher → N consumer goroutines + health HTTP server.
+// Блокирует до SIGTERM/SIGINT или до падения одного из consumer'ов, потом
+// graceful shutdown (errgroup cancel'ит остальные + HTTP shutdown).
+func run(log *slog.Logger) error {
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		return err
 	}
-	defer client.Close()
+	log.Info("config loaded",
+		"port", cfg.Port,
+		"kafka_brokers", cfg.KafkaBrokers,
+		"contract_addr", cfg.ContractAddr,
+		"batch_size", cfg.BatchSize,
+		"batch_timeout", cfg.BatchTimeout)
 
-	h := handler.New(client)
+	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
 
+	pool, err := store.NewPool(rootCtx, cfg.DbURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	repo := store.NewRepository(pool)
+
+	cli, err := chain.NewClient(cfg.RpcURL, cfg.PrivateKey, cfg.ContractAddr)
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	log.Info("chain client ready", "signer", cli.FromAddress().Hex())
+
+	brokers := strings.Split(cfg.KafkaBrokers, ",")
+	prod := dlq.NewProducer(brokers, cfg.DLQTopic)
+	defer func() { _ = prod.Close() }()
+
+	flusher := consumer.NewFlusher(cli, repo, prod, cfg.ReceiptPollTimeout, log)
+
+	// errgroup: если любой consumer упадёт с ошибкой (не по ctx-cancel'у),
+	// gCtx cancel'ится и остальные тоже остановятся → run() вернёт ошибку
+	// → main() exit 1 → k8s рестартит pod. Без errgroup dead consumer молча
+	// выходил из горутины, остальные работали, pod жил — событие могло зависнуть.
+	g, gCtx := errgroup.WithContext(rootCtx)
+	for _, topic := range topics {
+		t := topic
+		g.Go(func() error {
+			tlog := log.With("topic", t)
+			c := consumer.NewConsumer(brokers, t, cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, tlog)
+			if err := c.Run(gCtx); err != nil && gCtx.Err() == nil {
+				tlog.Error("consumer stopped unexpectedly", "err", err)
+				return err
+			}
+			return nil
+		})
+	}
+
+	srv := startHealthServer(log, cfg.Port)
+
+	// Ждём либо signal → rootCtx отменяется → gCtx отменяется → все consumer'ы
+	// выйдут чисто (g.Wait вернёт nil), либо падение consumer'а → gCtx
+	// отменится изнутри → g.Wait вернёт его error.
+	runErr := g.Wait()
+	log.Info("consumers stopped, shutting down http")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("http shutdown", "err", err)
+	}
+
+	if runErr != nil {
+		return runErr
+	}
+	log.Info("all consumers drained, bye")
+	return nil
+}
+
+func startHealthServer(log *slog.Logger, port string) *http.Server {
 	mux := http.NewServeMux()
-	h.RegisterRoutes(mux)
+	handler.New().RegisterRoutes(mux)
 
-	log.Print("server starting...")
-	if err := http.ListenAndServe(fmt.Sprintf(":%s", cfg.Port), mux); err != nil {
-		log.Printf("server failed: %v", err)
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
+	go func() {
+		log.Info("http listening", "port", port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("http server failed", "err", err)
+		}
+	}()
+	return srv
 }

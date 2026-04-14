@@ -1,7 +1,7 @@
 ledger_adapter_lint:
   stage: lint
   tags: [docker]
-  image: golang:1.24-alpine
+  image: golang:1.25-alpine
   rules:
     - changes:
         - ledger-adapter/**/*
@@ -13,7 +13,7 @@ ledger_adapter_lint:
 ledger_adapter_test:
   stage: test
   tags: [docker]
-  image: golang:1.24-alpine
+  image: golang:1.25-alpine
   rules:
     - changes:
         - ledger-adapter/**/*

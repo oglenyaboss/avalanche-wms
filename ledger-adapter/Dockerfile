@@ -1,23 +1,30 @@
-# Stage 1: Build the Go application
-FROM golang:1.24.9-alpine AS builder
+# syntax=docker/dockerfile:1.7
+# Stage 1: build static binary (CGO off → works with distroless/static).
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-COPY go.mod .
-COPY go.sum .
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
 
-RUN go build -ldflags="-s -w" -o main ./cmd/adapter/main.go
+# CGO_ENABLED=0 + static linking → полностью автономный бинарь без libc/SSL.
+# ldflags -s -w убирает debug symbols (~30% меньше размер).
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /server ./cmd/adapter
 
-# Stage 2: Create the final, smaller image
-FROM alpine:3.19
-RUN apk add --no-cache curl
+# Stage 2: distroless runtime, non-root uid, без shell/package manager.
+# Плюсы: минимальная attack surface, нельзя exec'ить curl/wget/sh.
+# Минус: нет curl для docker healthcheck → используем /bin/grpc_health_probe
+# или healthcheck в compose на wget из основного процесса. У нас compose
+# healthcheck использует curl из wms_app контейнера; для самого adapter
+# healthcheck вынесен на TCP-level (docker-compose test на `/health` выполняет
+# wms_app). Если нужен локальный check — `docker inspect --health`.
+FROM gcr.io/distroless/static-debian12:nonroot
 
-WORKDIR /app
+COPY --from=builder /server /server
 
-COPY --from=builder /app/main .
 EXPOSE 8085
+USER nonroot:nonroot
 
-CMD ["./main"]
+ENTRYPOINT ["/server"]

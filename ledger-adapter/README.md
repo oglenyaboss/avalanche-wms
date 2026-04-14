@@ -1,195 +1,149 @@
 # Ledger Adapter
 
-HTTP-мост между WMS-сервисом и блокчейном Avalanche C-Chain. Принимает запросы от WMS, подписывает транзакции и отправляет их в смарт-контракт.
+Kafka→EVM мост. Читает outbox-события WMS из Kafka, батчит, отправляет одну транзакцию на batch в `BatchMappingWMS` на Avalanche C-Chain. Idempotent, at-least-once, DLQ при фейлах.
 
-## Как это работает
+## Архитектура
 
 ```
-WMS Service                Ledger Adapter              Avalanche C-Chain
-    │                           │                              │
-    │  POST /setstring          │                              │
-    │  {"NewWord": "received"}  │                              │
-    │ ─────────────────────────>│                              │
-    │                           │  ethclient.Dial(RPC_URL)     │
-    │                           │  ────────────────────────────>│
-    │                           │  sign tx with PRIVATE_KEY    │
-    │                           │  ────────────────────────────>│
-    │                           │          tx receipt           │
-    │                           │  <────────────────────────────│
-    │   { tx_hash, gas_used }   │                              │
-    │ <─────────────────────────│                              │
+┌──────────┐  outbox   ┌────────┐   WMS topics    ┌──────────────┐   batch tx   ┌──────────────┐
+│  WMS DB  │───────────▶│Debezium│────────────────▶│    Consumer  │──────────────▶│  BatchMap    │
+└──────────┘           └────────┘                 │    + Batcher │              │  WMS.sol     │
+                                                  │    + Flusher │              └──────────────┘
+                                                  └──────┬───────┘                     │
+                                                         │                             │ receipt
+                                                         ▼                             ▼
+                                                 ┌──────────────┐             ┌──────────────┐
+                                                 │onchain_events│◀────────────│ WaitReceipt  │
+                                                 │    (pg)      │  MarkCommit │  (polling)   │
+                                                 └──────────────┘             └──────────────┘
+                                                         │
+                                                         │ fail → MarkFailed
+                                                         ▼
+                                                 ┌──────────────┐
+                                                 │  wms.dlq.v1  │
+                                                 └──────────────┘
 ```
 
-1. WMS Service выполняет складскую операцию (приёмка, сборка и т.д.)
-2. Отправляет HTTP-запрос в Ledger Adapter с данными операции
-3. Ledger Adapter подписывает транзакцию приватным ключом
-4. Отправляет подписанную транзакцию в Avalanche C-Chain через JSON-RPC
-5. Возвращает результат (tx hash, gas used) обратно в WMS
+Pipeline на batch:
+1. **Idempotency**: `Exists(event_id)` в `onchain_events` → пропускаем дубли
+2. **InsertPending**: запись `(event_id, aggregate_type, PENDING)`
+3. **BatchCall**: `batchAccept/PutAway/Pick/Ship(eventIds[], itemIds[])` (UUID→uint256 keccak256)
+4. **MarkSent**(tx_hash): фиксируем что tx отправлена
+5. **WaitReceipt**: polling с exponential backoff 50ms→2s, потолок `RECEIPT_POLL_TIMEOUT`
+6. **MarkCommitted** если `receipt.Status==1`, иначе **MarkFailed** + публикация в DLQ
 
-## Структура
+Delivery guarantees:
+- **At-least-once**: kafka offsets коммитятся ТОЛЬКО после успешного `MarkCommitted`/`MarkFailed`. Crash до коммита → пересчитаем через Exists при рестарте.
+- **Idempotency on-chain**: `processedEventIds` в контракте reject'ит дубли. Adapter дублирует защиту на уровне БД (`Exists`) чтобы не тратить газ.
+
+## Топики Kafka → методы контракта
+
+| Topic | aggregate_type | Solidity method |
+|---|---|---|
+| `wms.receiving.v1` | receiving | `batchAccept(uint256[], uint256[])` |
+| `wms.putaway.v1` | putaway | `batchPutAway(...)` |
+| `wms.picking.v1` | picking | `batchPick(...)` |
+| `wms.shipping.v1` | shipping | `batchShip(...)` |
+
+Формат сообщения (от Debezium outbox):
+- `key` = `product_id` (UUID string) → `itemId` uint256
+- `headers["id"]` = `event_id` (UUID string) → `eventId` uint256
+- value — произвольный JSON payload (не используется адаптером, сохраняется для DLQ)
+
+## Структура пакетов
 
 ```
 ledger-adapter/
-├── cmd/
-│   └── adapter/
-│       └── main.go              # Точка входа (тонкий: конфиг → клиент → handler → сервер)
+├── cmd/adapter/main.go        # slog + config → pool → chain → dlq → Flusher → N consumer goroutines + /health
 │
 ├── internal/
-│   ├── config/
-│   │   └── config.go            # Загрузка из env: RPC_URL, PRIVATE_KEY, CONTRACT_ADDR
-│   │
-│   ├── chain/
-│   │   ├── client.go            # Обёртка над ethclient: подключение, подпись, отправка tx
-│   │   └── abi.go               # ABI смарт-контракта (JSON)
-│   │
-│   └── handler/
-│       └── handler.go           # HTTP-обработчики для всех эндпоинтов
+│   ├── config/                # Load() (*Config, error) с _FILE override для secrets
+│   ├── chain/                 # go-ethereum wrappers
+│   │   ├── client.go          # BatchAccept/PutAway/Pick/Ship + BatchCall dispatcher
+│   │   ├── abi.go             # go:embed BatchMappingWMS.abi.json
+│   │   ├── convert.go         # UUIDToUint256 (keccak256)
+│   │   └── receipt.go         # WaitReceipt — exponential backoff
+│   ├── store/                 # pgx pool + onchain_events Repository
+│   ├── consumer/              # Message/Parse + Batcher + Flusher + Consumer
+│   ├── dlq/                   # kafka.Writer для wms.dlq.v1
+│   └── handler/               # /health only
 │
-├── contracts/
-│   └── contract_copy.sol        # Solidity-контракт (для справки)
-│
-├── Dockerfile
-├── go.mod
-└── .env.example
-```
-
-### Почему go-ethereum для Avalanche?
-
-Avalanche C-Chain — это EVM-совместимая цепочка. Она поддерживает тот же JSON-RPC API, что и Ethereum. Поэтому библиотека [go-ethereum](https://github.com/ethereum/go-ethereum) работает с Avalanche без изменений — меняется только RPC URL.
-
-> Подробнее: [Avalanche C-Chain EVM](https://docs.avax.network/build/dapp/c-chain-evm)
-
-## API
-
-### `GET /health`
-
-Проверка что сервис запущен.
-
-```json
-{
-  "status": "healty",
-  "time": "2026-03-01T14:30:00+05:00"
-}
-```
-
-### `GET /`
-
-Получить текущее сообщение из смарт-контракта.
-
-```json
-{
-  "message": "Hello World"
-}
-```
-
-### `POST /setstring`
-
-Записать новое сообщение в контракт (перезаписывает текущее).
-
-**Запрос:**
-```json
-{
-  "NewWord": "shipment_12345_received"
-}
-```
-
-**Ответ:** информация о транзакции (gas used, tx hash и т.д.)
-
-### `POST /addfunc`
-
-Добавить сообщение к существующему (конкатенация).
-
-**Запрос:**
-```json
-{
-  "addition": "_confirmed"
-}
-```
-
-### `GET /viewlogs?id=N`
-
-Получить логи (события) контракта начиная с блока N.
-
-```json
-[
-  {
-    "address": "0x...",
-    "data": "new value set",
-    "blockNumber": 12345,
-    "transactionHash": "0x...",
-    "removed": false
-  }
-]
+└── contracts/
+    └── BatchMappingWMS.sol    # Solidity контракт (компилируется в contract-deploy)
 ```
 
 ## Конфигурация
 
-| Переменная | Описание | По умолчанию |
-|------------|----------|-------------|
-| `PORT` | Порт HTTP-сервера | `8085` |
-| `RPC_URL` | Avalanche C-Chain RPC endpoint | `http://localhost:8545` |
-| `PRIVATE_KEY` | Приватный ключ для подписи транзакций (hex, без `0x`) | — |
-| `CONTRACT_ADDR` | Адрес развёрнутого смарт-контракта | — |
+Все обязательные поля поддерживают `<NAME>_FILE` override (читает путь к файлу вместо прямого env). Нужно для test-профиля, где `contract-deploy` сервис пишет артефакты в shared volume.
 
-### Как получить значения для конфигурации
+| Переменная | Обязательно | Default | Описание |
+|---|---|---|---|
+| `KAFKA_BROKERS` | ✓ | — | CSV broker list, `kafka:9092` |
+| `KAFKA_GROUP_ID` | | `ledger-adapter` | consumer group |
+| `DB_URL` | ✓ | — | pgx DSN `postgres://user:pw@host/db` |
+| `RPC_URL` | ✓ | — | Avalanche C-Chain RPC |
+| `CONTRACT_ADDR` | ✓ | — | Адрес `BatchMappingWMS` |
+| `PRIVATE_KEY` | ✓ | — | Hex signer key (0x-prefixed ok) |
+| `BATCH_SIZE` | | `10` | Events per tx |
+| `BATCH_TIMEOUT` | | `100ms` | Flush by time если batch не набрался |
+| `DLQ_TOPIC` | | `wms.dlq.v1` | |
+| `RECEIPT_POLL_TIMEOUT` | | `30s` | Макс время ожидания receipt |
+| `PORT` | | `8085` | HTTP /health |
+| `LOG_LEVEL` | | `info` | (reserved, slog default) |
 
-1. **RPC_URL** — для тестнета Avalanche Fuji: `https://api.avax-test.network/ext/bc/C/rpc`
-2. **PRIVATE_KEY** — экспортировать из MetaMask: Настройки → Безопасность → Экспорт приватного ключа
-3. **CONTRACT_ADDR** — получается после деплоя контракта (Remix / Hardhat / Foundry)
+## Запуск
 
-> Никогда не коммитьте `.env` с реальными ключами! Используйте `.env.example` как шаблон.
-
-## Смарт-контракт
-
-Контракт лежит в `contracts/contract_copy.sol`. Основные функции:
-
-| Функция | Тип | Описание |
-|---------|-----|----------|
-| `message()` | view | Получить текущее сообщение |
-| `setMessage(string)` | write | Установить новое сообщение |
-| `addMessage(string)` | write | Добавить к текущему сообщению |
-
-Каждая write-операция генерирует событие `setlogs(string)` — его можно прочитать через `/viewlogs`.
-
-## Локальная разработка
+### Test profile (полный стек с локальным avalanchego)
 
 ```bash
-# Из корня проекта
-make lint-ledger     # линтинг
-make test-ledger     # тесты
-make tidy-ledger     # go mod tidy
-make vendor-ledger   # обновить vendor
+docker compose --profile test up -d
+# contract-deploy one-shot → пишет RPC_URL / CONTRACT_ADDR / PRIVATE_KEY в shared volume
+# ledger-adapter читает их через *_FILE env vars
 ```
 
-### Без Docker
+### Локально без docker (unit-dev)
 
 ```bash
+export KAFKA_BROKERS=kafka:9092
+export DB_URL="postgres://root:root@localhost/wms_blockchain_db?sslmode=disable"
 export RPC_URL=https://api.avax-test.network/ext/bc/C/rpc
-export PRIVATE_KEY=ваш_приватный_ключ
-export CONTRACT_ADDR=адрес_контракта
+export CONTRACT_ADDR=0x...
+export PRIVATE_KEY=0x...
 
 cd ledger-adapter
 go run ./cmd/adapter/
 ```
 
-## Зависимости
+## Тестирование
 
-| Пакет | Назначение | Документация |
-|-------|-----------|--------------|
-| [go-ethereum](https://github.com/ethereum/go-ethereum) | EVM-клиент (ethclient, ABI, crypto) | [go-ethereum book](https://goethereumbook.org/) |
+```bash
+# Unit tests (быстро, ~5s)
+go test -race ./...
 
-### Ключевые пакеты go-ethereum
+# Integration tests (требуют Docker — testcontainers-go/postgres)
+go test -tags integration -race -timeout 180s ./internal/store/...
+```
 
-- `ethclient` — JSON-RPC клиент к EVM-ноде
-- `accounts/abi` — парсинг и кодирование ABI
-- `crypto` — работа с приватными ключами, подпись транзакций
-- `common` — типы Address, Hash
-- `core/types` — Transaction, Receipt, Log
+Покрытие:
+- `config/`: 9 tests — defaults, missing required, env, `_FILE` override (file missing, file wins, valid trim), invalid int/duration.
+- `chain/`: 9 tests — UUIDToUint256 vectors (cast keccak cross-check), determinism, ABI parses+includes methods+event, WaitReceipt (happy/retry/timeout/non-NotFound/cancel).
+- `store/`: 2 unit + 5 integration (testcontainers-pg).
+- `consumer/`: 17 tests — Parse (valid + 4 errors), topic-map, Batcher (empty/size/timeout/drain/concurrent), Flusher (happy/duplicates/revert→DLQ/receipt-zero→DLQ/transient/partial).
+
+## Troubleshooting
+
+| Симптом | Причина | Фикс |
+|---|---|---|
+| `config: missing required env: KAFKA_BROKERS` | env не задан | см. таблицу выше |
+| `chain client: dial rpc: ...` | RPC URL некорректный или узел недоступен | проверь `cast chain-id --rpc-url $RPC_URL` |
+| `chain client: parse private key` | Ключ некорректный или кривой формат | 64 hex chars с/без `0x` |
+| `chain call failed: execution reverted: Duplicate eventId` | Идемпотентность сработала на chain-уровне после рестарта БД | Проверь что `onchain_events` волюм не был убит отдельно от состояния контракта; нужно `down -v` обоих |
+| `receipt timeout` в логах, затем DLQ | RPC slow / blockchain congested | Увеличь `RECEIPT_POLL_TIMEOUT` или разберись с инфрой |
+| DLQ растёт | Смотри headers `reason` и `original_topic` в `wms.dlq.v1` |
 
 ## Полезные ссылки
 
-- [Avalanche C-Chain Docs](https://docs.avax.network/build/dapp/c-chain-evm) — документация EVM на Avalanche
-- [Go Ethereum Book](https://goethereumbook.org/) — пошаговый гайд по go-ethereum (работает и для Avalanche)
-- [Remix IDE](https://remix.ethereum.org/) — деплой контрактов через браузер
-- [Avalanche Fuji Faucet](https://faucet.avax.network/) — тестовые AVAX для Fuji testnet
-- [Solidity by Example](https://solidity-by-example.org/) — примеры Solidity-контрактов
+- [go-ethereum book](https://goethereumbook.org/)
+- [BatchMappingWMS.sol](contracts/BatchMappingWMS.sol) — контракт
+- [Issue #20](https://git.miem.hse.ru/2340/blockchain_project/-/issues/20) — постановка задачи
+- [docs/ADR](../docs/ADR/) — архитектурные решения WMS
