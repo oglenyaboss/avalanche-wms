@@ -22,7 +22,7 @@ services:
       postgres:
         condition: service_healthy
       ledger-adapter:
-        condition: service_healthy
+        condition: service_started
       db-init:
         condition: service_completed_successfully
       kafka-init:
@@ -268,21 +268,26 @@ services:
       - "8085:8085"
     environment:
       PORT: 8085
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP_ID: ledger-adapter
+      DB_URL: "postgres://${DB_USER:-root}:${DB_PASSWORD:-root}@postgres:5432/${DB_NAME:-wms_blockchain_db}?sslmode=disable"
       RPC_URL: ${RPC_URL:-http://localhost:8545}
       PRIVATE_KEY: ${PRIVATE_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
       CONTRACT_ADDR: ${CONTRACT_ADDR:-0x0000000000000000000000000000000000000000}
+      DLQ_TOPIC: wms.dlq.v1
+      BATCH_SIZE: "10"
+      BATCH_TIMEOUT: 100ms
+      RECEIPT_POLL_TIMEOUT: 30s
+      LOG_LEVEL: info
       # test-profile overrides via shared volume (silently ignored if files absent)
       RPC_URL_FILE: /shared/rpc_url.txt
       CONTRACT_ADDR_FILE: /shared/contract_addr.txt
       PRIVATE_KEY_FILE: /shared/deployer_key.txt
     volumes:
       - shared_state:/shared:ro
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 10s
+    # Healthcheck убран: distroless/static не содержит curl/wget/nc.
+    # Downstream сервисы ждут через `condition: service_started`, а e2e ждёт
+    # логами через docker logs --follow / `docker inspect .State.Running`.
     depends_on:
       db-init:
         condition: service_completed_successfully
