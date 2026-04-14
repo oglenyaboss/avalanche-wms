@@ -68,7 +68,7 @@ func main() {
 
 	putawayRepo := putaway.NewRepository(dbPool)
 	putawaySvc := putaway.NewService(putawayRepo)
-	_ = putaway.NewHandler(putawaySvc)
+	putawayHandler := putaway.NewHandler(putawaySvc)
 
 	shippingRepo := shipping.NewRepository(dbPool)
 	shippingSvc := shipping.NewService(shippingRepo)
@@ -82,9 +82,14 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
 	authHandler.RegisterRoutes(r)
+
 	receivingRouter := r.PathPrefix("/receiving").Subrouter()
 	receivingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	receivingHandler.RegisterRoutes(receivingRouter)
+
+	putawayRouter := r.PathPrefix("/putaway").Subrouter()
+	putawayRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	putawayHandler.RegisterRoutes(putawayRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
