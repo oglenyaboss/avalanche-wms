@@ -24,6 +24,7 @@ type ChainCaller interface {
 // Store — minimal interface к onchain_events repo.
 type Store interface {
 	Exists(ctx context.Context, eventID uuid.UUID) (bool, error)
+	Status(ctx context.Context, eventID uuid.UUID) (string, error)
 	InsertPending(ctx context.Context, eventID uuid.UUID, aggType string) error
 	MarkSent(ctx context.Context, ids []uuid.UUID, txHash string) error
 	MarkCommitted(ctx context.Context, ids []uuid.UUID) error
@@ -132,6 +133,14 @@ func (f *Flusher) recordFailure(ctx context.Context, pending []*Message, ids []u
 	return nil
 }
 
+// filterAndMarkPending делит входящий батч на (a) terminal — пропускаем,
+// (b) non-terminal (PENDING/SENT от предыдущего зафейленного flush'а) или
+// новые — InsertPending + добавляем к pending для повторной попытки.
+//
+// Non-terminal retry: InsertPending идемпотентен (ON CONFLICT DO NOTHING),
+// повторная отправка SENT row'a приведёт к revert'у (contract.processedEventIds)
+// → DLQ → оператор видит залипший event в DLQ с понятным reason'ом. Лучше
+// видимого dup-error'а чем silent stranded row.
 func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]*Message, error) {
 	pending := make([]*Message, 0, len(msgs))
 	for _, m := range msgs {
@@ -140,11 +149,21 @@ func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]
 			return nil, fmt.Errorf("store.exists %s: %w", m.EventID, err)
 		}
 		if ok {
-			f.log.Info("skip duplicate event", "event_id", m.EventID, "topic", m.Topic)
-			continue
-		}
-		if err := f.store.InsertPending(ctx, m.EventID, m.AggregateType); err != nil {
-			return nil, fmt.Errorf("insert pending %s: %w", m.EventID, err)
+			status, serr := f.store.Status(ctx, m.EventID)
+			if serr != nil {
+				return nil, fmt.Errorf("store.status %s: %w", m.EventID, serr)
+			}
+			if status == "COMMITTED" || status == "FAILED" {
+				f.log.Info("skip terminal event", "event_id", m.EventID, "topic", m.Topic, "status", status)
+				continue
+			}
+			// PENDING или SENT — retry. Идёт на повторный chain.BatchCall;
+			// для SENT контракт revert'нет (processedEventIds) → DLQ.
+			f.log.Warn("retrying non-terminal event", "event_id", m.EventID, "topic", m.Topic, "status", status)
+		} else {
+			if err := f.store.InsertPending(ctx, m.EventID, m.AggregateType); err != nil {
+				return nil, fmt.Errorf("insert pending %s: %w", m.EventID, err)
+			}
 		}
 		pending = append(pending, m)
 	}

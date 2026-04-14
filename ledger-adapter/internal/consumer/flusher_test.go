@@ -53,11 +53,13 @@ func (s *stubChain) TransactionReceipt(_ context.Context, _ common.Hash) (*types
 type stubStore struct {
 	mu        sync.Mutex
 	exists    map[uuid.UUID]bool
+	statuses  map[uuid.UUID]string // "PENDING"/"SENT"/"COMMITTED"/"FAILED"
 	inserted  map[uuid.UUID]string
 	sent      map[uuid.UUID]string
 	committed map[uuid.UUID]bool
 	failed    map[uuid.UUID]string
 	existsErr error
+	statusErr error
 	insertErr error
 	failedErr error
 }
@@ -65,6 +67,7 @@ type stubStore struct {
 func newStubStore() *stubStore {
 	return &stubStore{
 		exists:    map[uuid.UUID]bool{},
+		statuses:  map[uuid.UUID]string{},
 		inserted:  map[uuid.UUID]string{},
 		sent:      map[uuid.UUID]string{},
 		committed: map[uuid.UUID]bool{},
@@ -81,6 +84,19 @@ func (s *stubStore) Exists(_ context.Context, id uuid.UUID) (bool, error) {
 	return s.exists[id], nil
 }
 
+func (s *stubStore) Status(_ context.Context, id uuid.UUID) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statusErr != nil {
+		return "", s.statusErr
+	}
+	if st, ok := s.statuses[id]; ok {
+		return st, nil
+	}
+	// Дефолт для existing row без явного статуса — PENDING (retry-able).
+	return "PENDING", nil
+}
+
 func (s *stubStore) InsertPending(_ context.Context, id uuid.UUID, agg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -89,6 +105,7 @@ func (s *stubStore) InsertPending(_ context.Context, id uuid.UUID, agg string) e
 	}
 	s.inserted[id] = agg
 	s.exists[id] = true
+	s.statuses[id] = "PENDING"
 	return nil
 }
 
@@ -97,6 +114,7 @@ func (s *stubStore) MarkSent(_ context.Context, ids []uuid.UUID, txHash string) 
 	defer s.mu.Unlock()
 	for _, id := range ids {
 		s.sent[id] = txHash
+		s.statuses[id] = "SENT"
 	}
 	return nil
 }
@@ -106,6 +124,7 @@ func (s *stubStore) MarkCommitted(_ context.Context, ids []uuid.UUID) error {
 	defer s.mu.Unlock()
 	for _, id := range ids {
 		s.committed[id] = true
+		s.statuses[id] = "COMMITTED"
 	}
 	return nil
 }
@@ -118,6 +137,7 @@ func (s *stubStore) MarkFailed(_ context.Context, ids []uuid.UUID, _, reason str
 	}
 	for _, id := range ids {
 		s.failed[id] = reason
+		s.statuses[id] = "FAILED"
 	}
 	return nil
 }
@@ -190,9 +210,10 @@ func TestFlusher_HappyPath(t *testing.T) {
 func TestFlusher_Idempotency_SkipsAllExisting(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	msgs := makeMessages(2, "wms.receiving.v1", "receiving")
-	// Пометим как existing
+	// Пометим как existing + COMMITTED — terminal статус, должны скипнуться.
 	for _, m := range msgs {
 		st.exists[m.EventID] = true
+		st.statuses[m.EventID] = "COMMITTED"
 	}
 
 	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
@@ -265,9 +286,11 @@ func TestFlusher_EmptyBatch_NoOp(t *testing.T) {
 func TestFlusher_PartialDuplicates_ProcessesOnlyNew(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
 	msgs := makeMessages(3, "wms.shipping.v1", "shipping")
-	// Первые 2 уже existing
+	// Первые 2 уже existing в terminal COMMITTED — скипнутся.
 	st.exists[msgs[0].EventID] = true
+	st.statuses[msgs[0].EventID] = "COMMITTED"
 	st.exists[msgs[1].EventID] = true
+	st.statuses[msgs[1].EventID] = "COMMITTED"
 
 	if err := f.Flush(context.Background(), "wms.shipping.v1", msgs); err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -316,5 +339,66 @@ func TestFlusher_MarkFailedFails_ReturnsError_NoDLQ(t *testing.T) {
 	}
 	if len(dq.messages) != 0 {
 		t.Errorf("DLQ should not be attempted when MarkFailed fails, got %d", len(dq.messages))
+	}
+}
+
+func TestFlusher_StrandedPending_GetsRetried(t *testing.T) {
+	// Row залип в PENDING (MarkSent упал в прошлом tick). Сейчас Exists=true,
+	// Status=PENDING — не terminal → прогоняем через chain снова. InsertPending
+	// не вызывается (NULL-op из-за уже существующей записи), MarkSent проходит.
+	f, ch, st, _ := newFlusherT()
+	msgs := makeMessages(1, "wms.receiving.v1", "receiving")
+	st.exists[msgs[0].EventID] = true
+	st.statuses[msgs[0].EventID] = "PENDING"
+
+	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+		t.Fatalf("retry of stranded PENDING should succeed, got: %v", err)
+	}
+	if len(ch.calls) != 1 {
+		t.Errorf("expected 1 chain call for stranded row, got %d", len(ch.calls))
+	}
+	if len(st.committed) != 1 {
+		t.Errorf("expected 1 COMMITTED after successful retry, got %d", len(st.committed))
+	}
+	// InsertPending не должен был вызваться — row уже существовал.
+	if len(st.inserted) != 0 {
+		t.Errorf("InsertPending should skip existing row, got %d inserts", len(st.inserted))
+	}
+}
+
+func TestFlusher_CommittedEventSkipped(t *testing.T) {
+	// Row уже COMMITTED от прошлого успешного flush'а. Должен полностью
+	// скипнуться — ни chain call, ни InsertPending.
+	f, ch, st, dq := newFlusherT()
+	msgs := makeMessages(1, "wms.receiving.v1", "receiving")
+	st.exists[msgs[0].EventID] = true
+	st.statuses[msgs[0].EventID] = "COMMITTED"
+
+	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("no chain call expected for COMMITTED event, got %d", len(ch.calls))
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("no DLQ expected, got %d", len(dq.messages))
+	}
+	if len(st.inserted) != 0 {
+		t.Errorf("no InsertPending expected, got %d", len(st.inserted))
+	}
+}
+
+func TestFlusher_FailedEventSkipped(t *testing.T) {
+	// Terminal FAILED — тоже terminal, скип.
+	f, ch, st, _ := newFlusherT()
+	msgs := makeMessages(1, "wms.receiving.v1", "receiving")
+	st.exists[msgs[0].EventID] = true
+	st.statuses[msgs[0].EventID] = "FAILED"
+
+	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("no chain call for FAILED event, got %d", len(ch.calls))
 	}
 }
