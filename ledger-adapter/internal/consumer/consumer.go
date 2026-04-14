@@ -18,16 +18,20 @@ type Consumer struct {
 	reader  *kafka.Reader
 	batcher *Batcher
 	flusher *Flusher
+	dlq     DLQPublisher
 	topic   string
 	log     *slog.Logger
 	tickInt time.Duration
 }
 
-// NewConsumer собирает kafka.Reader + Batcher.
+// NewConsumer собирает kafka.Reader + Batcher. dlq используется для parse-fail
+// сообщений — они не попадают в flusher'ский pipeline (нельзя распарсить
+// event_id), но должны быть видимы downstream'у для анализа/репроцесса.
 func NewConsumer(
 	brokers []string,
 	topic, groupID string,
 	flusher *Flusher,
+	dlq DLQPublisher,
 	batchSize int,
 	batchTimeout time.Duration,
 	log *slog.Logger,
@@ -47,6 +51,7 @@ func NewConsumer(
 		reader:  r,
 		batcher: NewBatcher(batchSize, batchTimeout),
 		flusher: flusher,
+		dlq:     dlq,
 		topic:   topic,
 		log:     log,
 		tickInt: 50 * time.Millisecond,
@@ -80,8 +85,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 		case m := <-msgCh:
 			parsed, err := Parse(&m)
 			if err != nil {
-				c.log.Warn("parse failed — skipping", "err", err, "offset", m.Offset, "topic", c.topic)
-				// Коммитим offset чтобы не зацикливаться на bad message.
+				if dlqErr := c.handleParseFailure(ctx, &m, err); dlqErr != nil {
+					// DLQ fail — offset НЕ коммитим, сообщение re-fetch'нется.
+					c.log.Error("dlq publish parse-failed msg — NOT committing offset", "err", dlqErr)
+					continue
+				}
 				if cerr := c.reader.CommitMessages(ctx, m); cerr != nil {
 					c.log.Error("commit offsets after parse fail", "err", cerr)
 				}
@@ -102,6 +110,17 @@ func (c *Consumer) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// handleParseFailure публикует невалидное kafka-сообщение в DLQ. Если DLQ
+// publisher вернул ошибку — возвращаем её, вызывающий НЕ коммитит offset
+// (сообщение re-fetch'нется на следующем poll'е).
+func (c *Consumer) handleParseFailure(ctx context.Context, m *kafka.Message, parseErr error) error {
+	c.log.Warn("parse failed — sending to DLQ", "err", parseErr, "offset", m.Offset, "topic", c.topic)
+	// Parse-fail даёт zero UUIDs; downstream'у достаточно original payload +
+	// headers + reason header'а от DLQ producer'а.
+	stub := &Message{Topic: c.topic, KafkaMsg: *m}
+	return c.dlq.PublishAll(ctx, []*Message{stub}, "parse failed: "+parseErr.Error())
 }
 
 func (c *Consumer) fetchLoop(ctx context.Context, msgCh chan<- kafka.Message, errCh chan<- error) {

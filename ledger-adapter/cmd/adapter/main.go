@@ -84,7 +84,7 @@ func run(log *slog.Logger) error {
 		go func() {
 			defer wg.Done()
 			tlog := log.With("topic", t)
-			c := consumer.NewConsumer(brokers, t, cfg.KafkaGroupID, flusher, cfg.BatchSize, cfg.BatchTimeout, tlog)
+			c := consumer.NewConsumer(brokers, t, cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, tlog)
 			if err := c.Run(rootCtx); err != nil && rootCtx.Err() == nil {
 				tlog.Error("consumer stopped unexpectedly", "err", err)
 			}
