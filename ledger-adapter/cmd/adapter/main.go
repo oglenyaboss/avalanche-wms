@@ -11,11 +11,14 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
 
 	client, err := chain.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		log.Fatalf("failed to connect: %v", err)
 	}
 	defer client.Close()
 
