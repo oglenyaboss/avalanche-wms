@@ -66,6 +66,8 @@ func Load() (*Config, error) {
 
 // getRequired сначала читает <NAME>_FILE, потом <NAME>. Пустая строка = missing.
 // Ошибка чтения существующего файла — fatal (явная мисконфигурация).
+// Если <NAME>_FILE задан, но файл не найден — логируем warning в stderr
+// (опечатка в пути молча бы привела к использованию env-var с другим значением).
 func getRequired(name string) (string, error) {
 	if path := os.Getenv(name + "_FILE"); path != "" {
 		b, err := os.ReadFile(path)
@@ -75,6 +77,7 @@ func getRequired(name string) (string, error) {
 		if !os.IsNotExist(err) {
 			return "", fmt.Errorf("read %s_FILE=%q: %w", name, path, err)
 		}
+		fmt.Fprintf(os.Stderr, "config: %s_FILE=%q not found, falling back to %s env var\n", name, path, name)
 	}
 	v := os.Getenv(name)
 	if v == "" {

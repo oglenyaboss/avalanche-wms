@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -144,13 +147,45 @@ func TestLoad_FileMissing_FallsBackToEnv(t *testing.T) {
 	t.Setenv("RPC_URL_FILE", "/nonexistent/missing.txt")
 	t.Setenv("RPC_URL", "http://fallback:1234")
 
-	cfg, err := Load()
+	stderr := captureStderr(t, func() {
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RpcURL != "http://fallback:1234" {
+			t.Errorf("missing file fallback: got %q", cfg.RpcURL)
+		}
+	})
+
+	if !strings.Contains(stderr, "RPC_URL_FILE") || !strings.Contains(stderr, "not found") {
+		t.Errorf("expected stderr warning about missing RPC_URL_FILE, got %q", stderr)
+	}
+}
+
+// captureStderr временно перенаправляет os.Stderr в pipe и возвращает всё
+// что туда записал f. Используется для проверки warning'ов в config.Load.
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("pipe: %v", err)
 	}
-	if cfg.RpcURL != "http://fallback:1234" {
-		t.Errorf("missing file fallback: got %q", cfg.RpcURL)
-	}
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	done := make(chan struct{})
+	var buf bytes.Buffer
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
+
+	f()
+	_ = w.Close()
+	<-done
+	_ = r.Close()
+	return buf.String()
 }
 
 func TestLoad_FileTakesPriorityOverEnv(t *testing.T) {
