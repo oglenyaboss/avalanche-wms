@@ -2,9 +2,14 @@
 
 ## Суть
 
-Финальный этап: собранные товары передаются курьеру / загружаются в транспорт. После отгрузки товар покидает склад.
+Финальный этап: собранные товары передаются водителю и покидают склад.
 
-**Ключевое:** отгрузка работает на уровне заказа — все товары заказа отгружаются одновременно. Outbox event создаётся **по одному на каждый product**.
+**Ключевое в новой схеме:**
+
+- отгрузка привязана к заранее созданному `outbound_dispatch`
+- оператор находит рейс по `dispatch_code` (QR водителя)
+- рейс, заказ и буфер отгрузки должны сходиться по одному `destination_id`
+- в `shippings` хранится ссылка на `dispatch_id`, а номер машины берется из `outbound_dispatches`
 
 ## Диаграмма последовательности
 
@@ -17,75 +22,93 @@ sequenceDiagram
     participant PG as Postgres
     participant KF as Kafka (async)
 
-    Note over Op,PG: === Шаг 1: Выбор заказа ===
-    Op->>UI: Выбирает заказ для отгрузки
-    UI->>WMS: GET /shipping/orders?status=READY_TO_SHIP
-    WMS->>PG: SELECT orders WHERE status IN ('ASSEMBLED', 'READY_TO_SHIP')
-    WMS-->>UI: Список заказов, готовых к отгрузке
+    Note over Op,PG: === Шаг 1: Идентификация рейса ===
+    Op->>UI: Сканирует QR водителя
+    UI->>WMS: POST /shipping/dispatches/resolve {dispatch_code}
+    WMS->>PG: SELECT outbound_dispatches WHERE dispatch_code = ...
+    WMS->>PG: UPDATE outbound_dispatches SET status = 'AT_GATE', arrived_at = now() (опционально)
+    WMS-->>UI: Рейс найден: destination_id, vehicle_number, driver_name
 
-    Note over Op,PG: === Шаг 2: Сканирование товаров (верификация) ===
+    Note over Op,PG: === Шаг 2: Выбор заказа ===
+    Op->>UI: Выбирает заказ для отгрузки
+    UI->>WMS: GET /shipping/orders?dispatch_id=...
+    WMS->>PG: SELECT orders WHERE status = 'ASSEMBLED' AND destination_id = dispatch.destination_id
+    WMS-->>UI: Список заказов для выбранного магазина
+
+    Note over Op,PG: === Шаг 3: Верификация товаров ===
     loop Для каждого товара в заказе
         Op->>UI: Сканирует QR товара
-        UI->>WMS: POST /shipping/verify {order_id, product_id}
-        WMS->>WMS: Проверка: product принадлежит order? status = ASSEMBLED?
-        WMS-->>UI: Товар подтверждён ✓ (3/5)
+        UI->>WMS: POST /shipping/verify {order_id, product_id, dispatch_id}
+        WMS->>WMS: Проверка: product принадлежит order? status = ASSEMBLED? order.destination_id = dispatch.destination_id?
+        WMS-->>UI: Товар подтверждён ✓
     end
 
-    Note over Op,PG: === Шаг 3: Отгрузка ===
-    Op->>UI: Вводит номер ТС, нажимает "Отгрузить"
-    UI->>WMS: POST /shipping/ship {order_id, vehicle_number}
+    Note over Op,PG: === Шаг 4: Отгрузка ===
+    Op->>UI: Подтверждает загрузку
+    UI->>WMS: POST /shipping/ship {order_id, dispatch_id}
     WMS->>PG: BEGIN TX
-
-    WMS->>PG: SELECT products WHERE order_id AND status = 'ASSEMBLED'
+    WMS->>PG: SELECT products WHERE order_id = ... AND status = 'ASSEMBLED'
 
     loop Для каждого product
         WMS->>PG: UPDATE products SET status = 'SHIPPED'
-        WMS->>PG: INSERT shippings (event_id, product_id, vehicle_number, onchain_status='PENDING_ONCHAIN')
+        WMS->>PG: INSERT shippings (event_id, product_id, dispatch_id, onchain_status='PENDING_ONCHAIN')
         WMS->>PG: INSERT outbox_events (event_id, aggregate_id=product_id, aggregate_type='shipping')
     end
 
     WMS->>PG: UPDATE orders SET status = 'SHIPPED'
+    WMS->>PG: UPDATE outbound_dispatches SET status = 'DEPARTED', departed_at = now() (по бизнес-правилу)
     WMS->>PG: COMMIT
-    WMS-->>Op: Заказ отгружен: 5 товаров ✓
+    WMS-->>Op: Заказ отгружен ✓
 
     Note over PG,KF: Debezium → Kafka → Ledger Adapter → batchShip → Picked → Shipped
 ```
 
 ## Состояния сущностей
 
-### products.status (в контексте отгрузки)
+### outbound_dispatches.status
+
 ```mermaid
 stateDiagram-v2
-    ASSEMBLED --> READY_TO_SHIP : Упаковка (MVP: автоматически = ASSEMBLED)
-    READY_TO_SHIP --> SHIPPED : Отгрузка
-    ASSEMBLED --> SHIPPED : Отгрузка (MVP: напрямую)
+    [*] --> SCHEDULED : Внешняя логистика создала рейс
+    SCHEDULED --> AT_GATE : Водитель прибыл / QR отсканирован
+    AT_GATE --> DEPARTED : Погрузка завершена
+    SCHEDULED --> CANCELLED : Рейс отменён
+    AT_GATE --> CANCELLED : Рейс отменён
 ```
 
 ### orders.status (в контексте отгрузки)
+
 ```mermaid
 stateDiagram-v2
-    ASSEMBLED --> READY_TO_SHIP : Все товары упакованы (MVP: автоматически)
-    READY_TO_SHIP --> SHIPPED : Все товары отгружены
+    ASSEMBLED --> SHIPPED : Все товары заказа отгружены
+```
+
+### products.status (в контексте отгрузки)
+
+```mermaid
+stateDiagram-v2
+    ASSEMBLED --> SHIPPED : Отгрузка
 ```
 
 ## Какие таблицы затрагиваются
 
 | Таблица | Операция | Что меняется |
 |---------|----------|-------------|
-| `products` | UPDATE | status: ASSEMBLED → SHIPPED |
-| `shippings` | INSERT | Запись об отгрузке (product_id, vehicle_number, onchain_status) |
-| `orders` | UPDATE | status → SHIPPED (когда все products отгружены) |
-| `outbox_events` | INSERT | N events (1 per product, aggregate_type='shipping') |
+| `outbound_dispatches` | SELECT / UPDATE | Поиск по `dispatch_code`, статусы `SCHEDULED → AT_GATE → DEPARTED` |
+| `orders` | SELECT / UPDATE | Фильтр по `destination_id`, статус `ASSEMBLED → SHIPPED` |
+| `products` | UPDATE | `status: ASSEMBLED → SHIPPED` |
+| `shippings` | INSERT | Запись об отгрузке с `dispatch_id` |
+| `outbox_events` | INSERT | N events (1 per product, `aggregate_type='shipping'`) |
 
 ## Outbox events
 
 ```sql
--- При POST /shipping/ship, для КАЖДОГО product в заказе (одна TX):
+-- При POST /shipping/ship, для КАЖДОГО product в заказе:
 INSERT INTO outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
 VALUES (
-  shipping.event_id,       -- тот же event_id что и в shippings
-  shipping.product_id,     -- product_id → Kafka key → itemId в контракте
-  'shipping',              -- → topic: wms.shipping.v1
+  shipping.event_id,
+  shipping.product_id,
+  'shipping',
   'wms.shipping.v1',
   sha256(...)
 );
@@ -93,48 +116,13 @@ VALUES (
 
 **Блокчейн:** `batchShip(eventIds[], itemIds[])` → переход `Picked → Shipped`.
 
-Это **финальный переход** в FSM контракта. После `Shipped` статус товара на блокчейне не меняется.
+## Валидация destination
 
-## Полный жизненный цикл товара
+В исходящем потоке `destination_id` становится сквозным ключом:
 
-```mermaid
-flowchart LR
-    subgraph GATE["1. КПП"]
-        G["Скан TTN + грузомест"]
-    end
+- `orders.destination_id` говорит, куда должен уехать заказ
+- `bins.destination_id` привязывает `SHIPPING_BUFFER` к магазину
+- `outbound_dispatches.destination_id` говорит, для какого магазина приехала машина
+- `shippings.dispatch_id` фиксирует, в какой рейс реально погрузили товар
 
-    subgraph TABLE["2. Стол приёмки"]
-        T["Скан коробок → Скан ШК → QR → Буфер"]
-        T2["product создан, status=RECEIVED"]
-    end
-
-    subgraph PUTAWAY["3. Раскладка"]
-        P["Из буфера → ячейка хранения"]
-        P2["status=STORED"]
-    end
-
-    subgraph ASSEMBLY["4. Сборка"]
-        A["Аллокация → Подбор с полки"]
-        A2["status=ASSEMBLED"]
-    end
-
-    subgraph SHIPPING["5. Отгрузка"]
-        S["Верификация → Отгрузка"]
-        S2["status=SHIPPED"]
-    end
-
-    G --> T --> T2 --> P --> P2 --> A --> A2 --> S --> S2
-
-    style SHIPPING fill:#FF6347,stroke:#333
-```
-
-## Blockchain FSM (параллельно)
-
-```
-On-chain:  None → Accepted → PutAway → Picked → Shipped
-                     ↑           ↑         ↑        ↑
-Off-chain: RECEIVED  STORED   ASSEMBLED  SHIPPED
-           (table)  (putaway)  (pick)    (ship)
-```
-
-Каждый переход off-chain создаёт outbox event → Kafka → Ledger Adapter → on-chain переход.
+За счет этого оператор и backend могут валидировать `order ↔ shipping_buffer ↔ dispatch` в одном контуре.
