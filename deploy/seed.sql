@@ -19,6 +19,19 @@ VALUES (
 )
 ON CONFLICT (username) DO NOTHING;
 
+-- 1.1) Demo customer for outbound orders
+INSERT INTO public.users (user_id, username, password_hash, role, is_active, created_at, updated_at)
+VALUES (
+  gen_random_uuid(),
+  'customer',
+  crypt('customer', gen_salt('bf')),
+  'CUSTOMER',
+  true,
+  now(),
+  now()
+)
+ON CONFLICT (username) DO NOTHING;
+
 -- 2) Warehouse
 INSERT INTO wms_inventory.warehouses (name, address, contact, created_at, updated_at)
 VALUES (
@@ -30,30 +43,55 @@ VALUES (
 )
 ON CONFLICT (name) DO NOTHING;
 
--- 3) Bins (A/B + receiving buffer)
-INSERT INTO wms_inventory.bins (bin_id, warehouse_id, code, section, volume, created_at, updated_at)
+-- 3) Destinations for outbound flow
+INSERT INTO wms_inventory.destinations (destination_id, code, name, address, warehouse_id, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  v.code,
+  v.name,
+  v.address,
+  w.warehouse_id,
+  now(),
+  now()
+FROM wms_inventory.warehouses w
+JOIN (
+  VALUES
+    ('SHOP-5', 'Магазин №5 Маросейка', 'г. Москва, ул. Маросейка, 5'),
+    ('SHOP-7', 'Магазин №7 Петровка', 'г. Москва, ул. Петровка, 7')
+) AS v(code, name, address) ON true
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT (code) DO NOTHING;
+
+-- 4) Bins (A/B + receiving buffer + shipping buffers)
+INSERT INTO wms_inventory.bins (bin_id, warehouse_id, code, section, destination_id, volume, created_at, updated_at)
 SELECT
   gen_random_uuid(),
   w.warehouse_id,
   v.code,
   v.section,
+  d.destination_id,
   v.volume,
   now(),
   now()
 FROM wms_inventory.warehouses w
 JOIN (
   VALUES
-    ('A-01-01', 'A', 120.0::numeric),
-    ('A-01-02', 'A', 120.0::numeric),
-    ('A-02-01', 'A', 110.0::numeric),
-    ('B-01-01', 'B', 130.0::numeric),
-    ('B-01-02', 'B', 130.0::numeric),
-    ('BUFFER-01', 'BUFFER', 200.0::numeric)
-) AS v(code, section, volume) ON true
+    ('A-01-01', 'A', NULL,     120.0::numeric),
+    ('A-01-02', 'A', NULL,     120.0::numeric),
+    ('A-02-01', 'A', NULL,     110.0::numeric),
+    ('B-01-01', 'B', NULL,     130.0::numeric),
+    ('B-01-02', 'B', NULL,     130.0::numeric),
+    ('BUFFER-01', 'BUFFER', NULL, 200.0::numeric),
+    ('BIN-SHIP-5', 'SHIPPING_BUFFER', 'SHOP-5', 180.0::numeric),
+    ('BIN-SHIP-7', 'SHIPPING_BUFFER', 'SHOP-7', 180.0::numeric)
+) AS v(code, section, destination_code, volume) ON true
+LEFT JOIN wms_inventory.destinations d
+  ON d.code = v.destination_code
+ AND d.warehouse_id = w.warehouse_id
 WHERE w.name = 'Склад Москва-Север'
 ON CONFLICT DO NOTHING;
 
--- 4) SKUs
+-- 5) SKUs
 INSERT INTO wms_inventory.skus (sku_id, name, description, volume, created_at, updated_at)
 SELECT
   gen_random_uuid(),
@@ -71,7 +109,7 @@ FROM (
 ) AS v(name, description, volume)
 ON CONFLICT DO NOTHING;
 
--- 4.5) Barcode -> SKU mapping (many barcodes for one SKU)
+-- 5.5) Barcode -> SKU mapping (many barcodes for one SKU)
 INSERT INTO wms_inventory.sku_barcodes (sku_id, barcode)
 SELECT s.sku_id, v.barcode
 FROM (
@@ -85,7 +123,7 @@ FROM (
 JOIN wms_inventory.skus s ON s.name = v.sku_name
 ON CONFLICT (barcode) DO NOTHING;
 
--- 5) Inbound shipment
+-- 6) Inbound shipment
 INSERT INTO wms_inventory.inbound_shipments (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
 SELECT
   gen_random_uuid(),
@@ -98,7 +136,7 @@ FROM wms_inventory.warehouses w
 WHERE w.name = 'Склад Москва-Север'
 ON CONFLICT (ttn_code) DO NOTHING;
 
--- 6) Cargoplaces
+-- 7) Cargoplaces
 INSERT INTO wms_inventory.cargoplaces (
   cargoplace_id,
   shipment_id,
@@ -125,7 +163,7 @@ JOIN (
 WHERE sh.ttn_code = 'ТТН-2026-00142'
 ON CONFLICT DO NOTHING;
 
--- 7) Boxes
+-- 8) Boxes
 INSERT INTO wms_inventory.boxes (box_id, cargoplace_id, box_barcode, status, created_at, updated_at)
 SELECT
   gen_random_uuid(),
@@ -146,7 +184,7 @@ JOIN wms_inventory.cargoplaces c
  AND c.cargoplace_code = v.cargoplace_code
 ON CONFLICT DO NOTHING;
 
--- 8) Expected SKUs in cargoplaces
+-- 9) Expected SKUs in cargoplaces
 INSERT INTO wms_inventory.expected_cargoplace_skus (cargoplace_id, sku_id, expected_qty)
 SELECT
   c.cargoplace_id,
@@ -165,7 +203,7 @@ JOIN wms_inventory.cargoplaces c
 JOIN wms_inventory.skus s ON s.name = v.sku_name
 ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
--- 8.5) Dedicated receiving-table happy-path dataset
+-- 9.5) Dedicated receiving-table happy-path dataset
 -- This cargoplace starts at RECEIVED_AT_GATE and has no boxes/products yet,
 -- so the full table flow can be tested from scan-cargoplace to close-box.
 INSERT INTO wms_inventory.inbound_shipments (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
@@ -218,7 +256,7 @@ JOIN wms_inventory.cargoplaces c
 JOIN wms_inventory.skus s ON s.name = v.sku_name
 ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
--- 8.6) Dedicated dataset for scan-buffer and close-cargoplace
+-- 9.6) Dedicated dataset for scan-buffer and close-cargoplace
 -- This cargoplace is already TABLE_IN_PROGRESS and has RECEIVED products without bin_id,
 -- so buffer placement and outbox creation can be tested immediately.
 INSERT INTO wms_inventory.inbound_shipments (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
@@ -327,26 +365,41 @@ LEFT JOIN wms_inventory.boxes b
  AND b.box_barcode = 'BOX-TABLE-201'
 ON CONFLICT (qr_code) DO NOTHING;
 
--- 9) Orders (customer = existing admin user)
-INSERT INTO wms_inventory.orders (order_id, external_order_no, customer_id, warehouse_id, status, created_at, updated_at)
+-- 10) Orders (customer = seeded demo customer)
+-- Test outbound flow order for e2e/manual run: ORD-2026-0501 -> SHOP-5.
+INSERT INTO wms_inventory.orders (
+  order_id,
+  external_order_no,
+  customer_id,
+  warehouse_id,
+  destination_id,
+  status,
+  created_at,
+  updated_at
+)
 SELECT
   gen_random_uuid(),
   v.external_order_no,
   u.user_id,
   w.warehouse_id,
+  d.destination_id,
   v.status::wms_inventory.order_status,
   now(),
   now()
 FROM (
   VALUES
-    ('ORD-2026-0042', 'ALLOCATED'),
-    ('ORD-2026-0043', 'SHIPPED')
-) AS v(external_order_no, status)
-JOIN public.users u ON u.username = 'admin'
+    ('ORD-2026-0042', 'SHOP-5', 'ALLOCATED'),
+    ('ORD-2026-0043', 'SHOP-7', 'SHIPPED'),
+    ('ORD-2026-0501', 'SHOP-5', 'NEW')
+) AS v(external_order_no, destination_code, status)
+JOIN public.users u ON u.username = 'customer'
 JOIN wms_inventory.warehouses w ON w.name = 'Склад Москва-Север'
+JOIN wms_inventory.destinations d
+  ON d.code = v.destination_code
+ AND d.warehouse_id = w.warehouse_id
 ON CONFLICT (external_order_no) DO NOTHING;
 
--- 10) Products (8 items, mixed statuses)
+-- 11) Products (dev stock for receiving/putaway + outbound allocation)
 INSERT INTO wms_inventory.products (
   product_id,
   sku_id,
@@ -381,7 +434,17 @@ FROM (
     ('QR-2026-0005', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-002', 'A-01-02',    'ORD-2026-0042','ALLOCATED'),
     ('QR-2026-0006', 'Футболка Adidas Originals', 'CP-001', 'BOX-002', 'A-02-01',    'ORD-2026-0042','ALLOCATED'),
     ('QR-2026-0007', 'Рюкзак Puma Core',          'CP-002', 'BOX-003', 'B-01-02',    'ORD-2026-0043','ASSEMBLED'),
-    ('QR-2026-0008', 'Куртка The North Face',     'CP-002', 'BOX-003', 'B-01-02',    'ORD-2026-0043','SHIPPED')
+    ('QR-2026-0008', 'Куртка The North Face',     'CP-002', 'BOX-003', 'B-01-02',    'ORD-2026-0043','SHIPPED'),
+    ('QR-2026-0009', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-001', 'A-01-01',    NULL,           'STORED'),
+    ('QR-2026-0010', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-001', 'A-01-01',    NULL,           'STORED'),
+    ('QR-2026-0011', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-001', 'A-01-02',    NULL,           'STORED'),
+    ('QR-2026-0012', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-002', 'A-01-02',    NULL,           'STORED'),
+    ('QR-2026-0013', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-002', 'A-02-01',    NULL,           'STORED'),
+    ('QR-2026-0014', 'Футболка Adidas Originals', 'CP-001', 'BOX-001', 'A-02-01',    NULL,           'STORED'),
+    ('QR-2026-0015', 'Футболка Adidas Originals', 'CP-001', 'BOX-001', 'A-02-01',    NULL,           'STORED'),
+    ('QR-2026-0016', 'Футболка Adidas Originals', 'CP-001', 'BOX-002', 'B-01-01',    NULL,           'STORED'),
+    ('QR-2026-0017', 'Футболка Adidas Originals', 'CP-001', 'BOX-002', 'B-01-01',    NULL,           'STORED'),
+    ('QR-2026-0018', 'Футболка Adidas Originals', 'CP-001', 'BOX-002', 'B-01-02',    NULL,           'STORED')
 ) AS v(qr_code, sku_name, cargoplace_code, box_barcode, bin_code, external_order_no, status)
 JOIN wms_inventory.inbound_shipments sh ON sh.ttn_code = 'ТТН-2026-00142'
 JOIN wms_inventory.skus s ON s.name = v.sku_name
@@ -397,5 +460,61 @@ LEFT JOIN wms_inventory.bins bn
  AND bn.code = v.bin_code
 LEFT JOIN wms_inventory.orders o ON o.external_order_no = v.external_order_no
 ON CONFLICT (qr_code) DO NOTHING;
+
+-- 12) Order lines for allocation/shipping flows
+INSERT INTO wms_inventory.order_lines (order_id, sku_id, qty)
+SELECT
+  o.order_id,
+  s.sku_id,
+  v.qty
+FROM (
+  VALUES
+    ('ORD-2026-0042', 'Кроссовки Nike Air Max 90', 1),
+    ('ORD-2026-0042', 'Футболка Adidas Originals', 1),
+    ('ORD-2026-0043', 'Рюкзак Puma Core', 1),
+    ('ORD-2026-0043', 'Куртка The North Face', 1),
+    ('ORD-2026-0501', 'Кроссовки Nike Air Max 90', 5),
+    ('ORD-2026-0501', 'Футболка Adidas Originals', 5)
+) AS v(external_order_no, sku_name, qty)
+JOIN wms_inventory.orders o ON o.external_order_no = v.external_order_no
+JOIN wms_inventory.skus s ON s.name = v.sku_name
+ON CONFLICT (order_id, sku_id) DO NOTHING;
+
+-- 13) Outbound dispatches
+-- Test dispatch for e2e/manual scan-driver step: DSP-2026-0421-001 -> SHOP-5.
+INSERT INTO wms_inventory.outbound_dispatches (
+  dispatch_id,
+  dispatch_code,
+  warehouse_id,
+  destination_id,
+  vehicle_number,
+  driver_name,
+  driver_phone,
+  status,
+  scheduled_at,
+  created_at,
+  updated_at
+)
+SELECT
+  gen_random_uuid(),
+  v.dispatch_code,
+  w.warehouse_id,
+  d.destination_id,
+  v.vehicle_number,
+  v.driver_name,
+  v.driver_phone,
+  v.status::wms_inventory.outbound_dispatch_status,
+  v.scheduled_at,
+  now(),
+  now()
+FROM (
+  VALUES
+    ('DSP-2026-0421-001', 'SHOP-5', 'A123BC777', 'Иван Петров', '+7 (999) 555-00-11', 'SCHEDULED', now() + interval '1 day')
+) AS v(dispatch_code, destination_code, vehicle_number, driver_name, driver_phone, status, scheduled_at)
+JOIN wms_inventory.warehouses w ON w.name = 'Склад Москва-Север'
+JOIN wms_inventory.destinations d
+  ON d.code = v.destination_code
+ AND d.warehouse_id = w.warehouse_id
+ON CONFLICT (dispatch_code) DO NOTHING;
 
 COMMIT;
