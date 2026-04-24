@@ -433,7 +433,7 @@ FROM (
     ('QR-2026-0004', 'Куртка The North Face',     'CP-002', 'BOX-003', 'B-01-01',    NULL,           'STORED'),
     ('QR-2026-0005', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-002', 'A-01-02',    'ORD-2026-0042','ALLOCATED'),
     ('QR-2026-0006', 'Футболка Adidas Originals', 'CP-001', 'BOX-002', 'A-02-01',    'ORD-2026-0042','ALLOCATED'),
-    ('QR-2026-0007', 'Рюкзак Puma Core',          'CP-002', 'BOX-003', 'B-01-02',    'ORD-2026-0043','ASSEMBLED'),
+    ('QR-2026-0007', 'Рюкзак Puma Core',          'CP-002', 'BOX-003', 'B-01-02',    'ORD-2026-0043','SHIPPED'),
     ('QR-2026-0008', 'Куртка The North Face',     'CP-002', 'BOX-003', 'B-01-02',    'ORD-2026-0043','SHIPPED'),
     ('QR-2026-0009', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-001', 'A-01-01',    NULL,           'STORED'),
     ('QR-2026-0010', 'Кроссовки Nike Air Max 90', 'CP-001', 'BOX-001', 'A-01-01',    NULL,           'STORED'),
