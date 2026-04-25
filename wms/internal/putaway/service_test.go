@@ -651,6 +651,94 @@ func TestPlaceProductsToStorageBinMultipleProductsTransaction(t *testing.T) {
 	}
 }
 
+// TestPlaceProductsToStorageBinShippingBufferRejected - попытка разместить товар в SHIPPING_BUFFER
+func TestPlaceProductsToStorageBinShippingBufferRejected(t *testing.T) {
+	operatorID := uuid.New()
+	shippingBufferID := uuid.New()
+	bufferBinID := uuid.New()
+	productID := uuid.New()
+	productIDs := []uuid.UUID{productID}
+
+	mockRepo := &mockPutawayRepo{
+		storageBinErr: ErrStorageBinNotFound, // SHIPPING_BUFFER не должен быть найден как storage bin
+		productsMap: map[uuid.UUID]*domain.Product{
+			productID: {
+				ProductID: productID,
+				Status:    "RECEIVED",
+				BinID:     &bufferBinID,
+			},
+		},
+		sku: &domain.SKU{
+			SKUID: uuid.New(),
+			Name:  "Ноутбук Lenovo X1",
+		},
+	}
+
+	svc := NewService(mockRepo)
+
+	// Добавляем товар в корзину
+	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// Пытаемся разместить в SHIPPING_BUFFER
+	_, err = svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, shippingBufferID)
+
+	if !errors.Is(err, ErrStorageBinNotFound) {
+		t.Fatalf("expected ErrStorageBinNotFound for SHIPPING_BUFFER, got %v", err)
+	}
+}
+
+// TestPlaceProductsToStorageBinRegularSectionAllowed - попытка разместить товар в обычной зоне (A, B и т.д.)
+func TestPlaceProductsToStorageBinRegularSectionAllowed(t *testing.T) {
+	operatorID := uuid.New()
+	storageBinID := uuid.New()
+	bufferBinID := uuid.New()
+	productID := uuid.New()
+	productIDs := []uuid.UUID{productID}
+
+	mockRepo := &mockPutawayRepo{
+		storageBin: &domain.Bin{
+			BinID:   storageBinID,
+			Code:    "A-01-01",
+			Section: func() *string { s := "A"; return &s }(),
+		},
+		productsMap: map[uuid.UUID]*domain.Product{
+			productID: {
+				ProductID: productID,
+				Status:    "RECEIVED",
+				BinID:     &bufferBinID,
+			},
+		},
+		sku: &domain.SKU{
+			SKUID: uuid.New(),
+			Name:  "Ноутбук Lenovo X1",
+		},
+	}
+
+	svc := NewService(mockRepo)
+
+	// Добавляем товар в корзину
+	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// Размещаем в обычной зоне
+	result, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if result.ProductsPlaced != 1 {
+		t.Fatalf("expected ProductsPlaced 1, got %d", result.ProductsPlaced)
+	}
+	if result.OutboxEventsCreated != 1 {
+		t.Fatalf("expected OutboxEventsCreated 1, got %d", result.OutboxEventsCreated)
+	}
+}
+
 // TestServiceImplementsInterface - проверка что Service реализует интерфейс
 func TestServiceImplementsInterface(_ *testing.T) {
 	var _ interface {
