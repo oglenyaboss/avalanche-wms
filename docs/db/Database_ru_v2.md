@@ -49,24 +49,45 @@
 | warehouse_id | bigint (FK - warehouses) | Принадлежит складу |
 | code         | text                     | Код ячейки |
 | section      | text                     | Метка зоны склада. Произвольный текст, словарь не зафиксирован. См. правила ниже. |
+| destination_id | uuid (FK - destinations) | Магазин-получатель для `SHIPPING_BUFFER`, `NULL` для остальных ячеек |
 | volume       | numeric                  | Объем |
 | created_at   | timestamptz              | Время создания |
 | updated_at   | timestamptz              | Время обновления |
 
 ### `bins.section` — соглашение
 
-Поле `section` хранит **произвольный текстовый маркер зоны склада**. CHECK-constraint'а нет, формального словаря тоже. Зарезервировано **одно** значение:
+Поле `section` хранит **произвольный текстовый маркер зоны склада**. Формального словаря по-прежнему нет, но зарезервированы **два** специальных токена:
 
 - **`BUFFER`** — буферная ячейка приёмки. Товары попадают сюда после `receiving/table/scan-buffer` и ждут раскладки. Размещение в `BUFFER` через `putaway` **запрещено** (см. `wms/internal/putaway/repository.go::GetStorageBinByID`).
+- **`SHIPPING_BUFFER`** — буфер отгрузки. Такая ячейка закрепляется за конкретным магазином через `bins.destination_id` и используется для staging исходящего потока.
 
 Все прочие значения — пользовательские маркеры зон, используются для:
 
 1. **Распределения задач сборки** между операторами разных зон (`wms_ops.assembly_tasks.section` копируется из `bins.section`).
 2. **Навигации оператора** в UI assembly/picking-задач (отображение «иди в зону X»).
 
-В дев-сиде (`deploy/seed.sql`) используются `'A'`, `'B'`, `'BUFFER'`. На реальном складе словарь определяется конфигурацией склада и может быть любым.
+В дев-сиде (`deploy/seed.sql`) используются `'A'`, `'B'`, `'BUFFER'`, `'SHIPPING_BUFFER'`. На реальном складе словарь определяется конфигурацией склада и может быть любым.
 
-**Правило для кода**: проверки делать только на `'BUFFER'` (исключающий фильтр, например `WHERE section IS DISTINCT FROM 'BUFFER'`). **Не** заводить включающий whitelist по другим значениям — словарь открыт и может расширяться.
+Ограничение БД: если `section = 'SHIPPING_BUFFER'`, то `destination_id` обязателен (`bins_shipping_buffer_requires_destination`).
+
+**Правило для кода**: проверки делать через исключающие фильтры для зарезервированных токенов (`BUFFER`, `SHIPPING_BUFFER`), а не через whitelist произвольных пользовательских зон. Словарь остальных значений остается открытым и может расширяться.
+
+
+## `destinations`（магазины-получатели）
+
+| Имя поля       | Тип                       | Описание |
+| --------- | ------------------------ | -------- |
+| destination_id | uuid (PK)             | Первичный ключ магазина-получателя |
+| code      | text UNIQUE              | Внешний код магазина |
+| name      | text                     | Название магазина |
+| address   | text                     | Адрес магазина |
+| warehouse_id | bigint (FK - warehouses) | С какого склада обслуживается магазин |
+| created_at | timestamptz             | Время создания |
+| updated_at | timestamptz             | Время обновления |
+
+- `destinations` — базовый справочник исходящего потока
+- На `destination_id` завязаны `orders`, `bins(section='SHIPPING_BUFFER')` и `outbound_dispatches`
+- Один склад может обслуживать много магазинов
 
 
 ## `inbound_shipments`（TTN）
@@ -138,21 +159,33 @@
 | external_order_no | text                     | Номер внешнего заказа (ERP и т. д.) |
 | customer_id       | uuid (FK - users)        | ID клиента |
 | warehouse_id      | bigint (FK - warehouses) | Принадлежит складу |
+| destination_id    | uuid (FK - destinations) | Магазин-получатель |
 | status            | text                     | Статус заказа |
 | created_at        | timestamptz              | Время создания |
 | updated_at        | timestamptz              | Время обновления |
 **Перечень значений `status`:**
 - NEW（новый заказ）
 - ALLOCATED（для заказа уже выделены конкретные products）
-- ASSEMBLY_IN_PROGRESS（комплектация в процессе）
 - ASSEMBLED（комплектация завершена）
-- READY_TO_SHIP（ожидает отгрузки）
 - SHIPPED（отгружен）
 
-- Когда у заказа есть любой product в `ALLOCATED` и при этом еще есть не созданные задачи комплектации, заказ находится в `ALLOCATED`;
-- Когда у заказа есть product, который сейчас комплектуется, заказ находится в `ASSEMBLY_IN_PROGRESS`;
-- Когда все products заказа находятся в `ASSEMBLED` / `READY_TO_SHIP` и еще не отгружены, заказ переходит в `READY_TO_SHIP`;
-- Когда все products достигают `SHIPPED`, заказ переходит в статус `SHIPPED`.
+- `destination_id` определяет, в какой магазин должен уйти заказ
+- Упрощенный lifecycle: `NEW → ALLOCATED → ASSEMBLED → SHIPPED`
+- Статусы `ASSEMBLY_IN_PROGRESS` и `READY_TO_SHIP` удалены: в текущем коде они не используются
+
+
+## `order_lines`（строки заказа）
+
+| Имя поля  | Тип                   | Описание |
+| ------ | -------------------- | -------- |
+| id     | bigserial (PK)       | Суррогатный первичный ключ |
+| order_id | uuid (FK - orders) | К какому заказу относится строка |
+| sku_id | uuid (FK - skus)     | Какой SKU требуется |
+| qty    | int                  | Сколько единиц SKU нужно собрать |
+
+- `UNIQUE(order_id, sku_id)`
+- `qty > 0`
+- Именно `order_lines` являются входом для allocate; без них `orders` хранит только "шапку" заказа
 
 ## `products` （таблица экземпляров товара）
 
@@ -183,6 +216,35 @@
 - ASSEMBLED（подбор завершен）
 - READY_TO_SHIP（ожидает отгрузки）
 - SHIPPED（отгружен）
+
+
+## `outbound_dispatches`（исходящие рейсы / outbound TTN）
+
+| Имя поля        | Тип                                | Описание |
+| ------------ | --------------------------------- | -------- |
+| dispatch_id   | uuid (PK)                         | Первичный ключ рейса |
+| dispatch_code | text UNIQUE                       | Внешний код рейса / QR водителя |
+| warehouse_id  | bigint (FK - warehouses)          | Склад отправления |
+| destination_id | uuid (FK - destinations)         | Магазин-получатель |
+| vehicle_number | text                             | Номер ТС |
+| driver_name   | text                              | ФИО водителя |
+| driver_phone  | text                              | Телефон водителя |
+| status        | outbound_dispatch_status          | Статус рейса |
+| scheduled_at  | timestamptz                       | Плановое время подачи |
+| arrived_at    | timestamptz                       | Фактическое время прибытия |
+| departed_at   | timestamptz                       | Фактическое время выезда |
+| created_at    | timestamptz                       | Время создания |
+| updated_at    | timestamptz                       | Время обновления |
+
+**Перечень значений `status`:**
+- SCHEDULED
+- AT_GATE
+- DEPARTED
+- CANCELLED
+
+- `outbound_dispatches` создаются заранее внешней логистикой
+- Оператор на отгрузке ищет рейс по `dispatch_code`
+- Через `destination_id` валидируется match между заказом, буфером отгрузки и машиной
 
 
 # **2. Четыре основные таблицы истории операций（wms_ops）**
@@ -266,6 +328,7 @@
 | sku_id          | uuid (FK - skus)     | sku                                      |
 | from_bin_id     | uuid (FK - bins)     | Ячейка |
 | section         | text                 | Берется из bins.section, используется для распределения задач по зонам |
+| destination_id  | uuid (FK - destinations) | Денормализованный магазин-получатель из заказа |
 | status          | text                 | PENDING / IN_PROGRESS / DONE / CANCELLED |
 | onchain_status  | text                 |                                          |
 | onchain_tx_hash | text                 |                                          |
@@ -285,7 +348,7 @@
 | event_id        | uuid                 |        |
 | product_id      | uuid (FK - products) |        |
 | operator_id     | uuid (FK - users)    | Оператор |
-| vehicle_number  | text                 | Номер ТС |
+| dispatch_id     | uuid (FK - outbound_dispatches) | Какой исходящий рейс использован |
 | onchain_status  | text                 |        |
 | onchain_tx_hash | text                 |        |
 | shipped_at      | timestamptz          | Фактическое время отгрузки |
@@ -307,11 +370,13 @@
 | id             | bigserial (PK) |                                              |
 | event_id       | uuid           |                                              |
 | aggregate_id   | uuid           | ID агрегата, ID связанной бизнес-сущности |
-| aggregate_type | text           | RECEIVING_GATE / RECEIVING_TABLE / PUTAWAY и т. д. |
+| aggregate_type | text           | Тип процесса в lowercase: `receiving` / `putaway` / `picking` / `shipping` |
 | event_type     | text           | Kafka-маршрутизация（wms.receiving.v1） |
 | payload_hash   | text           |                                              |
 | created_at     | timestamptz    |                                              |
-**`aggregate_id`：ID агрегата, то есть ID связанной бизнес-сущности, нужно добавить**
+
+- `aggregate_type` должен быть **строго lowercase**, иначе Debezium/Kafka routing сломается
+- `aggregate_id` — ID связанной бизнес-сущности, для WMS операций это обычно `product_id`
 
 
 ---
