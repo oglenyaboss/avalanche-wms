@@ -64,7 +64,7 @@ func main() {
 
 	assemblyRepo := assembly.NewRepository(dbPool)
 	assemblySvc := assembly.NewService(assemblyRepo)
-	_ = assembly.NewHandler(assemblySvc)
+	assemblyHandler := assembly.NewHandler(assemblySvc)
 
 	putawayRepo := putaway.NewRepository(dbPool)
 	putawaySvc := putaway.NewService(putawayRepo)
@@ -90,6 +90,10 @@ func main() {
 	putawayRouter := r.PathPrefix("/putaway").Subrouter()
 	putawayRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	putawayHandler.RegisterRoutes(putawayRouter)
+
+	assemblyRouter := r.PathPrefix("/assembly").Subrouter()
+	assemblyRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	assemblyHandler.RegisterRoutes(assemblyRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
