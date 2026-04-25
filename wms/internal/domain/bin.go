@@ -7,11 +7,12 @@ import (
 )
 
 type Bin struct {
-	BinID       uuid.UUID `json:"bin_id"`
-	WarehouseID int64     `json:"warehouse_id"`
-	Code        string    `json:"code"`
-	Section     *string   `json:"section"`
-	Volume      *float64  `json:"volume"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	BinID         uuid.UUID  `json:"bin_id"`
+	WarehouseID   int64      `json:"warehouse_id"`
+	Code          string     `json:"code"`
+	Section       *string    `json:"section"`
+	DestinationID *uuid.UUID `json:"destination_id"`
+	Volume        *float64   `json:"volume"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }

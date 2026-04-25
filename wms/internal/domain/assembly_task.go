@@ -13,6 +13,7 @@ type AssemblyTask struct {
 	ProductID     uuid.UUID               `json:"product_id"`
 	SKUID         uuid.UUID               `json:"sku_id"`
 	FromBinID     uuid.UUID               `json:"from_bin_id"`
+	DestinationID uuid.UUID               `json:"destination_id"`
 	Section       *string                 `json:"section"`
 	Status        TaskStatus              `json:"status"`
 	OperatorID    *uuid.UUID              `json:"operator_id"`

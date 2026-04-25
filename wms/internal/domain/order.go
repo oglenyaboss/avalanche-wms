@@ -11,6 +11,7 @@ type Order struct {
 	ExternalOrderNo string      `json:"external_order_no"`
 	CustomerID      uuid.UUID   `json:"customer_id"`
 	WarehouseID     int64       `json:"warehouse_id"`
+	DestinationID   uuid.UUID   `json:"destination_id"`
 	Status          OrderStatus `json:"status"`
 	CreatedAt       time.Time   `json:"created_at"`
 	UpdatedAt       time.Time   `json:"updated_at"`
