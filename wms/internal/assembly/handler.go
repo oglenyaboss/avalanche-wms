@@ -31,11 +31,11 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 // Allocate - ищет новые заказы (NEW) для магазина (destinationID)
 // и выводит количество собранных заказов, количество готовых товаров и проблемные товары (номер заказа и характеристика товара, включая количество)
 func (h *Handler) Allocate(w http.ResponseWriter, r *http.Request) {
-	operatorID := auth.UserIDFromCtx(r.Context())
-	if operatorID == uuid.Nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Требуется авторизация")
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
 		return
 	}
+	_ = operatorID
 
 	var req AllocateRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -61,11 +61,11 @@ func (h *Handler) Allocate(w http.ResponseWriter, r *http.Request) {
 
 // GetTasks - возвращает задачи для оператора (какие товары нужно взять)
 func (h *Handler) GetTasks(w http.ResponseWriter, r *http.Request) {
-	operatorID := auth.UserIDFromCtx(r.Context())
-	if operatorID == uuid.Nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Требуется авторизация")
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
 		return
 	}
+	_ = operatorID
 
 	destinationIDStr := r.URL.Query().Get("destination_id")
 	if destinationIDStr == "" {
@@ -178,7 +178,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("putaway.writeJSON encode: %v", err)
+		log.Printf("assembly.writeJSON encode: %v", err)
 	}
 }
 
@@ -203,7 +203,7 @@ func mapServiceError(err error) (status int, code, message string) {
 	case errors.Is(err, ErrDestinationNotFound):
 		return http.StatusNotFound, "DESTINATION_NOT_FOUND", "магазин не найден"
 	case errors.Is(err, ErrInsufficientStock):
-		return http.StatusNotFound, "INSUFFICIENT_STOCK", "Недостаточно товара на складе"
+		return http.StatusUnprocessableEntity, "INSUFFICIENT_STOCK", "Недостаточно товара на складе"
 	case errors.Is(err, ErrNoTaskForProduct):
 		return http.StatusConflict, "NO_TASK_FOR_PRODUCT", "Нет задачи сборки для этого товара"
 	case errors.Is(err, ErrProductNotAllocated):

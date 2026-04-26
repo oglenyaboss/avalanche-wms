@@ -62,7 +62,7 @@ func (r *Repository) GetOrdersByDestinationForUpdate(ctx context.Context, destin
 	const query = `
 		SELECT order_id, external_order_no, status
 		FROM wms_inventory.orders
-		WHERE customer_id = $1 AND status = 'NEW'
+		WHERE destination_id = $1 AND status = 'NEW'
 		FOR UPDATE`
 
 	rows, err := r.q.Query(ctx, query, destinationID)
@@ -198,6 +198,7 @@ func (r *Repository) BatchInsertAssemblyTasks(ctx context.Context, tasks []Task)
 	skuIDs := make([]uuid.UUID, len(tasks))
 	fromBinIDs := make([]uuid.UUID, len(tasks))
 	sections := make([]string, len(tasks))
+	destinationIDs := make([]uuid.UUID, len(tasks)) // ← добавляем
 	occurredAts := make([]time.Time, len(tasks))
 
 	for i := range tasks {
@@ -208,21 +209,22 @@ func (r *Repository) BatchInsertAssemblyTasks(ctx context.Context, tasks []Task)
 		skuIDs[i] = t.SKUID
 		fromBinIDs[i] = t.FromBinID
 		sections[i] = t.Section
+		destinationIDs[i] = t.DestinationID
 		occurredAts[i] = t.OccurredAt
 	}
 
 	const query = `
 		INSERT INTO wms_ops.assembly_tasks (
-			event_id, order_id, product_id, sku_id, from_bin_id, section,
+			event_id, order_id, product_id, sku_id, from_bin_id, section, destination_id,
 			status, occurred_at, created_at
 		)
 		SELECT
-			event_id, order_id, product_id, sku_id, from_bin_id, section,
+			event_id, order_id, product_id, sku_id, from_bin_id, section, destination_id,
 			'PENDING', occurred_at, NOW()
-		FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[], $6::text[], $7::timestamptz[])
-		AS tasks(event_id, order_id, product_id, sku_id, from_bin_id, section, occurred_at)`
+		FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[], $6::text[], $7::uuid[], $8::timestamptz[])
+		AS tasks(event_id, order_id, product_id, sku_id, from_bin_id, section, destination_id, occurred_at)`
 
-	_, err := r.q.Exec(ctx, query, eventIDs, orderIDs, productIDs, skuIDs, fromBinIDs, sections, occurredAts)
+	_, err := r.q.Exec(ctx, query, eventIDs, orderIDs, productIDs, skuIDs, fromBinIDs, sections, destinationIDs, occurredAts)
 	if err != nil {
 		return fmt.Errorf("assembly.Repository.BatchInsertAssemblyTasks exec: %w", err)
 	}
@@ -347,12 +349,12 @@ func (r *Repository) GetTasks(ctx context.Context, destinationID, operatorID uui
 			t.event_id, t.product_id, p.qr_code, s.name as sku_name,
 			b.code as from_bin_code, b.section as from_bin_section,
 			o.external_order_no
-		FROM wms_ops.assembly_tasks t
-		JOIN wms_inventory.products p ON p.product_id = t.product_id
-		JOIN wms_inventory.skus s ON s.sku_id = t.sku_id
-		JOIN wms_inventory.bins b ON b.bin_id = t.from_bin_id
-		JOIN wms_inventory.orders o ON o.order_id = t.order_id
-		WHERE o.customer_id = $1 AND t.status = $2`
+			FROM wms_ops.assembly_tasks t
+			JOIN wms_inventory.products p ON p.product_id = t.product_id
+			JOIN wms_inventory.skus s ON s.sku_id = t.sku_id
+			JOIN wms_inventory.bins b ON b.bin_id = t.from_bin_id
+			JOIN wms_inventory.orders o ON o.order_id = t.order_id
+			WHERE t.destination_id = $1 AND t.status = $2`
 
 	var rows pgx.Rows
 	var err error

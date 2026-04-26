@@ -51,19 +51,21 @@ type PickResponse struct {
 }
 
 type AllocatedProduct struct {
-	ProductID uuid.UUID
-	OrderID   uuid.UUID
-	BinID     uuid.UUID
-	SKUID     uuid.UUID
+	ProductID     uuid.UUID
+	OrderID       uuid.UUID
+	BinID         uuid.UUID
+	SKUID         uuid.UUID
+	DestinationID uuid.UUID
 }
 
 type Task struct {
-	EventID    uuid.UUID
-	OrderID    uuid.UUID
-	ProductID  uuid.UUID
-	SKUID      uuid.UUID
-	FromBinID  uuid.UUID
-	Section    string
-	Status     string
-	OccurredAt time.Time
+	EventID       uuid.UUID
+	OrderID       uuid.UUID
+	ProductID     uuid.UUID
+	SKUID         uuid.UUID
+	FromBinID     uuid.UUID
+	Section       string
+	Status        string
+	OccurredAt    time.Time
+	DestinationID uuid.UUID
 }

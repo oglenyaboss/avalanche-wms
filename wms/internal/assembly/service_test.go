@@ -22,7 +22,7 @@ type mockAssemblyRepo struct {
 	orderLinesErr error
 
 	// GetAllocateProductsForSKU
-	productsMap map[uuid.UUID][]domain.Product // key: skuID
+	productsMap map[uuid.UUID][]domain.Product
 	productsErr error
 
 	// GetSKUByID
@@ -71,12 +71,15 @@ type mockAssemblyRepo struct {
 	tasksErr    error
 
 	// WithTx tracking
+	withTxMu    sync.Mutex
 	withTxCalls int
 	withTxFn    func(func(assemblyRepository) error) error
 }
 
 func (m *mockAssemblyRepo) WithTx(_ context.Context, fn func(assemblyRepository) error) error {
+	m.withTxMu.Lock()
 	m.withTxCalls++
+	m.withTxMu.Unlock()
 	if m.withTxFn != nil {
 		return m.withTxFn(fn)
 	}

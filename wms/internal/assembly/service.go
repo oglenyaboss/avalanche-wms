@@ -2,6 +2,7 @@ package assembly
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -48,66 +49,75 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 		return nil, fmt.Errorf("assembly.Service.Allocate: %w", ErrInvalidInput)
 	}
 
-	orders, err := s.repo.GetOrdersByDestinationForUpdate(ctx, destinationID)
-	if err != nil {
-		return nil, fmt.Errorf("assembly.Service.Allocate get orders: %w", err)
-	}
+	var resp AllocateResponse
 
-	allocatedOrders := 0
-	allocatedProducts := 0
-	insufficientOrders := make([]InsufficientOrder, 0)
-
-	for _, order := range orders {
-		allocated, insufficientSKUs, err := s.allocateOrder(ctx, order.OrderID)
+	err := s.repo.WithTx(ctx, func(txRepo assemblyRepository) error {
+		orders, err := txRepo.GetOrdersByDestinationForUpdate(ctx, destinationID)
 		if err != nil {
-			if err == ErrInsufficientStock {
-				// Получаем названия SKU для ответа
-				missingSKUs := make([]InsufficientSKU, 0, len(insufficientSKUs))
-				for _, isku := range insufficientSKUs {
-					sku, _ := s.repo.GetSKUByID(ctx, uuid.MustParse(isku.SKUID))
-					skuName := ""
-					if sku != nil {
-						skuName = sku.Name
-					}
-					missingSKUs = append(missingSKUs, InsufficientSKU{
-						SKUID:      isku.SKUID,
-						SKUName:    skuName,
-						MissingQty: isku.MissingQty,
-					})
-				}
-				insufficientOrders = append(insufficientOrders, InsufficientOrder{
-					OrderID:     order.OrderID.String(),
-					MissingSKUs: missingSKUs,
-				})
-				continue
-			}
-			return nil, fmt.Errorf("assembly.Service.Allocate allocate order %s: %w", order.OrderID, err)
+			return fmt.Errorf("assembly.Service.Allocate get orders: %w", err)
 		}
-		allocatedOrders++
-		allocatedProducts += allocated
-	}
 
-	return &AllocateResponse{
-		AllocatedOrders:    allocatedOrders,
-		AllocatedProducts:  allocatedProducts,
-		InsufficientOrders: insufficientOrders,
-	}, nil
+		allocatedOrders := 0
+		allocatedProducts := 0
+		insufficientOrders := make([]InsufficientOrder, 0)
+
+		for _, order := range orders {
+			allocated, insufficientSKUs, err := s.allocateOrderTx(ctx, txRepo, order.OrderID)
+			if err != nil {
+				if errors.Is(err, ErrInsufficientStock) {
+					missingSKUs := make([]InsufficientSKU, 0, len(insufficientSKUs))
+					for _, isku := range insufficientSKUs {
+						sku, _ := txRepo.GetSKUByID(ctx, uuid.MustParse(isku.SKUID))
+						skuName := ""
+						if sku != nil {
+							skuName = sku.Name
+						}
+						missingSKUs = append(missingSKUs, InsufficientSKU{
+							SKUID:      isku.SKUID,
+							SKUName:    skuName,
+							MissingQty: isku.MissingQty,
+						})
+					}
+					insufficientOrders = append(insufficientOrders, InsufficientOrder{
+						OrderID:     order.OrderID.String(),
+						MissingSKUs: missingSKUs,
+					})
+					continue
+				}
+				return fmt.Errorf("assembly.Service.Allocate allocate order %s: %w", order.OrderID, err)
+			}
+			allocatedOrders++
+			allocatedProducts += allocated
+		}
+
+		resp = AllocateResponse{
+			AllocatedOrders:    allocatedOrders,
+			AllocatedProducts:  allocatedProducts,
+			InsufficientOrders: insufficientOrders,
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
-// allocateOrder аллоцирует один заказ (по id заказа берет все товары, соответствующие ему, (allocatedProducts) и сообщает о нехватке (insufficientSKUs))
-func (s *Service) allocateOrder(ctx context.Context, orderID uuid.UUID) (int, []InsufficientSKU, error) {
-	lines, err := s.repo.GetOrderLinesByOrderID(ctx, orderID)
+// allocateOrderTx аллоцирует один заказ в существующей транзакции
+func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository, orderID uuid.UUID) (int, []InsufficientSKU, error) {
+	lines, err := txRepo.GetOrderLinesByOrderID(ctx, orderID)
 	if err != nil {
-		return 0, nil, fmt.Errorf("assembly.Service.allocateOrder get lines: %w", err)
+		return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get lines: %w", err)
 	}
 
 	allocatedProducts := make([]AllocatedProduct, 0)
 	insufficientSKUs := make([]InsufficientSKU, 0)
 
 	for _, line := range lines {
-		products, err := s.repo.GetAllocateProductsForSKU(ctx, line.SKUID, line.Qty)
+		products, err := txRepo.GetAllocateProductsForSKU(ctx, line.SKUID, line.Qty)
 		if err != nil {
-			return 0, nil, fmt.Errorf("assembly.Service.allocateOrder get products for SKU %s: %w", line.SKUID, err)
+			return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get products for SKU %s: %w", line.SKUID, err)
 		}
 
 		if len(products) < line.Qty {
@@ -120,6 +130,9 @@ func (s *Service) allocateOrder(ctx context.Context, orderID uuid.UUID) (int, []
 
 		for i := range products {
 			p := products[i]
+			if p.BinID == nil {
+				return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx product %s has no bin", p.ProductID)
+			}
 			allocatedProducts = append(allocatedProducts, AllocatedProduct{
 				ProductID: p.ProductID,
 				OrderID:   orderID,
@@ -136,41 +149,34 @@ func (s *Service) allocateOrder(ctx context.Context, orderID uuid.UUID) (int, []
 	occurredAt := time.Now().UTC()
 	tasks := make([]Task, 0, len(allocatedProducts))
 
-	err = s.repo.WithTx(ctx, func(txRepo assemblyRepository) error {
-		for _, a := range allocatedProducts {
-			if err := txRepo.UpdateProductAllocated(ctx, a.ProductID, a.OrderID); err != nil {
-				return fmt.Errorf("assembly.Service.allocateOrder update product: %w", err)
-			}
-
-			section, err := txRepo.GetBinSectionByID(ctx, a.BinID)
-			if err != nil {
-				return fmt.Errorf("assembly.Service.allocateOrder get bin section: %w", err)
-			}
-
-			tasks = append(tasks, Task{
-				EventID:    uuid.New(),
-				OrderID:    a.OrderID,
-				ProductID:  a.ProductID,
-				SKUID:      a.SKUID,
-				FromBinID:  a.BinID,
-				Section:    section,
-				OccurredAt: occurredAt,
-			})
+	for _, a := range allocatedProducts {
+		if err := txRepo.UpdateProductAllocated(ctx, a.ProductID, a.OrderID); err != nil {
+			return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx update product: %w", err)
 		}
 
-		if err := txRepo.BatchInsertAssemblyTasks(ctx, tasks); err != nil {
-			return fmt.Errorf("assembly.Service.allocateOrder insert tasks: %w", err)
+		section, err := txRepo.GetBinSectionByID(ctx, a.BinID)
+		if err != nil {
+			return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get bin section: %w", err)
 		}
 
-		if err := txRepo.UpdateOrderStatus(ctx, orderID, "ALLOCATED"); err != nil {
-			return fmt.Errorf("assembly.Service.allocateOrder update order status: %w", err)
-		}
+		tasks = append(tasks, Task{
+			EventID:       uuid.New(),
+			OrderID:       a.OrderID,
+			ProductID:     a.ProductID,
+			SKUID:         a.SKUID,
+			FromBinID:     a.BinID,
+			Section:       section,
+			DestinationID: a.DestinationID, // ← нужно добавить в AllocatedProduct
+			OccurredAt:    occurredAt,
+		})
+	}
 
-		return nil
-	})
+	if err := txRepo.BatchInsertAssemblyTasks(ctx, tasks); err != nil {
+		return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx insert tasks: %w", err)
+	}
 
-	if err != nil {
-		return 0, nil, err
+	if err := txRepo.UpdateOrderStatus(ctx, orderID, "ALLOCATED"); err != nil {
+		return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx update order status: %w", err)
 	}
 
 	return len(allocatedProducts), nil, nil
