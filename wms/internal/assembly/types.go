@@ -50,6 +50,7 @@ type PickResponse struct {
 	CartSize  int    `json:"cart_size"`
 }
 
+// AllocatedProduct — внутренний тип для хранения зарезервированных товаров
 type AllocatedProduct struct {
 	ProductID     uuid.UUID
 	OrderID       uuid.UUID
@@ -58,6 +59,7 @@ type AllocatedProduct struct {
 	DestinationID uuid.UUID
 }
 
+// Task — внутренний тип для задачи сборки
 type Task struct {
 	EventID       uuid.UUID
 	OrderID       uuid.UUID

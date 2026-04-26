@@ -43,7 +43,7 @@ func NewService(repo assemblyRepository) *Service {
 	}
 }
 
-// Allocate - вполняет аллокацию для магазина
+// Allocate - выполняет аллокацию для магазина
 func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*AllocateResponse, error) {
 	if destinationID == uuid.Nil {
 		return nil, fmt.Errorf("assembly.Service.Allocate: %w", ErrInvalidInput)
@@ -61,8 +61,10 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 		allocatedProducts := 0
 		insufficientOrders := make([]InsufficientOrder, 0)
 
-		for _, order := range orders {
-			allocated, insufficientSKUs, err := s.allocateOrderTx(ctx, txRepo, order.OrderID)
+		for i := range orders {
+			order := &orders[i]
+
+			allocated, insufficientSKUs, err := s.allocateOrderTx(ctx, txRepo, order.OrderID, destinationID)
 			if err != nil {
 				if errors.Is(err, ErrInsufficientStock) {
 					missingSKUs := make([]InsufficientSKU, 0, len(insufficientSKUs))
@@ -105,7 +107,7 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 }
 
 // allocateOrderTx аллоцирует один заказ в существующей транзакции
-func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository, orderID uuid.UUID) (int, []InsufficientSKU, error) {
+func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository, orderID, destinationID uuid.UUID) (int, []InsufficientSKU, error) {
 	lines, err := txRepo.GetOrderLinesByOrderID(ctx, orderID)
 	if err != nil {
 		return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get lines: %w", err)
@@ -134,10 +136,11 @@ func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository
 				return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx product %s has no bin", p.ProductID)
 			}
 			allocatedProducts = append(allocatedProducts, AllocatedProduct{
-				ProductID: p.ProductID,
-				OrderID:   orderID,
-				BinID:     *p.BinID,
-				SKUID:     line.SKUID,
+				ProductID:     p.ProductID,
+				OrderID:       orderID,
+				BinID:         *p.BinID,
+				SKUID:         line.SKUID,
+				DestinationID: destinationID,
 			})
 		}
 	}
@@ -166,7 +169,7 @@ func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository
 			SKUID:         a.SKUID,
 			FromBinID:     a.BinID,
 			Section:       section,
-			DestinationID: a.DestinationID, // ← нужно добавить в AllocatedProduct
+			DestinationID: a.DestinationID,
 			OccurredAt:    occurredAt,
 		})
 	}
@@ -175,7 +178,7 @@ func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository
 		return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx insert tasks: %w", err)
 	}
 
-	if err := txRepo.UpdateOrderStatus(ctx, orderID, "ALLOCATED"); err != nil {
+	if err := txRepo.UpdateOrderStatus(ctx, orderID, string(domain.OrderStatusAllocated)); err != nil {
 		return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx update order status: %w", err)
 	}
 
@@ -188,7 +191,7 @@ func (s *Service) GetTasks(ctx context.Context, destinationID, operatorID uuid.U
 		return nil, fmt.Errorf("assembly.Service.GetTasks: %w", ErrInvalidInput)
 	}
 	if status == "" {
-		status = "PENDING"
+		status = string(domain.TaskStatusPending)
 	}
 
 	tasks, err := s.repo.GetTasks(ctx, destinationID, operatorID, status)
@@ -218,7 +221,7 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 		if err != nil {
 			return err
 		}
-		if product.Status != "ALLOCATED" {
+		if product.Status != domain.ProductStatusAllocated {
 			return ErrProductNotAllocated
 		}
 
