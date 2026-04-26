@@ -36,6 +36,7 @@ func NewHandler(svc *Service) *Handler {
 func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/scan-buffer", h.ScanBuffer).Methods(http.MethodPost)
 	router.HandleFunc("/scan-driver", h.ScanDriver).Methods(http.MethodPost)
+	router.HandleFunc("/ship", h.Ship).Methods(http.MethodPost)
 }
 
 func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +89,54 @@ func (h *Handler) ScanDriver(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
+func (h *Handler) Ship(w http.ResponseWriter, r *http.Request) {
+	operatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req shipHTTPRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	bufferBinID, err := uuid.Parse(req.BufferBinID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "buffer_bin_id должен быть UUID")
+		return
+	}
+	dispatchID, err := uuid.Parse(req.DispatchID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "dispatch_id должен быть UUID")
+		return
+	}
+
+	productIDs := make([]uuid.UUID, 0, len(req.ProductIDs))
+	for _, rawID := range req.ProductIDs {
+		productID, err := uuid.Parse(rawID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "product_ids должен содержать только UUID")
+			return
+		}
+		productIDs = append(productIDs, productID)
+	}
+
+	result, err := h.svc.Ship(r.Context(), ShipRequest{
+		BufferBinID: bufferBinID,
+		DispatchID:  dispatchID,
+		OperatorID:  operatorID,
+		ProductIDs:  productIDs,
+	})
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
 func mapServiceError(err error) (status int, code, message string) {
 	switch {
 	case errors.Is(err, ErrBinNotFound):
@@ -101,6 +150,14 @@ func mapServiceError(err error) (status int, code, message string) {
 	case errors.Is(err, ErrDispatchCancelled):
 		//nolint:misspell // Must match API contract and DB enum value: CANCELLED.
 		return http.StatusConflict, "DISPATCH_CANCELLED", "Рейс отменён"
+	case errors.Is(err, ErrDestinationMismatch):
+		return http.StatusConflict, "DESTINATION_MISMATCH", "Рейс назначен на другую зону"
+	case errors.Is(err, ErrDispatchNotAtGate):
+		return http.StatusConflict, "DISPATCH_NOT_AT_GATE", "Рейс не находится у ворот"
+	case errors.Is(err, ErrBufferEmpty):
+		return http.StatusConflict, "BUFFER_EMPTY", "Буфер отгрузки пуст"
+	case errors.Is(err, ErrProductNotInBuffer):
+		return http.StatusConflict, "PRODUCT_NOT_IN_BUFFER", "Товар не найден в буфере или не готов к отгрузке"
 	case errors.Is(err, ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
 	default:
