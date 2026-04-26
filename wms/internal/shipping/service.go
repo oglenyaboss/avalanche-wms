@@ -52,12 +52,7 @@ func (s *Service) ScanBuffer(ctx context.Context, operatorID, bufferBinID uuid.U
 
 	respProducts := make([]ScanBufferProductResponse, 0, len(products))
 	for _, p := range products {
-		respProducts = append(respProducts, ScanBufferProductResponse{
-			ProductID:       p.ProductID,
-			QRCode:          p.QRCode,
-			SKUName:         p.SKUName,
-			OrderExternalNo: p.OrderExternalNo,
-		})
+		respProducts = append(respProducts, ScanBufferProductResponse(p))
 	}
 
 	return &ScanBufferResponse{

@@ -99,6 +99,7 @@ func mapServiceError(err error) (status int, code, message string) {
 	case errors.Is(err, ErrDispatchAlreadyDeparted):
 		return http.StatusConflict, "DISPATCH_ALREADY_DEPARTED", "Рейс уже отправлен"
 	case errors.Is(err, ErrDispatchCancelled):
+		//nolint:misspell // Must match API contract and DB enum value: CANCELLED.
 		return http.StatusConflict, "DISPATCH_CANCELLED", "Рейс отменён"
 	case errors.Is(err, ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
