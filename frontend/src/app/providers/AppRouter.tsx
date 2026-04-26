@@ -1,0 +1,44 @@
+﻿import { createBrowserRouter, RouterProvider } from 'react-router'
+
+import { GuestOnlyRoute } from '@/app/providers/GuestOnlyRoute'
+import { ProtectedRoute } from '@/app/providers/ProtectedRoute'
+import { HomePage } from '@/pages/home'
+import { LoginPage } from '@/pages/login'
+import { NotFoundPage } from '@/pages/not-found'
+import { routes } from '@/shared/config/routes'
+import { AppShell } from '@/widgets/app-shell'
+
+const router = createBrowserRouter([
+  {
+    element: <GuestOnlyRoute />,
+    children: [
+      {
+        path: routes.login,
+        element: <LoginPage />,
+      },
+    ],
+  },
+  {
+    element: <ProtectedRoute />,
+    children: [
+      {
+        element: <AppShell />,
+        children: [
+          {
+            path: routes.home,
+            element: <HomePage />,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    path: routes.notFound,
+    element: <NotFoundPage />,
+  },
+])
+
+export function AppRouter() {
+  return <RouterProvider router={router} />
+}
+
