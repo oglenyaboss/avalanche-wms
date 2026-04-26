@@ -51,7 +51,7 @@ type mockShippingRepo struct {
 	dispatchDeparted     bool
 }
 
-func (m *mockShippingRepo) WithTx(ctx context.Context, fn func(shippingRepository) error) error {
+func (m *mockShippingRepo) WithTx(_ context.Context, fn func(shippingRepository) error) error {
 	m.withTxCalls++
 	return fn(m)
 }
