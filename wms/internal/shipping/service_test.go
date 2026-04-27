@@ -46,6 +46,7 @@ type mockShippingRepo struct {
 	withTxCalls          int
 	selectedSpotProducts []uuid.UUID
 	updatedProductIDs    []uuid.UUID
+	updatedOrderIDs      []uuid.UUID
 	insertedShippings    []shippingEvent
 	insertedOutbox       []shippingEvent
 	dispatchDeparted     bool
@@ -134,12 +135,16 @@ func (m *mockShippingRepo) BatchInsertShippingOutbox(
 	_ context.Context,
 	events []shippingEvent,
 	_ uuid.UUID,
-) error {
+) (int, error) {
 	m.insertedOutbox = append([]shippingEvent(nil), events...)
-	return m.insertOutboxErr
+	if m.insertOutboxErr != nil {
+		return 0, m.insertOutboxErr
+	}
+	return len(events), nil
 }
 
-func (m *mockShippingRepo) UpdateOrdersShippedConditional(_ context.Context, _ []uuid.UUID) (int, error) {
+func (m *mockShippingRepo) UpdateOrdersShippedConditional(_ context.Context, orderIDs []uuid.UUID) (int, error) {
+	m.updatedOrderIDs = append([]uuid.UUID(nil), orderIDs...)
 	if m.updateOrdersErr != nil {
 		return 0, m.updateOrdersErr
 	}
@@ -440,6 +445,9 @@ func TestShipBulkSuccess(t *testing.T) {
 	if result.ProductsShipped != 2 {
 		t.Fatalf("expected 2 products shipped, got %d", result.ProductsShipped)
 	}
+	if result.OutboxEventsCreated != 2 {
+		t.Fatalf("expected 2 outbox events, got %d", result.OutboxEventsCreated)
+	}
 	if result.OrdersCompleted != 1 {
 		t.Fatalf("expected 1 completed order, got %d", result.OrdersCompleted)
 	}
@@ -488,6 +496,9 @@ func TestShipSpotSuccess(t *testing.T) {
 	}
 	if result.ProductsShipped != 1 {
 		t.Fatalf("expected 1 product shipped, got %d", result.ProductsShipped)
+	}
+	if result.OutboxEventsCreated != 1 {
+		t.Fatalf("expected 1 outbox event, got %d", result.OutboxEventsCreated)
 	}
 	if result.DispatchDeparted {
 		t.Fatal("expected dispatch to stay at gate")
@@ -601,6 +612,52 @@ func TestShipSpotProductNotInBuffer(t *testing.T) {
 	if !errors.Is(err, ErrProductNotInBuffer) {
 		t.Fatalf("expected ErrProductNotInBuffer, got %v", err)
 	}
+}
+
+// TestShipPartialOrderKeepsOrderOpen проверяет, что частичная отгрузка не переводит заказ в SHIPPED.
+func TestShipPartialOrderKeepsOrderOpen(t *testing.T) {
+	bufferBinID := uuid.New()
+	dispatchID := uuid.New()
+	operatorID := uuid.New()
+	destinationID := uuid.New()
+	orderID := uuid.New()
+	section := binSectionShippingBuffer
+	productID := uuid.New()
+
+	repo := &mockShippingRepo{
+		bin: &bufferBinRecord{
+			BinID:         bufferBinID,
+			Section:       &section,
+			DestinationID: &destinationID,
+		},
+		dispatch: &dispatchRecord{
+			DispatchID:    dispatchID,
+			DestinationID: destinationID,
+			Status:        domain.OutboundDispatchStatusAtGate,
+		},
+		shipProducts: []productForShip{{ProductID: productID, OrderID: &orderID}},
+		// Repository returns 0 when the order still has non-SHIPPED products.
+		ordersCompleted: 0,
+		bufferRemaining: 0,
+	}
+
+	result, err := NewService(repo).Ship(context.Background(), ShipRequest{
+		BufferBinID: bufferBinID,
+		DispatchID:  dispatchID,
+		OperatorID:  operatorID,
+		ProductIDs:  []uuid.UUID{productID},
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.ProductsShipped != 1 {
+		t.Fatalf("expected 1 product shipped, got %d", result.ProductsShipped)
+	}
+	if result.OrdersCompleted != 0 {
+		t.Fatalf("expected no completed orders, got %d", result.OrdersCompleted)
+	}
+	assertSameUUIDs(t, repo.updatedOrderIDs, []uuid.UUID{orderID})
+	assertShippingEventsMatch(t, repo.insertedShippings, repo.insertedOutbox, []uuid.UUID{productID})
 }
 
 // TestShipDispatchDepartedWhenBufferEmpty проверяет перевод рейса в DEPARTED после очистки буфера.
