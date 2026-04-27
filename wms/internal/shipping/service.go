@@ -34,7 +34,7 @@ type shippingRepository interface {
 	SelectProductsForShip(ctx context.Context, binID uuid.UUID, productIDs []uuid.UUID) ([]productForShip, error)
 	BatchUpdateProductsShipped(ctx context.Context, productIDs []uuid.UUID) error
 	BatchInsertShippings(ctx context.Context, events []shippingEvent, dispatchID, operatorID uuid.UUID) error
-	BatchInsertShippingOutbox(ctx context.Context, events []shippingEvent, dispatchID uuid.UUID) error
+	BatchInsertShippingOutbox(ctx context.Context, events []shippingEvent, dispatchID uuid.UUID) (int, error)
 	UpdateOrdersShippedConditional(ctx context.Context, orderIDs []uuid.UUID) (int, error)
 	CountReadyToShipProductsInBuffer(ctx context.Context, binID uuid.UUID) (int, error)
 	UpdateDispatchDeparted(ctx context.Context, dispatchID uuid.UUID) error
@@ -176,7 +176,8 @@ func (s *Service) Ship(ctx context.Context, req ShipRequest) (*ShipResponse, err
 			return fmt.Errorf("shipping.Service.Ship insert shippings: %w", err)
 		}
 		// 6. Создаём shipping outbox event для каждого товара, чтобы запустить on-chain переход Picked -> Shipped.
-		if err := repo.BatchInsertShippingOutbox(ctx, events, req.DispatchID); err != nil {
+		outboxEventsCreated, err := repo.BatchInsertShippingOutbox(ctx, events, req.DispatchID)
+		if err != nil {
 			return fmt.Errorf("shipping.Service.Ship insert outbox: %w", err)
 		}
 
@@ -205,10 +206,11 @@ func (s *Service) Ship(ctx context.Context, req ShipRequest) (*ShipResponse, err
 		}
 
 		resp = ShipResponse{
-			ProductsShipped:  len(products),
-			OrdersCompleted:  ordersCompleted,
-			DispatchDeparted: dispatchDeparted,
-			BufferRemaining:  remaining,
+			ProductsShipped:     len(products),
+			OutboxEventsCreated: outboxEventsCreated,
+			OrdersCompleted:     ordersCompleted,
+			DispatchDeparted:    dispatchDeparted,
+			BufferRemaining:     remaining,
 		}
 		return nil
 	})

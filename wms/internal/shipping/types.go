@@ -32,6 +32,8 @@ type ShipRequest struct {
 type ShipResponse struct {
 	// ProductsShipped показывает количество товаров, фактически отгруженных в этом запросе.
 	ProductsShipped int `json:"products_shipped"`
+	// OutboxEventsCreated показывает количество событий, созданных для on-chain перехода Picked -> Shipped.
+	OutboxEventsCreated int `json:"outbox_events_created"`
 	// OrdersCompleted показывает количество заказов, переведённых в статус SHIPPED после отгрузки.
 	OrdersCompleted int `json:"orders_completed"`
 	// DispatchDeparted показывает, был ли буфер очищен и переведён ли рейс в DEPARTED.

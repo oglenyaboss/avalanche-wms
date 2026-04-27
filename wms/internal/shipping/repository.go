@@ -323,9 +323,9 @@ func (r *Repository) BatchInsertShippingOutbox(
 	ctx context.Context,
 	events []shippingEvent,
 	dispatchID uuid.UUID,
-) error {
+) (int, error) {
 	if len(events) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	eventIDs := make([]uuid.UUID, 0, len(events))
@@ -334,7 +334,7 @@ func (r *Repository) BatchInsertShippingOutbox(
 	for _, event := range events {
 		payloadHash, err := payloadHashForShipping(event.ProductID, dispatchID)
 		if err != nil {
-			return fmt.Errorf("shipping.Repository.BatchInsertShippingOutbox build payload hash: %w", err)
+			return 0, fmt.Errorf("shipping.Repository.BatchInsertShippingOutbox build payload hash: %w", err)
 		}
 		eventIDs = append(eventIDs, event.EventID)
 		aggregateIDs = append(aggregateIDs, event.ProductID)
@@ -346,11 +346,12 @@ func (r *Repository) BatchInsertShippingOutbox(
 		SELECT event_id, aggregate_id, 'shipping', 'wms.shipping.v1', payload_hash
 		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
 
-	if _, err := r.q.Exec(ctx, query, eventIDs, aggregateIDs, payloadHashes); err != nil {
-		return fmt.Errorf("shipping.Repository.BatchInsertShippingOutbox exec: %w", err)
+	tag, err := r.q.Exec(ctx, query, eventIDs, aggregateIDs, payloadHashes)
+	if err != nil {
+		return 0, fmt.Errorf("shipping.Repository.BatchInsertShippingOutbox exec: %w", err)
 	}
 
-	return nil
+	return int(tag.RowsAffected()), nil
 }
 
 func (r *Repository) UpdateOrdersShippedConditional(ctx context.Context, orderIDs []uuid.UUID) (int, error) {
