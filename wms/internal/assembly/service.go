@@ -34,6 +34,7 @@ type assemblyRepository interface {
 	SetProductAssembled(ctx context.Context, productID uuid.UUID) error
 	InsertPickOutboxEvent(ctx context.Context, productID uuid.UUID) error
 	GetTasks(ctx context.Context, destinationID, operatorID uuid.UUID, status string) ([]TaskItem, error)
+	AreAllTasksDoneForOrder(ctx context.Context, orderID uuid.UUID) (bool, error)
 }
 
 func NewService(repo assemblyRepository) *Service {
@@ -209,6 +210,7 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 	}
 
 	var task *Task
+	var orderID uuid.UUID
 
 	err := s.repo.WithTx(ctx, func(txRepo assemblyRepository) error {
 		var err error
@@ -216,6 +218,7 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 		if err != nil {
 			return err
 		}
+		orderID = task.OrderID
 
 		product, err := txRepo.GetProductByIDForUpdate(ctx, productID)
 		if err != nil {
@@ -242,6 +245,13 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 
 	if err != nil {
 		return nil, err
+	}
+
+	allDone, err := s.repo.AreAllTasksDoneForOrder(context.Background(), orderID)
+	if err != nil {
+		_ = err
+	} else if allDone {
+		_ = s.repo.UpdateOrderStatus(context.Background(), orderID, string(domain.OrderStatusAssembled))
 	}
 
 	key := operatorID.String()

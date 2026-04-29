@@ -31,11 +31,9 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 // Allocate - ищет новые заказы (NEW) для магазина (destinationID)
 // и выводит количество собранных заказов, количество готовых товаров и проблемные товары (номер заказа и характеристика товара, включая количество)
 func (h *Handler) Allocate(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
-	if !ok {
+	if _, ok := requireOperator(w, r); !ok {
 		return
 	}
-	_ = operatorID
 
 	var req AllocateRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -89,15 +87,15 @@ func (h *Handler) GetTasks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	status := r.URL.Query().Get("status")
-	if status == "" {
-		status = "PENDING"
+	taskStatus := r.URL.Query().Get("status")
+	if taskStatus == "" {
+		taskStatus = string(domain.TaskStatusPending)
 	}
 
-	result, err := h.svc.GetTasks(r.Context(), destinationID, operatorIDFilter, status)
+	result, err := h.svc.GetTasks(r.Context(), destinationID, operatorIDFilter, taskStatus)
 	if err != nil {
-		status, code, message := mapServiceError(err)
-		writeError(w, status, code, message)
+		httpStatus, code, message := mapServiceError(err)
+		writeError(w, httpStatus, code, message)
 		return
 	}
 

@@ -70,6 +70,10 @@ type mockAssemblyRepo struct {
 	tasksResult []TaskItem
 	tasksErr    error
 
+	// AreAllTasksDoneForOrder
+	areAllTasksDone    bool
+	areAllTasksDoneErr error
+
 	// WithTx tracking
 	withTxMu    sync.Mutex
 	withTxCalls int
@@ -216,6 +220,14 @@ func (m *mockAssemblyRepo) GetTasks(_ context.Context, _, _ uuid.UUID, _ string)
 	return m.tasksResult, nil
 }
 
+// AreAllTasksDoneForOrder - новый метод для мока
+func (m *mockAssemblyRepo) AreAllTasksDoneForOrder(_ context.Context, _ uuid.UUID) (bool, error) {
+	if m.areAllTasksDoneErr != nil {
+		return false, m.areAllTasksDoneErr
+	}
+	return m.areAllTasksDone, nil
+}
+
 // TestAllocateHappyPath - успешная аллокация одного заказа
 func TestAllocateHappyPath(t *testing.T) {
 	destinationID := uuid.New()
@@ -293,8 +305,8 @@ func TestAllocateInsufficientStock(t *testing.T) {
 			},
 		},
 		productsMap: map[uuid.UUID][]domain.Product{
-			skuID:  {{ProductID: productID1, BinID: nil}}, // только 1 из 3
-			skuID2: {},                                    // 0 из 1
+			skuID:  {{ProductID: productID1, BinID: nil}},
+			skuID2: {},
 		},
 		skusMap: map[uuid.UUID]*domain.SKU{
 			skuID:  {SKUID: skuID, Name: "SKU A"},
@@ -370,15 +382,17 @@ func TestAllocateMultipleOrders(t *testing.T) {
 func TestPickHappyPath(t *testing.T) {
 	operatorID := uuid.New()
 	productID := uuid.New()
+	orderID := uuid.New()
 	eventID := uuid.New()
 
 	mockRepo := &mockAssemblyRepo{
 		pendingTasks: map[uuid.UUID]*Task{
-			productID: {EventID: eventID, ProductID: productID, Status: "PENDING"},
+			productID: {EventID: eventID, ProductID: productID, OrderID: orderID, Status: "PENDING"},
 		},
 		productsByID: map[uuid.UUID]*domain.Product{
 			productID: {ProductID: productID, Status: "ALLOCATED"},
 		},
+		areAllTasksDone: false, // не все задачи выполнены
 	}
 
 	svc := NewService(mockRepo)
@@ -407,6 +421,44 @@ func TestPickHappyPath(t *testing.T) {
 	}
 }
 
+// TestPickUpdatesOrderStatusWhenAllTasksDone - проверка обновления статуса заказа
+func TestPickUpdatesOrderStatusWhenAllTasksDone(t *testing.T) {
+	operatorID := uuid.New()
+	productID := uuid.New()
+	orderID := uuid.New()
+	eventID := uuid.New()
+
+	mockRepo := &mockAssemblyRepo{
+		pendingTasks: map[uuid.UUID]*Task{
+			productID: {EventID: eventID, ProductID: productID, OrderID: orderID, Status: "PENDING"},
+		},
+		productsByID: map[uuid.UUID]*domain.Product{
+			productID: {ProductID: productID, Status: "ALLOCATED"},
+		},
+		areAllTasksDone: true, // все задачи выполнены
+	}
+
+	svc := NewService(mockRepo)
+	result, err := svc.Pick(context.Background(), operatorID, productID)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.ProductID != productID.String() {
+		t.Fatalf("expected ProductID %s, got %s", productID.String(), result.ProductID)
+	}
+	if result.CartSize != 1 {
+		t.Fatalf("expected CartSize 1, got %d", result.CartSize)
+	}
+
+	// Проверяем, что статус заказа был обновлён
+	if status, ok := mockRepo.updatedOrderStatus[orderID]; !ok {
+		t.Fatalf("expected order status to be updated")
+	} else if status != "ASSEMBLED" {
+		t.Fatalf("expected order status ASSEMBLED, got %s", status)
+	}
+}
+
 // TestPickNoTask - попытка подобрать товар без задачи
 func TestPickNoTask(t *testing.T) {
 	operatorID := uuid.New()
@@ -429,11 +481,12 @@ func TestPickNoTask(t *testing.T) {
 func TestPickProductNotAllocated(t *testing.T) {
 	operatorID := uuid.New()
 	productID := uuid.New()
+	orderID := uuid.New()
 	eventID := uuid.New()
 
 	mockRepo := &mockAssemblyRepo{
 		pendingTasks: map[uuid.UUID]*Task{
-			productID: {EventID: eventID, ProductID: productID, Status: "PENDING"},
+			productID: {EventID: eventID, ProductID: productID, OrderID: orderID, Status: "PENDING"},
 		},
 		productsByID: map[uuid.UUID]*domain.Product{
 			productID: {ProductID: productID, Status: "STORED"},
@@ -453,6 +506,7 @@ func TestPickRaceCondition(t *testing.T) {
 	operatorID1 := uuid.New()
 	operatorID2 := uuid.New()
 	productID := uuid.New()
+	orderID := uuid.New()
 	eventID := uuid.New()
 
 	callCount := 0
@@ -460,7 +514,7 @@ func TestPickRaceCondition(t *testing.T) {
 
 	mockRepo := &mockAssemblyRepo{
 		pendingTasks: map[uuid.UUID]*Task{
-			productID: {EventID: eventID, ProductID: productID, Status: "PENDING"},
+			productID: {EventID: eventID, ProductID: productID, OrderID: orderID, Status: "PENDING"},
 		},
 		productsByID: map[uuid.UUID]*domain.Product{
 			productID: {ProductID: productID, Status: "ALLOCATED"},
@@ -510,6 +564,7 @@ func TestPickRaceCondition(t *testing.T) {
 // TestPickCartSize - проверка увеличения корзины при последовательных pick'ах
 func TestPickCartSize(t *testing.T) {
 	operatorID := uuid.New()
+	orderID := uuid.New()
 	productID1 := uuid.New()
 	productID2 := uuid.New()
 	productID3 := uuid.New()
@@ -519,9 +574,9 @@ func TestPickCartSize(t *testing.T) {
 
 	mockRepo := &mockAssemblyRepo{
 		pendingTasks: map[uuid.UUID]*Task{
-			productID1: {EventID: eventID1, ProductID: productID1, Status: "PENDING"},
-			productID2: {EventID: eventID2, ProductID: productID2, Status: "PENDING"},
-			productID3: {EventID: eventID3, ProductID: productID3, Status: "PENDING"},
+			productID1: {EventID: eventID1, ProductID: productID1, OrderID: orderID, Status: "PENDING"},
+			productID2: {EventID: eventID2, ProductID: productID2, OrderID: orderID, Status: "PENDING"},
+			productID3: {EventID: eventID3, ProductID: productID3, OrderID: orderID, Status: "PENDING"},
 		},
 		productsByID: map[uuid.UUID]*domain.Product{
 			productID1: {ProductID: productID1, Status: "ALLOCATED"},
@@ -657,11 +712,12 @@ func BenchmarkAllocate(b *testing.B) {
 func BenchmarkPick(b *testing.B) {
 	operatorID := uuid.New()
 	productID := uuid.New()
+	orderID := uuid.New()
 	eventID := uuid.New()
 
 	mockRepo := &mockAssemblyRepo{
 		pendingTasks: map[uuid.UUID]*Task{
-			productID: {EventID: eventID, ProductID: productID, Status: "PENDING"},
+			productID: {EventID: eventID, ProductID: productID, OrderID: orderID, Status: "PENDING"},
 		},
 		productsByID: map[uuid.UUID]*domain.Product{
 			productID: {ProductID: productID, Status: "ALLOCATED"},

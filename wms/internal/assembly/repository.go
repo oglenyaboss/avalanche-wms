@@ -82,6 +82,18 @@ func (r *Repository) GetOrdersByDestinationForUpdate(ctx context.Context, destin
 	return orders, nil
 }
 
+// AreAllTasksDoneForOrder проверяет, все ли задачи заказа выполнены (статус DONE)
+func (r *Repository) AreAllTasksDoneForOrder(ctx context.Context, orderID uuid.UUID) (bool, error) {
+	const query = `
+        SELECT NOT EXISTS(
+            SELECT 1 FROM wms_ops.assembly_tasks
+            WHERE order_id = $1 AND status != 'DONE'
+        )`
+	var allDone bool
+	err := r.q.QueryRow(ctx, query, orderID).Scan(&allDone)
+	return allDone, err
+}
+
 // GetOrderLinesByOrderID возвращает строки заказа
 // (по id заказа возвращает все товары (идентификаторы sku_id) и их количество (quantity))
 func (r *Repository) GetOrderLinesByOrderID(ctx context.Context, orderID uuid.UUID) ([]domain.OrderLine, error) {
