@@ -940,6 +940,16 @@ func (r *Repository) listReceivedProductCountsBySKUTx(
 	return items, nil
 }
 
+// insertOutboxEventsTx вставляет outbox-события для всех продуктов закрываемого cargoplace.
+//
+// Защита от дублей сейчас обеспечивается на уровне UPDATE wms_inventory.cargoplaces
+// в CloseCargoplaceWithOutbox: повторный вызов второй раз не пройдёт WHERE status='TABLE_IN_PROGRESS'
+// и метод вернёт ErrCargoplaceNotInProgress до этого INSERT'а. Поэтому отдельный
+// ON CONFLICT здесь не нужен — event_id всегда новый (uuid.New()).
+//
+// Если в будущем появится worker-level retry (с тем же payload), потребуется
+// unique constraint на (aggregate_id, payload_hash) в public.outbox_events
+// и соответствующий ON CONFLICT — это вне scope текущей задачи.
 func (r *Repository) insertOutboxEventsTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -979,8 +989,7 @@ func (r *Repository) insertOutboxEventsTx(
 			'receiving',
 			'wms.receiving.v1',
 			payload_hash
-		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)
-		ON CONFLICT (event_id) DO NOTHING`
+		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
 
 	if _, err := tx.Exec(ctx, query, eventIDs, aggregateIDs, payloadHashes); err != nil {
 		return fmt.Errorf("receiving.Repository.insertOutboxEventsTx exec: %w", err)
