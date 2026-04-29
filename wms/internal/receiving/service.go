@@ -87,8 +87,12 @@ func NewService(repo receivingRepository) *Service {
 }
 
 func (s *Service) ScanTTN(ctx context.Context, operatorID uuid.UUID, ttnCode string) (*ScanTTNResult, error) {
-	if operatorID == uuid.Nil || ttnCode == "" {
+	if operatorID == uuid.Nil {
 		return nil, fmt.Errorf("receiving.Service.ScanTTN: %w", ErrInvalidInput)
+	}
+	ttnCode, err := validateScanCode(ttnCode)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanTTN: %w", err)
 	}
 
 	shipment, err := s.repo.GetShipmentByTTN(ctx, ttnCode)
@@ -163,8 +167,12 @@ func (s *Service) ScanCargoplace(
 	shipmentID uuid.UUID,
 	cargoplaceCode string,
 ) (*ScanGateCargoplaceResult, error) {
-	if operatorID == uuid.Nil || shipmentID == uuid.Nil || cargoplaceCode == "" {
+	if operatorID == uuid.Nil || shipmentID == uuid.Nil {
 		return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", ErrInvalidInput)
+	}
+	cargoplaceCode, err := validateScanCode(cargoplaceCode)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", err)
 	}
 
 	shipment, err := s.repo.GetShipmentByID(ctx, shipmentID)
@@ -260,7 +268,7 @@ func (s *Service) AcceptShipment(
 		return nil, fmt.Errorf("receiving.Service.AcceptShipment: %w", ErrShipmentNotInProgress)
 	}
 
-	var total, received int
+	var total, received, notReceived int
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
 		if err := txRepo.MarkExpectedAsNotReceived(ctx, shipmentID, cargoplaceStatusNotReceived); err != nil {
 			return fmt.Errorf("receiving.Service.AcceptShipment mark not received: %w", err)
@@ -288,6 +296,14 @@ func (s *Service) AcceptShipment(
 			return fmt.Errorf("receiving.Service.AcceptShipment count progress: %w", countErr)
 		}
 
+		// Считаем NotReceived явно по статусу: формула total - received неверна, потому что
+		// `received` учитывает только RECEIVED_AT_GATE, а cargoplaces в TABLE_IN_PROGRESS/CLOSED
+		// ошибочно попадали бы в «не принятые».
+		notReceived, countErr = txRepo.CountCargoplacesByStatus(ctx, shipmentID, cargoplaceStatusNotReceived)
+		if countErr != nil {
+			return fmt.Errorf("receiving.Service.AcceptShipment count not received: %w", countErr)
+		}
+
 		return nil
 	}); err != nil {
 		return nil, err
@@ -299,7 +315,7 @@ func (s *Service) AcceptShipment(
 		Summary: progress{
 			Total:       total,
 			Received:    received,
-			NotReceived: total - received,
+			NotReceived: notReceived,
 		},
 	}, nil
 }
@@ -368,8 +384,12 @@ func (s *Service) ScanBox(
 	cargoplaceID uuid.UUID,
 	boxBarcode string,
 ) (*ScanBoxResult, error) {
-	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || boxBarcode == "" {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil {
 		return nil, fmt.Errorf("receiving.Service.ScanBox: %w", ErrInvalidInput)
+	}
+	boxBarcode, err := validateScanCode(boxBarcode)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanBox: %w", err)
 	}
 
 	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
@@ -439,8 +459,12 @@ func (s *Service) ScanSKU(
 	boxID uuid.UUID,
 	barcode string,
 ) (*ScanSKUResult, error) {
-	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || boxID == uuid.Nil || barcode == "" {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || boxID == uuid.Nil {
 		return nil, fmt.Errorf("receiving.Service.ScanSKU: %w", ErrInvalidInput)
+	}
+	barcode, err := validateScanCode(barcode)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanSKU: %w", err)
 	}
 
 	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
@@ -496,8 +520,12 @@ func (s *Service) ScanQR(
 	skuID uuid.UUID,
 	qrCode string,
 ) (*ScanQRResult, error) {
-	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || boxID == uuid.Nil || skuID == uuid.Nil || qrCode == "" {
+	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil || boxID == uuid.Nil || skuID == uuid.Nil {
 		return nil, fmt.Errorf("receiving.Service.ScanQR: %w", ErrInvalidInput)
+	}
+	qrCode, err := validateScanCode(qrCode)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Service.ScanQR: %w", err)
 	}
 
 	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
@@ -756,6 +784,18 @@ func (s *Service) tryAutoCloseShipment(
 	}
 
 	if err := repo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed, shipmentStatusGateInProgress); err != nil {
+		// Гонка двух операторов: первый закрыл shipment, второй получает RowsAffected=0.
+		// Если shipment уже GATE_CLOSED — это успех конкурента, не ошибка. Лог SHIPMENT_ACCEPTED
+		// уже вставил тот, кто закрыл первым, поэтому здесь его не дублируем.
+		if errors.Is(err, ErrShipmentNotFound) {
+			current, getErr := repo.GetShipmentByID(ctx, shipmentID)
+			if getErr != nil {
+				return fmt.Errorf("receiving.Service.tryAutoCloseShipment recheck shipment: %w", getErr)
+			}
+			if current.Status == shipmentStatusGateClosed {
+				return nil
+			}
+		}
 		return fmt.Errorf("receiving.Service.tryAutoCloseShipment close shipment: %w", err)
 	}
 

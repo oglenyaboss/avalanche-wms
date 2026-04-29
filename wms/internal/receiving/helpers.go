@@ -62,6 +62,24 @@ func isBufferBin(bin *domain.Bin) bool {
 	return section == "BUFFER"
 }
 
+// scanCodeMaxLen — верхняя граница длины TTN/QR/barcode. DB-колонки text не имеют ограничения,
+// сервис обрезает аномальные входы до того, как попасть в SQL/Kafka.
+const scanCodeMaxLen = 256
+
+// validateScanCode нормализует и валидирует пользовательский ввод (TTN, штрих-код, QR).
+// Возвращает обрезанную (TrimSpace) строку и ErrInvalidInput на пустую/слишком длинную.
+// Полагаться только на DB unique constraint небезопасно: пробельные строки не отфильтровываются.
+func validateScanCode(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", ErrInvalidInput
+	}
+	if len(trimmed) > scanCodeMaxLen {
+		return "", ErrInvalidInput
+	}
+	return trimmed, nil
+}
+
 func payloadHashForReceiving(productID, cargoplaceID uuid.UUID) (string, error) {
 	payload := struct {
 		ProductID     uuid.UUID `json:"product_id"`

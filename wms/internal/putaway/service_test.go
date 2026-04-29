@@ -80,6 +80,20 @@ func (m *mockPutawayRepo) ListProductsByBufferBin(_ context.Context, _ uuid.UUID
 	return m.products, nil
 }
 
+func (m *mockPutawayRepo) GetProductByID(_ context.Context, productID uuid.UUID) (*domain.Product, error) {
+	m.getProductCount++
+	if m.productErr != nil {
+		return nil, m.productErr
+	}
+	if m.productsMap != nil {
+		if product, ok := m.productsMap[productID]; ok {
+			productCopy := *product
+			return &productCopy, nil
+		}
+	}
+	return nil, ErrProductNotFound
+}
+
 func (m *mockPutawayRepo) GetProductsByIDForUpdate(_ context.Context, productID uuid.UUID) (*domain.Product, error) {
 	m.getProductCount++
 	if m.productErr != nil {
@@ -540,6 +554,48 @@ func TestPlaceProductsToStorageBinStorageNotFound(t *testing.T) {
 
 	if !errors.Is(err, ErrStorageBinNotFound) {
 		t.Fatalf("expected ErrStorageBinNotFound, got %v", err)
+	}
+}
+
+// TestPlaceProductsToStorageBinRejectsProductNotInBuffer проверяет защиту от drift:
+// если у продукта в БД bin_id указывает на storage-ячейку (а не buffer) — раскладка
+// не должна выполняться, иначе получим лишний putaway outbox event и FSM revert на чейне.
+func TestPlaceProductsToStorageBinRejectsProductNotInBuffer(t *testing.T) {
+	operatorID := uuid.New()
+	storageBinID := uuid.New()
+	driftedFromBinID := uuid.New() // указывает на storage-ячейку, не buffer
+	productID := uuid.New()
+	productIDs := []uuid.UUID{productID}
+
+	mockRepo := &mockPutawayRepo{
+		storageBin: &domain.Bin{
+			BinID: storageBinID,
+			Code:  "M2-A-03",
+		},
+		bufferBinErr: ErrBufferBinNotFound, // bin не буферный → запрос вернёт NotFound
+		productsMap: map[uuid.UUID]*domain.Product{
+			productID: {
+				ProductID: productID,
+				Status:    "RECEIVED",
+				BinID:     &driftedFromBinID,
+			},
+		},
+	}
+
+	svc := NewService(mockRepo)
+	_, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
+
+	if !errors.Is(err, ErrProductNotInBuffer) {
+		t.Fatalf("expected ErrProductNotInBuffer, got %v", err)
+	}
+	if len(mockRepo.updatedProductIDs) != 0 {
+		t.Fatalf("expected zero product updates on buffer drift, got %d", len(mockRepo.updatedProductIDs))
+	}
+	if len(mockRepo.insertedPutaways) != 0 {
+		t.Fatalf("expected zero putaway records on buffer drift, got %d", len(mockRepo.insertedPutaways))
+	}
+	if mockRepo.outboxCalls != 0 {
+		t.Fatalf("expected zero outbox events on buffer drift, got %d", mockRepo.outboxCalls)
 	}
 }
 
