@@ -1,32 +1,22 @@
 ledger_adapter_lint:
-  stage: lint
-  tags: [docker]
-  image: golang:1.25-alpine
+  extends: .go_lint_template
+  variables:
+    WORKDIR: ledger-adapter
   rules:
     - changes:
         - ledger-adapter/**/*
-  script:
-    - cd ledger-adapter
-    - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-    - golangci-lint run --config ../.golangci.yml --timeout=5m ./...
 
 ledger_adapter_test:
-  stage: test
-  tags: [docker]
-  image: golang:1.25-alpine
+  extends: .go_test_template
+  variables:
+    WORKDIR: ledger-adapter
+    GO_IMAGE: golang:1.25-alpine
   rules:
     - changes:
         - ledger-adapter/**/*
-  script:
-    - cd ledger-adapter
-    - export CGO_ENABLED=1
-    - apk add --no-cache build-base
-    - go test -race -count=1 ./...
 
 ledger_adapter_build_&_deploy:
-  stage: build_&_deploy
-  tags: [docker]
-  image: docker:24.0.5
+  extends: .docker_build_template
   rules:
     - changes:
         - ledger-adapter/**/*

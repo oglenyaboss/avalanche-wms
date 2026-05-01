@@ -1,32 +1,22 @@
 wms_lint:
-  stage: lint
-  tags: [docker]
-  image: golang:1.24-alpine
+  extends: .go_lint_template
+  variables:
+    WORKDIR: wms
   rules:
     - changes:
         - wms/**/*
-  script:
-    - cd wms
-    - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-    - golangci-lint run --config ../.golangci.yml --timeout=5m ./...
 
 wms_test:
-  stage: test
-  tags: [docker]
-  image: golang:1.24-alpine
+  extends: .go_test_template
+  variables:
+    WORKDIR: wms
+    GO_IMAGE: golang:1.24-alpine
   rules:
     - changes:
         - wms/**/*
-  script:
-    - cd wms
-    - apk add --no-cache build-base
-    - export CGO_ENABLED=1
-    - go test -race -count=1 ./...
 
 wms_build_&_deploy:
-  stage: build_&_deploy
-  tags: [docker]
-  image: docker:24.0.5
+  extends: .docker_build_template
   rules:
     - changes:
         - wms/**/*
