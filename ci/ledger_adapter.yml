@@ -1,8 +1,8 @@
 ledger_adapter_lint:
-  extends: .go_lint_template
+  extends: .go_lint_install_template
   variables:
     WORKDIR: ledger-adapter
-    GOLANGCI_LINT_IMAGE: docker/golangci-lint:1.64.8-go1.25.3
+    GO_IMAGE: golang:1.25-alpine
   rules:
     - changes:
         - ledger-adapter/**/*

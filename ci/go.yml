@@ -2,6 +2,7 @@
   variables:
     GOPATH: ${CI_PROJECT_DIR}/.go-cache
     GOCACHE: ${CI_PROJECT_DIR}/.go-cache/build
+    GOBIN: ${CI_PROJECT_DIR}/.go-cache/bin
   cache:
     key: ${CI_COMMIT_REF_SLUG}-go
     paths:
@@ -17,6 +18,19 @@
     GOLANGCI_LINT_CACHE: ${CI_PROJECT_DIR}/.go-cache/golangci-lint
   script:
     - cd ${WORKDIR}
+    - golangci-lint run --config ../.golangci.yml --timeout=5m ./...
+
+.go_lint_install_template:
+  extends: .go_cache_template
+  stage: lint
+  tags: [docker]
+  image: ${GO_IMAGE}
+  variables:
+    GOLANGCI_LINT_CACHE: ${CI_PROJECT_DIR}/.go-cache/golangci-lint
+    GOLANGCI_LINT_VERSION: v1.64.8
+  script:
+    - cd ${WORKDIR}
+    - test -x "${GOBIN}/golangci-lint" || go install github.com/golangci/golangci-lint/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
     - golangci-lint run --config ../.golangci.yml --timeout=5m ./...
 
 .go_test_template:
