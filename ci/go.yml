@@ -12,7 +12,7 @@
   extends: .go_cache_template
   stage: lint
   tags: [docker]
-  image: golangci/golangci-lint:v1.64.8-alpine
+  image: ${GOLANGCI_LINT_IMAGE}
   variables:
     GOLANGCI_LINT_CACHE: ${CI_PROJECT_DIR}/.go-cache/golangci-lint
   script:

@@ -2,6 +2,7 @@ wms_lint:
   extends: .go_lint_template
   variables:
     WORKDIR: wms
+    GOLANGCI_LINT_IMAGE: golangci/golangci-lint:v1.64.8-alpine
   rules:
     - changes:
         - wms/**/*
