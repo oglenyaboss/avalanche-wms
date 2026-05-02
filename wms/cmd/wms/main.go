@@ -14,6 +14,7 @@ import (
 	"wms/internal/assembly"
 	"wms/internal/auth"
 	"wms/internal/config"
+	"wms/internal/dispatches"
 	"wms/internal/ledger"
 	"wms/internal/platform/kafka"
 	"wms/internal/platform/postgres"
@@ -78,6 +79,10 @@ func main() {
 	authSvc := auth.NewService(authRepo, cfg.JWTSecret, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
 	authHandler := auth.NewHandler(authSvc)
 
+	dispatchesRepo := dispatches.NewRepository(dbPool)
+	dispatchesSvc := dispatches.NewService(dispatchesRepo)
+	dispatchesHandler := dispatches.NewHandler(dispatchesSvc)
+
 	// Router
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
@@ -90,6 +95,9 @@ func main() {
 	putawayRouter := r.PathPrefix("/putaway").Subrouter()
 	putawayRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	putawayHandler.RegisterRoutes(putawayRouter)
+
+	dispatchesRouter := r.PathPrefix("/dispatches").Subrouter()
+	dispatchesHandler.RegisterRoutes(dispatchesRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
