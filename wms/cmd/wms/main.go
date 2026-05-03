@@ -97,6 +97,7 @@ func main() {
 	putawayHandler.RegisterRoutes(putawayRouter)
 
 	dispatchesRouter := r.PathPrefix("/dispatches").Subrouter()
+	dispatchesRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	dispatchesHandler.RegisterRoutes(dispatchesRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)

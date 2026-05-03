@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"wms/internal/domain"
+
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5"
@@ -27,7 +29,7 @@ func (h *Handler) RegisterRoutes(mx *mux.Router) {
 }
 
 type DispatchFilter struct {
-	Status        *OutboundDispatchStatus
+	Status        *domain.OutboundDispatchStatus
 	DestinationId uuid.UUID
 	WarehouseId   int
 }
@@ -37,7 +39,7 @@ func (h *Handler) GetDispatches(w http.ResponseWriter, r *http.Request) {
 	filter := DispatchFilter{}
 
 	if status := vars.Get("status"); status != "" {
-		filter.Status = (*OutboundDispatchStatus)(&status)
+		filter.Status = (*domain.OutboundDispatchStatus)(&status)
 	} else {
 		filter.Status = nil
 	}
@@ -62,7 +64,7 @@ func (h *Handler) GetDispatches(w http.ResponseWriter, r *http.Request) {
 		filter.WarehouseId = -1
 	}
 
-	dispatches, err := h.svc.GetDispatches(filter)
+	dispatches, err := h.svc.GetDispatches(r.Context(), filter)
 	if err != nil {
 		respondWithError(w, err.Error(), 503)
 		return
@@ -92,7 +94,7 @@ func (h *Handler) NewDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dispatch, err := h.svc.CreateNewDispatch(&inputData)
+	dispatch, err := h.svc.CreateNewDispatch(r.Context(), &inputData)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			respondWithError(w, "DESTINATION_NOT_FOUND", 404)
@@ -109,19 +111,19 @@ func (h *Handler) NewDispatch(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetDispatchById(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	dispatch_id, err := uuid.Parse(vars["dispatch_id"])
+	dispatchID, err := uuid.Parse(vars["dispatch_id"])
 	if err != nil {
 		respondWithError(w, fmt.Errorf("invalid dispatch_id format: %w", err).Error(), 400)
 		return
 	}
 
-	dispatch, err := h.svc.GetDispatchById(dispatch_id)
+	dispatch, err := h.svc.GetDispatchById(r.Context(), dispatchID)
 	if err != nil {
-		respondWithError(w, fmt.Errorf("failed to get dispatch by id %s: %w", dispatch_id, err).Error(), 503)
+		respondWithError(w, fmt.Errorf("failed to get dispatch by id %s: %w", dispatchID, err).Error(), 503)
 		return
 	}
 
-	if dispatch == (OutboundDispatch{}) {
+	if dispatch == (domain.OutboundDispatch{}) {
 		respondWithError(w, "DISPATCH_NOT_FOUND", 404)
 		return
 	}

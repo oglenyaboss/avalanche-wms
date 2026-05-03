@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"wms/internal/domain"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -16,9 +18,9 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) CreateNewDispatch(disp *NewDispatchQuery, dispCode string) (OutboundDispatch, error) {
-	var result OutboundDispatch
-	err := r.db.QueryRow(context.Background(), `
+func (r *Repository) CreateNewDispatch(ctx context.Context, disp *NewDispatchQuery, dispCode string) (domain.OutboundDispatch, error) {
+	var result domain.OutboundDispatch
+	err := r.db.QueryRow(ctx, `
     INSERT INTO wms_inventory.outbound_dispatches
         (dispatch_id, destination_id, warehouse_id, vehicle_number,
          driver_name, driver_phone, scheduled_at, dispatch_code)
@@ -33,12 +35,13 @@ func (r *Repository) CreateNewDispatch(disp *NewDispatchQuery, dispCode string) 
 		$6
     FROM wms_inventory.destinations d
     WHERE d.destination_id = $1
+	FOR UPDATE
     RETURNING *
 `, disp.DestinationId, disp.VehicleNumber, disp.DriverName, disp.DriverPhone, disp.ScheduledAt, dispCode).Scan(
-		&result.DispatchId,
+		&result.DispatchID,
 		&result.DispatchCode,
-		&result.WarehouseId,
-		&result.DestinationId,
+		&result.WarehouseID,
+		&result.DestinationID,
 		&result.VehicleNumber,
 		&result.DriverName,
 		&result.DriverPhone,
@@ -50,27 +53,27 @@ func (r *Repository) CreateNewDispatch(disp *NewDispatchQuery, dispCode string) 
 		&result.UpdatedAt,
 	)
 	if err != nil {
-		return OutboundDispatch{}, err
+		return domain.OutboundDispatch{}, err
 	}
 	return result, nil
 }
 
-func (r *Repository) GetActualDispatchCode() (int, error) {
+func (r *Repository) GetActualDispatchCode(ctx context.Context) (int, error) {
 	var dispatchCode int
-	err := r.db.QueryRow(context.Background(), `select count(*) from wms_inventory.outbound_dispatches where created_at >= NOW()::DATE`).Scan(&dispatchCode)
+	err := r.db.QueryRow(ctx, `select count(*) from wms_inventory.outbound_dispatches where created_at >= NOW()::DATE`).Scan(&dispatchCode)
 	if err != nil {
 		return -1, err
 	}
 	return dispatchCode, nil
 }
 
-func (r *Repository) GetDispatchById(disp_id uuid.UUID) (OutboundDispatch, error) {
-	var result OutboundDispatch
-	err := r.db.QueryRow(context.Background(), `select dispatch_id,dispatch_code,warehouse_id,destination_id,vehicle_number,driver_name,driver_phone,status,scheduled_at,arrived_at,departed_at,created_at,updated_at from wms_inventory.outbound_dispatches where dispatch_id = $1`, disp_id).Scan(
-		&result.DispatchId,
+func (r *Repository) GetDispatchById(ctx context.Context, disp_id uuid.UUID) (domain.OutboundDispatch, error) {
+	var result domain.OutboundDispatch
+	err := r.db.QueryRow(ctx, `select dispatch_id,dispatch_code,warehouse_id,destination_id,vehicle_number,driver_name,driver_phone,status,scheduled_at,arrived_at,departed_at,created_at,updated_at from wms_inventory.outbound_dispatches where dispatch_id = $1`, disp_id).Scan(
+		&result.DispatchID,
 		&result.DispatchCode,
-		&result.WarehouseId,
-		&result.DestinationId,
+		&result.WarehouseID,
+		&result.DestinationID,
 		&result.VehicleNumber,
 		&result.DriverName,
 		&result.DriverPhone,
@@ -82,12 +85,12 @@ func (r *Repository) GetDispatchById(disp_id uuid.UUID) (OutboundDispatch, error
 		&result.UpdatedAt,
 	)
 	if err != nil {
-		return OutboundDispatch{}, err
+		return domain.OutboundDispatch{}, err
 	}
 	return result, nil
 }
 
-func (r *Repository) GetDispatchesByFilter(filter DispatchFilter) ([]OutboundDispatch, error) {
+func (r *Repository) GetDispatchesByFilter(ctx context.Context, filter DispatchFilter) ([]domain.OutboundDispatch, error) {
 	query := `select  dispatch_id, dispatch_code, warehouse_id, destination_id,
             vehicle_number, driver_name, driver_phone, status,
             scheduled_at, arrived_at, departed_at, created_at, updated_at
@@ -110,21 +113,21 @@ func (r *Repository) GetDispatchesByFilter(filter DispatchFilter) ([]OutboundDis
 		args = append(args, filter.WarehouseId)
 	}
 	query += " order by scheduled_at ASC"
-	rows, err := r.db.Query(context.Background(), query, args...)
+	rows, err := r.db.Query(ctx, query, args...)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to query dispatches: %w", err)
 	}
 	defer rows.Close()
 
-	var dispatches []OutboundDispatch
+	var dispatches []domain.OutboundDispatch
 	for rows.Next() {
-		var d OutboundDispatch
+		var d domain.OutboundDispatch
 		err := rows.Scan(
-			&d.DispatchId,
+			&d.DispatchID,
 			&d.DispatchCode,
-			&d.WarehouseId,
-			&d.DestinationId,
+			&d.WarehouseID,
+			&d.DestinationID,
 			&d.VehicleNumber,
 			&d.DriverName,
 			&d.DriverPhone,
