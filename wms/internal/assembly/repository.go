@@ -419,3 +419,20 @@ func payloadHashForPick(productID uuid.UUID) (string, error) {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:]), nil
 }
+
+// UpdateOrderStatusToAssembled обновляет статус заказа на ASSEMBLED (без проверки на NEW)
+func (r *Repository) UpdateOrderStatusToAssembled(ctx context.Context, orderID uuid.UUID) error {
+	const query = `
+		UPDATE wms_inventory.orders
+		SET status = $2, updated_at = NOW()
+		WHERE order_id = $1`
+
+	tag, err := r.q.Exec(ctx, query, orderID, string(domain.OrderStatusAssembled))
+	if err != nil {
+		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled exec: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled: order %s not found", orderID)
+	}
+	return nil
+}

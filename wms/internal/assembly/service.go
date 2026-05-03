@@ -35,6 +35,7 @@ type assemblyRepository interface {
 	InsertPickOutboxEvent(ctx context.Context, productID uuid.UUID) error
 	GetTasks(ctx context.Context, destinationID, operatorID uuid.UUID, status string) ([]TaskItem, error)
 	AreAllTasksDoneForOrder(ctx context.Context, orderID uuid.UUID) (bool, error)
+	UpdateOrderStatusToAssembled(ctx context.Context, orderID uuid.UUID) error
 }
 
 func NewService(repo assemblyRepository) *Service {
@@ -210,7 +211,7 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 	}
 
 	var task *Task
-	var orderID uuid.UUID
+	var allTasksDone bool
 
 	err := s.repo.WithTx(ctx, func(txRepo assemblyRepository) error {
 		var err error
@@ -218,7 +219,6 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 		if err != nil {
 			return err
 		}
-		orderID = task.OrderID
 
 		product, err := txRepo.GetProductByIDForUpdate(ctx, productID)
 		if err != nil {
@@ -240,18 +240,23 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 			return fmt.Errorf("assembly.Service.Pick insert outbox: %w", err)
 		}
 
+		// Проверяем, все ли задачи заказа выполнены (внутри той же транзакции)
+		allTasksDone, err = txRepo.AreAllTasksDoneForOrder(ctx, task.OrderID)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.Pick check all tasks: %w", err)
+		}
+
+		if allTasksDone {
+			if err := txRepo.UpdateOrderStatusToAssembled(ctx, task.OrderID); err != nil {
+				return fmt.Errorf("assembly.Service.Pick update order status: %w", err)
+			}
+		}
+
 		return nil
 	})
 
 	if err != nil {
 		return nil, err
-	}
-
-	allDone, err := s.repo.AreAllTasksDoneForOrder(context.Background(), orderID)
-	if err != nil {
-		_ = err
-	} else if allDone {
-		_ = s.repo.UpdateOrderStatus(context.Background(), orderID, string(domain.OrderStatusAssembled))
 	}
 
 	key := operatorID.String()

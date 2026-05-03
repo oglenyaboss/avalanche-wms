@@ -220,12 +220,22 @@ func (m *mockAssemblyRepo) GetTasks(_ context.Context, _, _ uuid.UUID, _ string)
 	return m.tasksResult, nil
 }
 
-// AreAllTasksDoneForOrder - новый метод для мока
 func (m *mockAssemblyRepo) AreAllTasksDoneForOrder(_ context.Context, _ uuid.UUID) (bool, error) {
 	if m.areAllTasksDoneErr != nil {
 		return false, m.areAllTasksDoneErr
 	}
 	return m.areAllTasksDone, nil
+}
+
+func (m *mockAssemblyRepo) UpdateOrderStatusToAssembled(_ context.Context, orderID uuid.UUID) error {
+	if m.updateOrderStatusErr != nil {
+		return m.updateOrderStatusErr
+	}
+	if m.updatedOrderStatus == nil {
+		m.updatedOrderStatus = make(map[uuid.UUID]string)
+	}
+	m.updatedOrderStatus[orderID] = string(domain.OrderStatusAssembled)
+	return nil
 }
 
 // TestAllocateHappyPath - успешная аллокация одного заказа
@@ -451,10 +461,9 @@ func TestPickUpdatesOrderStatusWhenAllTasksDone(t *testing.T) {
 		t.Fatalf("expected CartSize 1, got %d", result.CartSize)
 	}
 
-	// Проверяем, что статус заказа был обновлён
 	if status, ok := mockRepo.updatedOrderStatus[orderID]; !ok {
 		t.Fatalf("expected order status to be updated")
-	} else if status != "ASSEMBLED" {
+	} else if status != string(domain.OrderStatusAssembled) {
 		t.Fatalf("expected order status ASSEMBLED, got %s", status)
 	}
 }
