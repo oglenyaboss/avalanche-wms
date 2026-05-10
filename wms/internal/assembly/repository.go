@@ -425,14 +425,14 @@ func (r *Repository) UpdateOrderStatusToAssembled(ctx context.Context, orderID u
 	const query = `
 		UPDATE wms_inventory.orders
 		SET status = $2, updated_at = NOW()
-		WHERE order_id = $1`
+		WHERE order_id = $1 AND status = 'ALLOCATED'`
 
 	tag, err := r.q.Exec(ctx, query, orderID, string(domain.OrderStatusAssembled))
 	if err != nil {
 		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled exec: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled: order %s not found", orderID)
+		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled: order %s not found or not in ALLOCATED status", orderID)
 	}
 	return nil
 }

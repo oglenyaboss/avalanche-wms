@@ -240,7 +240,6 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 			return fmt.Errorf("assembly.Service.Pick insert outbox: %w", err)
 		}
 
-		// Проверяем, все ли задачи заказа выполнены (внутри той же транзакции)
 		allTasksDone, err = txRepo.AreAllTasksDoneForOrder(ctx, task.OrderID)
 		if err != nil {
 			return fmt.Errorf("assembly.Service.Pick check all tasks: %w", err)
