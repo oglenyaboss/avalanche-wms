@@ -72,7 +72,7 @@ func main() {
 
 	shippingRepo := shipping.NewRepository(dbPool)
 	shippingSvc := shipping.NewService(shippingRepo)
-	_ = shipping.NewHandler(shippingSvc)
+	shippingHandler := shipping.NewHandler(shippingSvc)
 
 	authRepo := auth.NewRepository(dbPool)
 	authSvc := auth.NewService(authRepo, cfg.JWTSecret, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
@@ -94,6 +94,9 @@ func main() {
 	assemblyRouter := r.PathPrefix("/assembly").Subrouter()
 	assemblyRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	assemblyHandler.RegisterRoutes(assemblyRouter)
+	shippingRouter := r.PathPrefix("/shipping").Subrouter()
+	shippingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	shippingHandler.RegisterRoutes(shippingRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {

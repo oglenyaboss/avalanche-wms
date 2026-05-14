@@ -111,21 +111,16 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> NEW : Заказ создан (ERP / менеджер)
     NEW --> ALLOCATED : Все products назначены (аллокация)
-    ALLOCATED --> ASSEMBLY_IN_PROGRESS : Первый product подобран
-    ASSEMBLY_IN_PROGRESS --> ASSEMBLED : Все products подобраны
-    ASSEMBLED --> READY_TO_SHIP : Упаковка (в MVP автоматически)
-    READY_TO_SHIP --> SHIPPED : Все products отгружены
-    ASSEMBLED --> SHIPPED : Отгрузка (в MVP напрямую)
+    ALLOCATED --> ASSEMBLED : Все products подобраны
+    ASSEMBLED --> SHIPPED : Все products отгружены
 ```
 
 | Переход | Этап WMS | Триггер |
 |---------|----------|---------|
 | — → NEW | — | Создание заказа |
 | NEW → ALLOCATED | Сборка | POST /assembly/allocate (все products назначены) |
-| ALLOCATED → ASSEMBLY_IN_PROGRESS | Сборка | POST /assembly/pick (первый product) |
-| ASSEMBLY_IN_PROGRESS → ASSEMBLED | Сборка | POST /assembly/pick (последний product) |
-| ASSEMBLED → READY_TO_SHIP | — | Автоматически в MVP |
-| READY_TO_SHIP → SHIPPED | Отгрузка | POST /shipping/ship |
+| ALLOCATED → ASSEMBLED | Сборка | POST /assembly/pick (последний product подобран) |
+| ASSEMBLED → SHIPPED | Отгрузка | POST /shipping/ship |
 
 ---
 
@@ -144,6 +139,28 @@ stateDiagram-v2
 ```
 
 ---
+
+## outbound_dispatches (исходящий рейс)
+
+Плановый исходящий рейс, создаваемый внешней логистикой до погрузки. Содержит номер ТС (`vehicle_number`) и другую логистическую информацию. Используется на этапе отгрузки через `dispatch_id`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> SCHEDULED : Внешняя логистика создала рейс
+    SCHEDULED --> AT_GATE : ТС прибыло на склад
+    AT_GATE --> DEPARTED : Погрузка завершена, ТС убыло
+    SCHEDULED --> CANCELLED : Рейс отменён
+    AT_GATE --> CANCELLED : Рейс отменён
+```
+
+| Переход | Этап WMS | Триггер |
+|---------|----------|---------|
+| — → SCHEDULED | Подготовка | Внешняя логистика создаёт рейс до погрузки |
+| SCHEDULED → AT_GATE | Отгрузка | ТС прибыло на склад |
+| AT_GATE → DEPARTED | Отгрузка | Погрузка завершена, ТС убыло |
+| SCHEDULED → CANCELLED | — | Оператор отменил рейс |
+| AT_GATE → CANCELLED | — | Оператор отменил рейс |
+
 
 ## On-chain статус (BatchMappingWMS)
 
@@ -190,10 +207,12 @@ stateDiagram-v2
 | cargoplaces | EXPECTED → RECEIVED/NOT | → TABLE_CLOSED | — | — | — |
 | boxes | — | OPEN → CLOSED | — | — | — |
 | products | — | INSERT (RECEIVED) | → STORED | → ALLOCATED → ASSEMBLED | → SHIPPED |
-| orders | — | — | — | NEW → ASSEMBLED | → SHIPPED |
+| orders | — | — | — | NEW → ALLOCATED → ASSEMBLED | → SHIPPED |
+| order_lines | — | — | — | INSERT (создаётся вместе с заказом) | — |
 | assembly_tasks | — | — | — | INSERT → DONE | — |
+| outbound_dispatches | — | — | — | — | SCHEDULED → AT_GATE → DEPARTED |
 | putaways | — | — | INSERT | — | — |
-| shippings | — | — | — | — | INSERT |
+| shippings | — | — | — | — | INSERT (с dispatch_id) |
 | outbox_events | — | INSERT (receiving) | INSERT (putaway) | INSERT (picking) | INSERT (shipping) |
 | receiving_gate | INSERT | — | — | — | — |
 | receiving_table | — | INSERT | — | — | — |

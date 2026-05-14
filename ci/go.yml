@@ -1,0 +1,51 @@
+.go_cache_template:
+  variables:
+    GOPATH: ${CI_PROJECT_DIR}/.go-cache
+    GOCACHE: ${CI_PROJECT_DIR}/.go-cache/build
+    GOBIN: ${CI_PROJECT_DIR}/.go-cache/bin
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-go
+    paths:
+      - .go-cache/
+    policy: pull-push
+
+.go_lint_template:
+  extends: .go_cache_template
+  stage: lint
+  tags: [docker]
+  image: ${GOLANGCI_LINT_IMAGE}
+  variables:
+    GOLANGCI_LINT_CACHE: ${CI_PROJECT_DIR}/.go-cache/golangci-lint
+  script:
+    - cd ${WORKDIR}
+    - golangci-lint run --config ../.golangci.yml --timeout=5m ./...
+
+.go_lint_install_template:
+  extends: .go_cache_template
+  stage: lint
+  tags: [docker]
+  image: ${GO_IMAGE}
+  variables:
+    GOLANGCI_LINT_CACHE: ${CI_PROJECT_DIR}/.go-cache/golangci-lint
+    GOLANGCI_LINT_VERSION: v1.64.8
+  script:
+    - cd ${WORKDIR}
+    - test -x "${GOBIN}/golangci-lint" || go install github.com/golangci/golangci-lint/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
+    - ${GOBIN}/golangci-lint run --config ../.golangci.yml --timeout=5m ./...
+
+.go_test_template:
+  extends: .go_cache_template
+  stage: test
+  needs: []
+  tags: [docker]
+  image: ${GO_IMAGE}
+  script:
+    - cd ${WORKDIR}
+    - apk add --no-cache build-base
+    - export CGO_ENABLED=1
+    - go test -race -count=1 ./...
+
+.docker_build_template:
+  stage: build_&_deploy
+  tags: [docker]
+  image: docker:24.0.5

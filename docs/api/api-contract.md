@@ -658,7 +658,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
       "done": 3,
       "remaining": 2
     },
-    "order_status": "ASSEMBLY_IN_PROGRESS"
+    "order_status": "ALLOCATED"
   }
 }
 ```
@@ -672,7 +672,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
 - UPDATE `assembly_tasks` SET status = DONE, onchain_status = PENDING_ONCHAIN
 - UPDATE `products.status` → ASSEMBLED
 - INSERT `outbox_events` (aggregate_type='picking')
-- UPDATE `orders.status` → ASSEMBLY_IN_PROGRESS или ASSEMBLED (если все tasks DONE)
+- UPDATE `orders.status` → ALLOCATED или ASSEMBLED (если все tasks DONE)
 - **Блокчейн:** событие → Kafka → batchPick → PutAway → Picked
 
 ---
@@ -683,7 +683,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
 
 Список заказов, готовых к отгрузке.
 
-**Query params:** `?status=ASSEMBLED,READY_TO_SHIP`
+**Query params:** `?status=ASSEMBLED`
 
 **Response (200):**
 ```json
@@ -748,7 +748,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
 ```json
 {
   "order_id": "uuid",
-  "vehicle_number": "А123БВ777"
+  "dispatch_id": "uuid"
 }
 ```
 
@@ -759,7 +759,7 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
   "data": {
     "order_id": "uuid",
     "status": "SHIPPED",
-    "vehicle_number": "А123БВ777",
+    "dispatch_id": "uuid",
     "products_shipped": 5,
     "outbox_events_created": 5
   }
@@ -769,15 +769,22 @@ HTTP-коды: `200` — успех, `400` — ошибка валидации, 
 **Ошибки:**
 | Код | HTTP | Когда |
 |-----|------|-------|
-| `ORDER_NOT_ASSEMBLED` | 409 | Заказ не в статусе ASSEMBLED / READY_TO_SHIP |
-| `VEHICLE_NUMBER_REQUIRED` | 400 | Не указан номер ТС |
+| `ORDER_NOT_ASSEMBLED` | 409 | Заказ не в статусе ASSEMBLED |
+| `DISPATCH_ID_REQUIRED` | 400 | Не указан исходящий рейс |
 
 **Побочные эффекты (в одной транзакции):**
 - UPDATE `products.status` → SHIPPED (для всех products заказа)
-- INSERT `shippings` (product_id, vehicle_number, operator_id) × N
+- INSERT `shippings` (product_id, dispatch_id, operator_id) × N
 - UPDATE `orders.status` → SHIPPED
 - INSERT `outbox_events` × N (aggregate_type='shipping')
 - **Блокчейн:** события → Kafka → batchShip → Picked → Shipped
+
+> **Примечание:** `vehicle_number` теперь хранится в `wms_inventory.outbound_dispatches`. Для отчётов, требующих номер ТС, используйте JOIN:
+> ```sql
+> SELECT s.*, d.vehicle_number
+> FROM wms_ops.shippings s
+> JOIN wms_inventory.outbound_dispatches d ON s.dispatch_id = d.dispatch_id;
+> ```
 
 ---
 
