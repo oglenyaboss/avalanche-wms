@@ -84,7 +84,6 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 						}
 						sku, getErr := txRepo.GetSKUByID(ctx, skuID)
 						if getErr != nil {
-							// Логируем ошибку, но не прерываем — название SKU не критично
 							log.Printf("assembly.Service.Allocate: failed to get SKU name for %s: %v", skuID, getErr)
 						}
 						skuName := ""
