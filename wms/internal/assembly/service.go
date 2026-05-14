@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -71,7 +72,21 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 				if errors.Is(err, ErrInsufficientStock) {
 					missingSKUs := make([]InsufficientSKU, 0, len(insufficientSKUs))
 					for _, isku := range insufficientSKUs {
-						sku, _ := txRepo.GetSKUByID(ctx, uuid.MustParse(isku.SKUID))
+						skuID, parseErr := uuid.Parse(isku.SKUID)
+						if parseErr != nil {
+							log.Printf("assembly.Service.Allocate: invalid sku_id %s: %v", isku.SKUID, parseErr)
+							missingSKUs = append(missingSKUs, InsufficientSKU{
+								SKUID:      isku.SKUID,
+								SKUName:    "",
+								MissingQty: isku.MissingQty,
+							})
+							continue
+						}
+						sku, getErr := txRepo.GetSKUByID(ctx, skuID)
+						if getErr != nil {
+							// Логируем ошибку, но не прерываем — название SKU не критично
+							log.Printf("assembly.Service.Allocate: failed to get SKU name for %s: %v", skuID, getErr)
+						}
 						skuName := ""
 						if sku != nil {
 							skuName = sku.Name
@@ -249,6 +264,7 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 			if err := txRepo.UpdateOrderStatusToAssembled(ctx, task.OrderID); err != nil {
 				return fmt.Errorf("assembly.Service.Pick update order status: %w", err)
 			}
+			s.CleanupCart(operatorID)
 		}
 
 		return nil
@@ -276,4 +292,13 @@ func (s *Service) GetCartSize(operatorID uuid.UUID) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.carts[key])
+}
+
+// CleanupCart очищает корзину оператора
+// TODO: Планируется вынести cart в Redis или БД
+func (s *Service) CleanupCart(operatorID uuid.UUID) {
+	key := operatorID.String()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.carts, key)
 }
