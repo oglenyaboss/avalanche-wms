@@ -40,6 +40,7 @@ erDiagram
     bins {
         uuid bin_id PK
         bigint warehouse_id FK
+        uuid destination_id FK
         text code
         text section
         numeric volume
@@ -61,6 +62,16 @@ erDiagram
         uuid sku_id FK
         text barcode
         timestamptz created_at
+    }
+
+    destinations {
+        uuid destination_id PK
+        text code
+        text name
+        text address
+        bigint warehouse_id FK
+        timestamptz created_at
+        timestamptz updated_at
     }
 
     inbound_shipments {
@@ -117,7 +128,31 @@ erDiagram
         text external_order_no
         uuid customer_id FK
         bigint warehouse_id FK
+        uuid destination_id FK
         text status
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    order_lines {
+        bigserial id PK
+        uuid order_id FK
+        uuid sku_id FK
+        integer qty
+    }
+
+    outbound_dispatches {
+        uuid dispatch_id PK
+        text dispatch_code
+        bigint warehouse_id FK
+        uuid destination_id FK
+        text vehicle_number
+        text driver_name
+        text driver_phone
+        text status
+        timestamptz scheduled_at
+        timestamptz arrived_at
+        timestamptz departed_at
         timestamptz created_at
         timestamptz updated_at
     }
@@ -192,6 +227,7 @@ erDiagram
         uuid product_id FK
         uuid sku_id FK
         uuid from_bin_id FK
+        uuid destination_id FK
         text section
         text status
         text onchain_status
@@ -207,7 +243,7 @@ erDiagram
         uuid event_id
         uuid product_id FK
         uuid operator_id FK
-        text vehicle_number
+        uuid dispatch_id FK
         text onchain_status
         text onchain_tx_hash
         timestamptz shipped_at
@@ -220,9 +256,15 @@ erDiagram
     warehouses ||--o{ bins : "contains"
     warehouses ||--o{ inbound_shipments : "receives"
     warehouses ||--o{ orders : "fulfills"
+    warehouses ||--o{ destinations : "serves"
+    destinations ||--o{ orders : "delivers to"
+    destinations ||--o{ bins : "assigned to"
+    destinations ||--o{ outbound_dispatches : "destination of"
+    destinations ||--o{ assembly_tasks : "destination of"
     skus ||--o{ sku_barcodes : "identified by"
     skus ||--o{ products : "instantiated as"
     skus ||--o{ expected_cargoplace_skus : "expected in"
+    skus ||--o{ order_lines : "referenced in"
     inbound_shipments ||--o{ cargoplaces : "contains"
     inbound_shipments ||--o{ products : "originated from"
     cargoplaces ||--o{ boxes : "contains"
@@ -232,6 +274,8 @@ erDiagram
     bins ||--o{ products : "stores"
     orders ||--o{ products : "includes"
     orders ||--o{ assembly_tasks : "requires"
+    orders ||--o{ order_lines : "contains"
+    outbound_dispatches ||--o{ shippings : "used in"
     products ||--o{ putaways : "placed by"
     products ||--o{ assembly_tasks : "picked in"
     products ||--o{ shippings : "shipped in"
@@ -255,9 +299,11 @@ graph TD
         warehouses --> bins
         warehouses --> inbound_shipments
         warehouses --> orders
+        warehouses --> destinations
         skus --> sku_barcodes
         skus --> products
         skus --> expected_cargoplace_skus
+        skus --> order_lines
         inbound_shipments --> cargoplaces
         cargoplaces --> boxes
         cargoplaces --> expected_cargoplace_skus
@@ -265,6 +311,12 @@ graph TD
         boxes --> products
         bins --> products
         orders --> products
+        orders --> order_lines
+        destinations --> orders
+        destinations --> bins
+        destinations --> outbound_dispatches
+        destinations --> assembly_tasks
+        outbound_dispatches --> shippings
     end
 ```
 
@@ -316,10 +368,12 @@ inbound_shipments (TTN)
 ### Путь данных: order → shipment
 
 ```
-orders (заказ)
+orders (заказ → destination_id)
+  ├── order_lines (строки заказа: SKU × qty)
   └── products (order_id назначен при аллокации)
-        └── assembly_tasks (задачи подбора)
-              └── shippings (записи отгрузки)
+        └── assembly_tasks (задачи подбора → destination_id)
+              └── shippings (записи отгрузки → dispatch_id)
+                    └── outbound_dispatches (рейс, содержит vehicle_number)
 ```
 
 ### Связь off-chain ↔ on-chain
@@ -344,5 +398,16 @@ products.product_id
 | `products` | UNIQUE(qr_code) | QR глобально уникален |
 | `sku_barcodes` | UNIQUE(barcode) | Штрихкод глобально уникален |
 | `skus` | UNIQUE(name) | Название SKU уникально |
+| `destinations` | UNIQUE(code) | Код магазина-получателя глобально уникален |
+| `order_lines` | UNIQUE(order_id, sku_id) | Одна позиция SKU в заказе уникальна |
+| `outbound_dispatches` | UNIQUE(dispatch_code) | Код рейса глобально уникален |
 | `onchain_events` | UNIQUE(event_id) | Идемпотентность Ledger Adapter |
 | `expected_cargoplace_skus` | UNIQUE(cargoplace_id, sku_id) | Один SKU на грузоместо |
+
+### CHECK-ограничения и индексы
+
+| Таблица | Constraint / Index | Назначение |
+|---------|-------------------|------------|
+| `bins` | CHECK `bins_shipping_buffer_requires_destination` | Если `section = 'SHIPPING_BUFFER'`, то `destination_id IS NOT NULL` |
+| `bins` | partial-индекс `idx_bins_destination_id` | Ускоряет поиск по `destination_id` только для ячеек `SHIPPING_BUFFER` |
+| `order_lines` | CHECK `order_lines_qty_positive` | `qty > 0` |
