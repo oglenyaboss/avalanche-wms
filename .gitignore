@@ -11,6 +11,7 @@
 *.prof
 coverage.txt
 coverage.html
+.go-cache/
 
 # ── Go vendor ───────────────────────────────────────────
 **/vendor/
