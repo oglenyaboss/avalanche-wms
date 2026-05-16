@@ -1,56 +1,44 @@
-version: "2"
-run:
-  go: "1.24"
 linters:
   enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
+    - typecheck
     - gocritic
-    - misspell
     - revive
-  settings:
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - style
-        - performance
-    misspell:
-      locale: US
-    revive:
-      rules:
-        - name: exported
-          severity: warning
-        - name: unused-parameter
-          severity: warning
-  exclusions:
-    generated: lax
-    presets:
-      - comments
-      - common-false-positives
-      - legacy
-      - std-error-handling
+    - gofmt
+    - goimports
+    - misspell
+
+linters-settings:
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+  revive:
     rules:
-      - linters:
-          - errcheck
-          - gocritic
-        path: _test\.go
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+      - name: exported
+        severity: warning
+      - name: unused-parameter
+        severity: warning
+  goimports:
+    local-prefixes: wms,ledger-adapter
+  misspell:
+    locale: US
+
+run:
+  timeout: 5m
+  go: "1.24"
+
 issues:
   max-issues-per-linter: 50
   max-same-issues: 5
-formatters:
-  enable:
-    - gofmt
-    - goimports
-  settings:
-    goimports:
-      local-prefixes:
-        - wms
-        - ledger-adapter
-  exclusions:
-    generated: lax
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gocritic
