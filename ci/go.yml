@@ -39,9 +39,14 @@
   needs: []
   tags: [docker]
   image: ${GO_IMAGE}
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+      - scheduler_failure
   script:
     - cd ${WORKDIR}
-    - apk add --no-cache build-base
     - export CGO_ENABLED=1
     - go test -race -count=1 ./...
 
