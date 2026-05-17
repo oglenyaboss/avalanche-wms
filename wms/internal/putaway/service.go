@@ -65,7 +65,7 @@ func (s *Service) GetBufferProducts(ctx context.Context, operatorID, bufferBinID
 	}
 
 	return &ScanBufferResponse{
-		BufferBinId:   bufferBin.BinID.String(),
+		BufferBinID:   bufferBin.BinID.String(),
 		BufferCode:    bufferBin.Code,
 		Products:      respProducts,
 		TotalProducts: len(respProducts),

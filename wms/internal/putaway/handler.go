@@ -19,11 +19,11 @@ type Handler struct {
 }
 
 type ScanBufferRequest struct {
-	BufferBinId string `json:"buffer_bin_id"`
+	BufferBinID string `json:"buffer_bin_id"`
 }
 
 type ScanBufferResponse struct {
-	BufferBinId   string                      `json:"buffer_bin_id"`
+	BufferBinID   string                      `json:"buffer_bin_id"`
 	BufferCode    string                      `json:"buffer_code"`
 	Products      []ProductBufferItemResponse `json:"products"`
 	TotalProducts int                         `json:"total_products"`
@@ -94,7 +94,7 @@ func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bufferBinID, err := uuid.Parse(req.BufferBinId)
+	bufferBinID, err := uuid.Parse(req.BufferBinID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "buffer_bin_id должен быть UUID")
 		return
@@ -161,14 +161,14 @@ func (h *Handler) ScanStorageBin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	productIDS := make([]uuid.UUID, 0, len(req.ProductIDs))
+	productIDs := make([]uuid.UUID, 0, len(req.ProductIDs))
 	for _, idStr := range req.ProductIDs {
 		id, err := uuid.Parse(idStr)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "product_id должен быть UUID")
 			return
 		}
-		productIDS = append(productIDS, id)
+		productIDs = append(productIDs, id)
 	}
 
 	storageBinID, err := uuid.Parse(req.StorageBinID)
@@ -177,7 +177,7 @@ func (h *Handler) ScanStorageBin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.svc.PlaceProductsToStorageBin(r.Context(), operatorID, productIDS, storageBinID)
+	result, err := h.svc.PlaceProductsToStorageBin(r.Context(), operatorID, productIDs, storageBinID)
 	if err != nil {
 		status, code, message := mapServiceError(err)
 		writeError(w, status, code, message)

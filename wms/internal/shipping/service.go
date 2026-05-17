@@ -25,13 +25,13 @@ type Service struct {
 
 type shippingRepository interface {
 	WithTx(ctx context.Context, fn func(shippingRepository) error) error
-	GetBinWithDestinationByID(ctx context.Context, binID uuid.UUID) (*bufferBinRecord, error)
-	GetBufferBinForUpdate(ctx context.Context, binID uuid.UUID) (*bufferBinRecord, error)
-	ListReadyToShipProductsByBin(ctx context.Context, binID uuid.UUID) ([]readyToShipProduct, error)
-	GetDispatchByCode(ctx context.Context, dispatchCode string) (*dispatchRecord, error)
-	GetDispatchForUpdate(ctx context.Context, dispatchID uuid.UUID) (*dispatchRecord, error)
-	UpdateDispatchToAtGate(ctx context.Context, dispatchCode string) (*dispatchRecord, error)
-	SelectProductsForShip(ctx context.Context, binID uuid.UUID, productIDs []uuid.UUID) ([]productForShip, error)
+	GetBinWithDestinationByID(ctx context.Context, binID uuid.UUID) (*BufferBinRecord, error)
+	GetBufferBinForUpdate(ctx context.Context, binID uuid.UUID) (*BufferBinRecord, error)
+	ListReadyToShipProductsByBin(ctx context.Context, binID uuid.UUID) ([]ReadyToShipProduct, error)
+	GetDispatchByCode(ctx context.Context, dispatchCode string) (*DispatchRecord, error)
+	GetDispatchForUpdate(ctx context.Context, dispatchID uuid.UUID) (*DispatchRecord, error)
+	UpdateDispatchToAtGate(ctx context.Context, dispatchCode string) (*DispatchRecord, error)
+	SelectProductsForShip(ctx context.Context, binID uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error)
 	BatchUpdateProductsShipped(ctx context.Context, productIDs []uuid.UUID) error
 	BatchInsertShippings(ctx context.Context, events []shippingEvent, dispatchID, operatorID uuid.UUID) error
 	BatchInsertShippingOutbox(ctx context.Context, events []shippingEvent, dispatchID uuid.UUID) (int, error)
@@ -221,7 +221,7 @@ func (s *Service) Ship(ctx context.Context, req ShipRequest) (*ShipResponse, err
 	return &resp, nil
 }
 
-func (d *dispatchRecord) toScanDriverResponse() *ScanDriverResponse {
+func (d *DispatchRecord) toScanDriverResponse() *ScanDriverResponse {
 	return &ScanDriverResponse{
 		DispatchID:    d.DispatchID,
 		DispatchCode:  d.DispatchCode,
