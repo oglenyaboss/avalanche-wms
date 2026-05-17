@@ -2,7 +2,7 @@ ledger_adapter_lint:
   extends: .go_lint_install_template
   variables:
     WORKDIR: ledger-adapter
-    GO_IMAGE: golang:1.25-alpine
+    GO_IMAGE: golang:1.25
   rules:
     - changes:
         - ledger-adapter/**/*
@@ -11,7 +11,7 @@ ledger_adapter_test:
   extends: .go_test_template
   variables:
     WORKDIR: ledger-adapter
-    GO_IMAGE: golang:1.25-alpine
+    GO_IMAGE: golang:1.25
   rules:
     - changes:
         - ledger-adapter/**/*
