@@ -5,7 +5,6 @@ front_end_lint:
   rules:
     - changes:
         - frontend/**/*
-        - frontend/**/*
   script:
     - cd frontend
     - npx eslint .

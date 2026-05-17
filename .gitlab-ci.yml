@@ -1,4 +1,5 @@
 include:
+  - local: 'ci/go.yml'
   - local: 'ci/ledger_adapter.yml'
   - local: 'ci/wms.yml'
 
