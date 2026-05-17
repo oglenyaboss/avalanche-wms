@@ -3,7 +3,7 @@ package dispatches
 import "errors"
 
 var (
-	ErrDestinationNotFound = errors.New("DESTINATION_NOT_FOUND ")
+	ErrDestinationNotFound = errors.New("DESTINATION_NOT_FOUND")
 )
 
 type ApiError struct {

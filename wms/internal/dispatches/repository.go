@@ -2,6 +2,7 @@ package dispatches
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -10,102 +11,116 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type dbTX interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 type Repository struct {
 	db *pgxpool.Pool
+	q  dbTX
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
-	return &Repository{db: db}
+	return &Repository{db: db, q: db}
 }
 
-func (r *Repository) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+func (r *Repository) WithTx(ctx context.Context, fn func(dispatchesRepository) error) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return fmt.Errorf("dispatches.Repository.WithTx begin: %w", err)
 	}
 
+	committed := false
 	defer func() {
-		if p := recover(); p != nil {
+		if !committed {
 			_ = tx.Rollback(ctx)
-			panic(p)
 		}
 	}()
 
-	if err := fn(tx); err != nil {
-		_ = tx.Rollback(ctx)
+	if err := fn(&Repository{db: r.db, q: tx}); err != nil {
 		return err
 	}
 
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("dispatches.Repository.WithTx commit: %w", err)
+	}
+
+	committed = true
+	return nil
 }
 
-func (r *Repository) CreateNewDispatch(ctx context.Context, disp *NewDispatchQuery) (domain.OutboundDispatch, error) {
-	var result domain.OutboundDispatch
-	err := r.WithTx(ctx, func(tx pgx.Tx) error {
-		var dispatchCode int
-		err := tx.QueryRow(ctx, `select count(*) from wms_inventory.outbound_dispatches where created_at >= NOW()::DATE`).Scan(&dispatchCode)
-		if err != nil {
-			return err
-		}
-		dispCode := time.Now().Format("2006-0102")
-		dispCode += "-"
-		q := strconv.Itoa(dispatchCode + 1)
-		for len(q) < 3 {
-			q = "0" + q
-		}
-		dispCode += q
-		err = tx.QueryRow(ctx, `
-	    INSERT INTO wms_inventory.outbound_dispatches
-	        (dispatch_id, destination_id, warehouse_id, vehicle_number,
-	         driver_name, driver_phone, scheduled_at, dispatch_code)
-	    SELECT
-	        gen_random_uuid(),
-	        $1,
-	        d.warehouse_id,
-	        $2,
-	        $3,
-	        $4,
-	        $5,
-			$6
-	    FROM wms_inventory.destinations d
-	    WHERE d.destination_id = $1
-		FOR UPDATE
-	    RETURNING *
-	`, disp.DestinationID, disp.VehicleNumber, disp.DriverName, disp.DriverPhone, disp.ScheduledAt, dispCode).Scan(
-			&result.DispatchID,
-			&result.DispatchCode,
-			&result.WarehouseID,
-			&result.DestinationID,
-			&result.VehicleNumber,
-			&result.DriverName,
-			&result.DriverPhone,
-			&result.Status,
-			&result.ScheduledAt,
-			&result.ArrivedAt,
-			&result.DepartedAt,
-			&result.CreatedAt,
-			&result.UpdatedAt,
-		)
-		if err != nil {
-			return err
-		}
-		return nil
-	})
+func (r *Repository) GetActualDispatchCode(ctx context.Context) (int, error) {
+	var count int
+	err := r.q.QueryRow(ctx, `select count(*) from wms_inventory.outbound_dispatches where created_at >= NOW()::DATE`).Scan(&count)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		return -1, err
+	}
+	return count, nil
+}
+
+func (r *Repository) CreateDispatchCode(ctx context.Context) (string, error) {
+	count, err := r.GetActualDispatchCode(ctx)
+	if err != nil {
+		return "", err
+	}
+	seq := strconv.Itoa(count + 1)
+	for len(seq) < 3 {
+		seq = "0" + seq
+	}
+	return "DSP-" + time.Now().Format("2006-0102") + "-" + seq, nil
+}
+
+func (r *Repository) CreateNewDispatch(ctx context.Context, disp *NewDispatchQuery, dispCode string) (domain.OutboundDispatch, error) {
+	var result domain.OutboundDispatch
+	err := r.q.QueryRow(ctx, `
+    INSERT INTO wms_inventory.outbound_dispatches
+        (dispatch_id, destination_id, warehouse_id, vehicle_number,
+         driver_name, driver_phone, scheduled_at, dispatch_code)
+    SELECT
+        gen_random_uuid(),
+        $1,
+        d.warehouse_id,
+        $2,
+        $3,
+        $4,
+        $5,
+		$6
+    FROM wms_inventory.destinations d
+    WHERE d.destination_id = $1
+    RETURNING *
+`, disp.DestinationID, disp.VehicleNumber, disp.DriverName, disp.DriverPhone, disp.ScheduledAt, dispCode).Scan(
+		&result.DispatchID,
+		&result.DispatchCode,
+		&result.WarehouseID,
+		&result.DestinationID,
+		&result.VehicleNumber,
+		&result.DriverName,
+		&result.DriverPhone,
+		&result.Status,
+		&result.ScheduledAt,
+		&result.ArrivedAt,
+		&result.DepartedAt,
+		&result.CreatedAt,
+		&result.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.OutboundDispatch{}, ErrDestinationNotFound
 		}
-		return domain.OutboundDispatch{}, err
+		return domain.OutboundDispatch{}, fmt.Errorf("dispatches.Repository.CreateNewDispatch: %w", err)
 	}
 	return result, nil
 }
 
 func (r *Repository) GetDispatchByID(ctx context.Context, dispID uuid.UUID) (domain.OutboundDispatch, error) {
 	var result domain.OutboundDispatch
-	err := r.db.QueryRow(ctx, `select dispatch_id,dispatch_code,warehouse_id,destination_id,vehicle_number,driver_name,driver_phone,status,scheduled_at,arrived_at,departed_at,created_at,updated_at from wms_inventory.outbound_dispatches where dispatch_id = $1`, dispID).Scan(
+	err := r.q.QueryRow(ctx, `select dispatch_id,dispatch_code,warehouse_id,destination_id,vehicle_number,driver_name,driver_phone,status,scheduled_at,arrived_at,departed_at,created_at,updated_at from wms_inventory.outbound_dispatches where dispatch_id = $1`, dispID).Scan(
 		&result.DispatchID,
 		&result.DispatchCode,
 		&result.WarehouseID,
@@ -133,7 +148,7 @@ func (r *Repository) GetDispatchesByFilter(ctx context.Context, filter DispatchF
         FROM wms_inventory.outbound_dispatches
         WHERE 1=1`
 	argcount := 1
-	args := []interface{}{}
+	args := []any{}
 	if filter.Status != nil {
 		query += fmt.Sprintf(" AND status=$%d", argcount)
 		args = append(args, filter.Status)
@@ -149,7 +164,7 @@ func (r *Repository) GetDispatchesByFilter(ctx context.Context, filter DispatchF
 		args = append(args, filter.WarehouseID)
 	}
 	query += " order by scheduled_at ASC"
-	rows, err := r.db.Query(ctx, query, args...)
+	rows, err := r.q.Query(ctx, query, args...)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to query dispatches: %w", err)
