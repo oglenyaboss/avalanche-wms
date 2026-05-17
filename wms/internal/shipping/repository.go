@@ -51,14 +51,14 @@ func (r *Repository) WithTx(ctx context.Context, fn func(shippingRepository) err
 	return nil
 }
 
-func (r *Repository) GetBinWithDestinationByID(ctx context.Context, binID uuid.UUID) (*bufferBinRecord, error) {
+func (r *Repository) GetBinWithDestinationByID(ctx context.Context, binID uuid.UUID) (*BufferBinRecord, error) {
 	const query = `
 		SELECT b.bin_id, b.code, b.section, d.destination_id, d.code, d.name
 		FROM wms_inventory.bins b
 		LEFT JOIN wms_inventory.destinations d ON d.destination_id = b.destination_id
 		WHERE b.bin_id = $1`
 
-	var bin bufferBinRecord
+	var bin BufferBinRecord
 	err := r.q.QueryRow(ctx, query, binID).Scan(
 		&bin.BinID,
 		&bin.Code,
@@ -77,7 +77,7 @@ func (r *Repository) GetBinWithDestinationByID(ctx context.Context, binID uuid.U
 	return &bin, nil
 }
 
-func (r *Repository) GetBufferBinForUpdate(ctx context.Context, binID uuid.UUID) (*bufferBinRecord, error) {
+func (r *Repository) GetBufferBinForUpdate(ctx context.Context, binID uuid.UUID) (*BufferBinRecord, error) {
 	const query = `
 		SELECT b.bin_id, b.code, b.section, d.destination_id, d.code, d.name
 		FROM wms_inventory.bins b
@@ -85,7 +85,7 @@ func (r *Repository) GetBufferBinForUpdate(ctx context.Context, binID uuid.UUID)
 		WHERE b.bin_id = $1
 		FOR UPDATE OF b`
 
-	var bin bufferBinRecord
+	var bin BufferBinRecord
 	err := r.q.QueryRow(ctx, query, binID).Scan(
 		&bin.BinID,
 		&bin.Code,
@@ -104,7 +104,7 @@ func (r *Repository) GetBufferBinForUpdate(ctx context.Context, binID uuid.UUID)
 	return &bin, nil
 }
 
-func (r *Repository) ListReadyToShipProductsByBin(ctx context.Context, binID uuid.UUID) ([]readyToShipProduct, error) {
+func (r *Repository) ListReadyToShipProductsByBin(ctx context.Context, binID uuid.UUID) ([]ReadyToShipProduct, error) {
 	const query = `
 		SELECT p.product_id, p.qr_code, s.name, o.external_order_no
 		FROM wms_inventory.products p
@@ -119,9 +119,9 @@ func (r *Repository) ListReadyToShipProductsByBin(ctx context.Context, binID uui
 	}
 	defer rows.Close()
 
-	products := make([]readyToShipProduct, 0)
+	products := make([]ReadyToShipProduct, 0)
 	for rows.Next() {
-		var p readyToShipProduct
+		var p ReadyToShipProduct
 		if err := rows.Scan(&p.ProductID, &p.QRCode, &p.SKUName, &p.OrderExternalNo); err != nil {
 			return nil, fmt.Errorf("shipping.Repository.ListReadyToShipProductsByBin scan: %w", err)
 		}
@@ -134,7 +134,7 @@ func (r *Repository) ListReadyToShipProductsByBin(ctx context.Context, binID uui
 	return products, nil
 }
 
-func (r *Repository) GetDispatchByCode(ctx context.Context, dispatchCode string) (*dispatchRecord, error) {
+func (r *Repository) GetDispatchByCode(ctx context.Context, dispatchCode string) (*DispatchRecord, error) {
 	const query = `
 		SELECT d.dispatch_id, d.dispatch_code, d.destination_id, dest.code, dest.name,
 		       d.vehicle_number, d.driver_name, d.driver_phone, d.status, d.arrived_at
@@ -153,7 +153,7 @@ func (r *Repository) GetDispatchByCode(ctx context.Context, dispatchCode string)
 	return dispatch, nil
 }
 
-func (r *Repository) GetDispatchForUpdate(ctx context.Context, dispatchID uuid.UUID) (*dispatchRecord, error) {
+func (r *Repository) GetDispatchForUpdate(ctx context.Context, dispatchID uuid.UUID) (*DispatchRecord, error) {
 	const query = `
 		SELECT d.dispatch_id, d.dispatch_code, d.destination_id, dest.code, dest.name,
 		       d.vehicle_number, d.driver_name, d.driver_phone, d.status, d.arrived_at
@@ -173,7 +173,7 @@ func (r *Repository) GetDispatchForUpdate(ctx context.Context, dispatchID uuid.U
 	return dispatch, nil
 }
 
-func (r *Repository) UpdateDispatchToAtGate(ctx context.Context, dispatchCode string) (*dispatchRecord, error) {
+func (r *Repository) UpdateDispatchToAtGate(ctx context.Context, dispatchCode string) (*DispatchRecord, error) {
 	const query = `
 		UPDATE wms_inventory.outbound_dispatches d
 		SET status = 'AT_GATE', arrived_at = NOW(), updated_at = NOW()
@@ -195,8 +195,8 @@ func (r *Repository) UpdateDispatchToAtGate(ctx context.Context, dispatchCode st
 	return dispatch, nil
 }
 
-func (r *Repository) scanDispatch(ctx context.Context, query string, args ...any) (*dispatchRecord, error) {
-	var dispatch dispatchRecord
+func (r *Repository) scanDispatch(ctx context.Context, query string, args ...any) (*DispatchRecord, error) {
+	var dispatch DispatchRecord
 	err := r.q.QueryRow(ctx, query, args...).Scan(
 		&dispatch.DispatchID,
 		&dispatch.DispatchCode,
@@ -220,7 +220,7 @@ func (r *Repository) SelectProductsForShip(
 	ctx context.Context,
 	binID uuid.UUID,
 	productIDs []uuid.UUID,
-) ([]productForShip, error) {
+) ([]ProductForShip, error) {
 	query := `
 		SELECT product_id, order_id
 		FROM wms_inventory.products
@@ -238,9 +238,9 @@ func (r *Repository) SelectProductsForShip(
 	}
 	defer rows.Close()
 
-	products := make([]productForShip, 0)
+	products := make([]ProductForShip, 0)
 	for rows.Next() {
-		var p productForShip
+		var p ProductForShip
 		if err := rows.Scan(&p.ProductID, &p.OrderID); err != nil {
 			return nil, fmt.Errorf("shipping.Repository.SelectProductsForShip scan: %w", err)
 		}

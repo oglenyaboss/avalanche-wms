@@ -12,24 +12,24 @@ import (
 )
 
 type mockShippingRepo struct {
-	bin    *bufferBinRecord
+	bin    *BufferBinRecord
 	binErr error
 
-	products    []readyToShipProduct
+	products    []ReadyToShipProduct
 	productsErr error
 
-	dispatch    *dispatchRecord
+	dispatch    *DispatchRecord
 	dispatchErr error
 
 	// updatedDispatch/updateDispatchErr задают результат conditional UPDATE SCHEDULED -> AT_GATE.
 	// Если updatedDispatch nil, mock имитирует отсутствие RETURNING-строки после UPDATE.
-	updatedDispatch   *dispatchRecord
+	updatedDispatch   *DispatchRecord
 	updateDispatchErr error
 
 	// updateCalls считает, сколько раз service попытался выполнить conditional UPDATE.
 	updateCalls int
 
-	shipProducts    []productForShip
+	shipProducts    []ProductForShip
 	shipProductsErr error
 
 	ordersCompleted int
@@ -57,35 +57,35 @@ func (m *mockShippingRepo) WithTx(_ context.Context, fn func(shippingRepository)
 	return fn(m)
 }
 
-func (m *mockShippingRepo) GetBinWithDestinationByID(_ context.Context, _ uuid.UUID) (*bufferBinRecord, error) {
+func (m *mockShippingRepo) GetBinWithDestinationByID(_ context.Context, _ uuid.UUID) (*BufferBinRecord, error) {
 	if m.binErr != nil {
 		return nil, m.binErr
 	}
 	return m.bin, nil
 }
 
-func (m *mockShippingRepo) GetBufferBinForUpdate(_ context.Context, _ uuid.UUID) (*bufferBinRecord, error) {
+func (m *mockShippingRepo) GetBufferBinForUpdate(_ context.Context, _ uuid.UUID) (*BufferBinRecord, error) {
 	if m.binErr != nil {
 		return nil, m.binErr
 	}
 	return m.bin, nil
 }
 
-func (m *mockShippingRepo) ListReadyToShipProductsByBin(_ context.Context, _ uuid.UUID) ([]readyToShipProduct, error) {
+func (m *mockShippingRepo) ListReadyToShipProductsByBin(_ context.Context, _ uuid.UUID) ([]ReadyToShipProduct, error) {
 	if m.productsErr != nil {
 		return nil, m.productsErr
 	}
 	return m.products, nil
 }
 
-func (m *mockShippingRepo) GetDispatchByCode(_ context.Context, _ string) (*dispatchRecord, error) {
+func (m *mockShippingRepo) GetDispatchByCode(_ context.Context, _ string) (*DispatchRecord, error) {
 	if m.dispatchErr != nil {
 		return nil, m.dispatchErr
 	}
 	return m.dispatch, nil
 }
 
-func (m *mockShippingRepo) GetDispatchForUpdate(_ context.Context, _ uuid.UUID) (*dispatchRecord, error) {
+func (m *mockShippingRepo) GetDispatchForUpdate(_ context.Context, _ uuid.UUID) (*DispatchRecord, error) {
 	if m.dispatchErr != nil {
 		return nil, m.dispatchErr
 	}
@@ -93,7 +93,7 @@ func (m *mockShippingRepo) GetDispatchForUpdate(_ context.Context, _ uuid.UUID) 
 }
 
 // UpdateDispatchToAtGate имитирует conditional UPDATE SCHEDULED -> AT_GATE с возвратом обновлённой строки.
-func (m *mockShippingRepo) UpdateDispatchToAtGate(_ context.Context, _ string) (*dispatchRecord, error) {
+func (m *mockShippingRepo) UpdateDispatchToAtGate(_ context.Context, _ string) (*DispatchRecord, error) {
 	m.updateCalls++
 	if m.updateDispatchErr != nil {
 		return nil, m.updateDispatchErr
@@ -108,7 +108,7 @@ func (m *mockShippingRepo) SelectProductsForShip(
 	_ context.Context,
 	_ uuid.UUID,
 	productIDs []uuid.UUID,
-) ([]productForShip, error) {
+) ([]ProductForShip, error) {
 	m.selectedSpotProducts = append([]uuid.UUID(nil), productIDs...)
 	if m.shipProductsErr != nil {
 		return nil, m.shipProductsErr
@@ -177,7 +177,7 @@ func TestScanBufferSuccess(t *testing.T) {
 	orderExternalNo := "ORD-1001"
 
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			BinID:           bufferBinID,
 			Code:            "BIN-SHIP-5",
 			Section:         &section,
@@ -185,7 +185,7 @@ func TestScanBufferSuccess(t *testing.T) {
 			DestinationCode: &destCode,
 			DestinationName: &destName,
 		},
-		products: []readyToShipProduct{
+		products: []ReadyToShipProduct{
 			{
 				ProductID:       uuid.New(),
 				QRCode:          "QR-001",
@@ -226,7 +226,7 @@ func TestScanBufferEmpty(t *testing.T) {
 	destName := "Магазин Петровка"
 
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			BinID:           bufferBinID,
 			Code:            "BIN-SHIP-5",
 			Section:         &section,
@@ -234,7 +234,7 @@ func TestScanBufferEmpty(t *testing.T) {
 			DestinationCode: &destCode,
 			DestinationName: &destName,
 		},
-		products: []readyToShipProduct{},
+		products: []ReadyToShipProduct{},
 	}
 
 	result, err := NewService(repo).ScanBuffer(context.Background(), operatorID, bufferBinID)
@@ -263,7 +263,7 @@ func TestScanBufferBinNotFound(t *testing.T) {
 func TestScanBufferWrongSection(t *testing.T) {
 	section := "A"
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			BinID:   uuid.New(),
 			Code:    "A-01",
 			Section: &section,
@@ -284,12 +284,12 @@ func TestScanDriverSuccess(t *testing.T) {
 	arrivedAt := time.Now().UTC()
 
 	repo := &mockShippingRepo{
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DispatchID:   dispatchID,
 			DispatchCode: "DSP-001",
 			Status:       domain.OutboundDispatchStatusScheduled,
 		},
-		updatedDispatch: &dispatchRecord{
+		updatedDispatch: &DispatchRecord{
 			DispatchID:      dispatchID,
 			DispatchCode:    "DSP-001",
 			DestinationID:   destinationID,
@@ -330,7 +330,7 @@ func TestScanDriverNotFound(t *testing.T) {
 // TestScanDriverAlreadyDeparted проверяет запрет повторного сканирования уже уехавшего рейса.
 func TestScanDriverAlreadyDeparted(t *testing.T) {
 	repo := &mockShippingRepo{
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DispatchID:   uuid.New(),
 			DispatchCode: "DSP-001",
 			Status:       domain.OutboundDispatchStatusDeparted,
@@ -349,7 +349,7 @@ func TestScanDriverAlreadyDeparted(t *testing.T) {
 // TestScanDriverCancelled проверяет ошибку при сканировании отменённого рейса.
 func TestScanDriverCancelled(t *testing.T) {
 	repo := &mockShippingRepo{
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DispatchID:   uuid.New(),
 			DispatchCode: "DSP-001",
 			Status:       domain.OutboundDispatchStatusCancelled,
@@ -373,7 +373,7 @@ func TestScanDriverIdempotentAtGate(t *testing.T) {
 	arrivedAt := time.Now().UTC()
 
 	repo := &mockShippingRepo{
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DispatchID:      dispatchID,
 			DispatchCode:    "DSP-001",
 			DestinationID:   destinationID,
@@ -416,17 +416,17 @@ func TestShipBulkSuccess(t *testing.T) {
 	product2 := uuid.New()
 
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			BinID:         bufferBinID,
 			Section:       &section,
 			DestinationID: &destinationID,
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DispatchID:    dispatchID,
 			DestinationID: destinationID,
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
-		shipProducts: []productForShip{
+		shipProducts: []ProductForShip{
 			{ProductID: product1, OrderID: &orderID},
 			{ProductID: product2, OrderID: &orderID},
 		},
@@ -471,17 +471,17 @@ func TestShipSpotSuccess(t *testing.T) {
 	productID := uuid.New()
 
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			BinID:         bufferBinID,
 			Section:       &section,
 			DestinationID: &destinationID,
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DispatchID:    dispatchID,
 			DestinationID: destinationID,
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
-		shipProducts:    []productForShip{{ProductID: productID}},
+		shipProducts:    []ProductForShip{{ProductID: productID}},
 		bufferRemaining: 3,
 	}
 
@@ -511,11 +511,11 @@ func TestShipSpotSuccess(t *testing.T) {
 func TestShipDestinationMismatch(t *testing.T) {
 	section := binSectionShippingBuffer
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			Section:       &section,
 			DestinationID: uuidPtr(uuid.New()),
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DestinationID: uuid.New(),
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
@@ -539,11 +539,11 @@ func TestShipDispatchNotAtGate(t *testing.T) {
 	destinationID := uuid.New()
 	section := binSectionShippingBuffer
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			Section:       &section,
 			DestinationID: &destinationID,
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DestinationID: destinationID,
 			Status:        domain.OutboundDispatchStatusScheduled,
 		},
@@ -564,15 +564,15 @@ func TestShipBulkBufferEmpty(t *testing.T) {
 	destinationID := uuid.New()
 	section := binSectionShippingBuffer
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			Section:       &section,
 			DestinationID: &destinationID,
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DestinationID: destinationID,
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
-		shipProducts: []productForShip{},
+		shipProducts: []ProductForShip{},
 	}
 
 	_, err := NewService(repo).Ship(context.Background(), ShipRequest{
@@ -592,15 +592,15 @@ func TestShipSpotProductNotInBuffer(t *testing.T) {
 	product1 := uuid.New()
 	product2 := uuid.New()
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			Section:       &section,
 			DestinationID: &destinationID,
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DestinationID: destinationID,
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
-		shipProducts: []productForShip{{ProductID: product1}},
+		shipProducts: []ProductForShip{{ProductID: product1}},
 	}
 
 	_, err := NewService(repo).Ship(context.Background(), ShipRequest{
@@ -625,17 +625,17 @@ func TestShipPartialOrderKeepsOrderOpen(t *testing.T) {
 	productID := uuid.New()
 
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			BinID:         bufferBinID,
 			Section:       &section,
 			DestinationID: &destinationID,
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DispatchID:    dispatchID,
 			DestinationID: destinationID,
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
-		shipProducts: []productForShip{{ProductID: productID, OrderID: &orderID}},
+		shipProducts: []ProductForShip{{ProductID: productID, OrderID: &orderID}},
 		// Repository returns 0 when the order still has non-SHIPPED products.
 		ordersCompleted: 0,
 		bufferRemaining: 0,
@@ -665,15 +665,15 @@ func TestShipDispatchDepartedWhenBufferEmpty(t *testing.T) {
 	destinationID := uuid.New()
 	section := binSectionShippingBuffer
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			Section:       &section,
 			DestinationID: &destinationID,
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DestinationID: destinationID,
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
-		shipProducts:    []productForShip{{ProductID: uuid.New()}},
+		shipProducts:    []ProductForShip{{ProductID: uuid.New()}},
 		bufferRemaining: 0,
 	}
 
@@ -695,15 +695,15 @@ func TestShipDispatchNotDepartedWhenBufferHasRemainingProducts(t *testing.T) {
 	destinationID := uuid.New()
 	section := binSectionShippingBuffer
 	repo := &mockShippingRepo{
-		bin: &bufferBinRecord{
+		bin: &BufferBinRecord{
 			Section:       &section,
 			DestinationID: &destinationID,
 		},
-		dispatch: &dispatchRecord{
+		dispatch: &DispatchRecord{
 			DestinationID: destinationID,
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
-		shipProducts:    []productForShip{{ProductID: uuid.New()}},
+		shipProducts:    []ProductForShip{{ProductID: uuid.New()}},
 		bufferRemaining: 1,
 	}
 

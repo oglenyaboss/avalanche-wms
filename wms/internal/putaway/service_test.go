@@ -164,8 +164,8 @@ func TestGetBufferProductsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.BufferBinId != bufferBinID.String() {
-		t.Fatalf("expected BufferBinId %s, got %s", bufferBinID.String(), result.BufferBinId)
+	if result.BufferBinID != bufferBinID.String() {
+		t.Fatalf("expected BufferBinID %s, got %s", bufferBinID.String(), result.BufferBinID)
 	}
 	if result.BufferCode != "T1-BUF" {
 		t.Fatalf("expected BufferCode T1-BUF, got %s", result.BufferCode)

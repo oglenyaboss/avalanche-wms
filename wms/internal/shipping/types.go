@@ -78,7 +78,7 @@ type ScanDriverResponse struct {
 	ArrivedAt     *time.Time                    `json:"arrived_at"`
 }
 
-type bufferBinRecord struct {
+type BufferBinRecord struct {
 	BinID           uuid.UUID
 	Code            string
 	Section         *string
@@ -87,14 +87,14 @@ type bufferBinRecord struct {
 	DestinationName *string
 }
 
-type readyToShipProduct struct {
+type ReadyToShipProduct struct {
 	ProductID       uuid.UUID
 	QRCode          string
 	SKUName         string
 	OrderExternalNo *string
 }
 
-type productForShip struct {
+type ProductForShip struct {
 	ProductID uuid.UUID
 	OrderID   *uuid.UUID
 }
@@ -104,7 +104,7 @@ type shippingEvent struct {
 	ProductID uuid.UUID
 }
 
-type dispatchRecord struct {
+type DispatchRecord struct {
 	DispatchID      uuid.UUID
 	DispatchCode    string
 	DestinationID   uuid.UUID

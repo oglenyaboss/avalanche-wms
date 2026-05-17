@@ -123,8 +123,8 @@ func cloneShipment(shipment *domain.InboundShipment) *domain.InboundShipment {
 		return nil
 	}
 
-	copy := *shipment
-	return &copy
+	dup := *shipment
+	return &dup
 }
 
 func cloneCargoplace(cp *domain.Cargoplace) *domain.Cargoplace {
@@ -132,8 +132,8 @@ func cloneCargoplace(cp *domain.Cargoplace) *domain.Cargoplace {
 		return nil
 	}
 
-	copy := *cp
-	return &copy
+	dup := *cp
+	return &dup
 }
 
 func cloneBox(box *domain.Box) *domain.Box {
@@ -141,8 +141,8 @@ func cloneBox(box *domain.Box) *domain.Box {
 		return nil
 	}
 
-	copy := *box
-	return &copy
+	dup := *box
+	return &dup
 }
 
 func (m *mockReceivingRepo) GetShipmentByTTN(_ context.Context, _ string) (*domain.InboundShipment, error) {
