@@ -37,6 +37,11 @@ type assemblyRepository interface {
 	GetTasks(ctx context.Context, destinationID, operatorID uuid.UUID, status string) ([]TaskItem, error)
 	AreAllTasksDoneForOrder(ctx context.Context, orderID uuid.UUID) (bool, error)
 	UpdateOrderStatusToAssembled(ctx context.Context, orderID uuid.UUID) error
+	GetShippingBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error)
+	ValidateCartDestination(ctx context.Context, productIDs []uuid.UUID, expectedDestinationID uuid.UUID) error
+	UpdateProductsToReadyToShip(ctx context.Context, productIDs []uuid.UUID, binID uuid.UUID) (int, error)
+	UpdateOrdersToAssembled(ctx context.Context, orderIDs []uuid.UUID) (int, error)
+	GetOrderIDsByProductIDs(ctx context.Context, productIDs []uuid.UUID) ([]uuid.UUID, error)
 }
 
 func NewService(repo assemblyRepository) *Service {
@@ -282,6 +287,83 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 	return &PickResponse{
 		ProductID: productID.String(),
 		CartSize:  cartSize,
+	}, nil
+}
+
+func (s *Service) ScanShippingBuffer(ctx context.Context, operatorID, bufferBinID uuid.UUID) (*ScanShippingBufferResponse, error) {
+	if operatorID == uuid.Nil || bufferBinID == uuid.Nil {
+		return nil, fmt.Errorf("assembly.Service.ScanShippingBuffer: %w", ErrInvalidInput)
+	}
+
+	// Получаем корзину оператора
+	key := operatorID.String()
+	s.mu.RLock()
+	cart := make([]uuid.UUID, len(s.carts[key]))
+	copy(cart, s.carts[key])
+	s.mu.RUnlock()
+
+	if len(cart) == 0 {
+		return nil, ErrCartEmpty
+	}
+
+	var bufferBin *domain.Bin
+	var productsPlaced int
+	var ordersAssembled int
+
+	err := s.repo.WithTx(ctx, func(txRepo assemblyRepository) error {
+		// 1. Проверяем, что ячейка существует и является SHIPPING_BUFFER
+		var err error
+		bufferBin, err = txRepo.GetShippingBufferBinByID(ctx, bufferBinID)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer get bin: %w", err)
+		}
+
+		// 2. Проверяем, что у буфера есть destination_id
+		if bufferBin.DestinationID == nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer: %w", ErrDestinationNotFound)
+		}
+
+		// 3. Валидируем destination всех товаров в корзине
+		if err := txRepo.ValidateCartDestination(ctx, cart, *bufferBin.DestinationID); err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer validate destination: %w", err)
+		}
+
+		// 4. Обновляем товары
+		placed, err := txRepo.UpdateProductsToReadyToShip(ctx, cart, bufferBinID)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer update products: %w", err)
+		}
+		productsPlaced = placed
+
+		// 5. Получаем ID заказов для обновления статуса
+		orderIDs, err := txRepo.GetOrderIDsByProductIDs(ctx, cart)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer get order IDs: %w", err)
+		}
+
+		// 6. Обновляем статусы заказов
+		assembled, err := txRepo.UpdateOrdersToAssembled(ctx, orderIDs)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer update orders: %w", err)
+		}
+		ordersAssembled = assembled
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Очищаем корзину только после успешного COMMIT
+	s.mu.Lock()
+	delete(s.carts, key)
+	s.mu.Unlock()
+
+	return &ScanShippingBufferResponse{
+		BufferBinID:     bufferBin.BinID.String(),
+		ProductsPlaced:  productsPlaced,
+		OrdersAssembled: ordersAssembled,
 	}, nil
 }
 

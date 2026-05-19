@@ -50,6 +50,17 @@ type PickResponse struct {
 	CartSize  int    `json:"cart_size"`
 }
 
+type ScanShippingBufferRequest struct {
+	BufferBinID string `json:"buffer_bin_id"`
+	OperatorID  string `json:"operator_id"`
+}
+
+type ScanShippingBufferResponse struct {
+	BufferBinID     string `json:"buffer_bin_id"`
+	ProductsPlaced  int    `json:"products_placed"`
+	OrdersAssembled int    `json:"orders_assembled"`
+}
+
 // AllocatedProduct — внутренний тип для хранения зарезервированных товаров
 type AllocatedProduct struct {
 	ProductID     uuid.UUID

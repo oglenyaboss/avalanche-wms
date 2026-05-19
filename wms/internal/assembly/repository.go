@@ -436,3 +436,122 @@ func (r *Repository) UpdateOrderStatusToAssembled(ctx context.Context, orderID u
 	}
 	return nil
 }
+
+// GetShippingBufferBinByID возвращает ячейку буфера отгрузки по ID
+func (r *Repository) GetShippingBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error) {
+	const query = `
+		SELECT bin_id, warehouse_id, code, section, volume, destination_id, created_at, updated_at
+		FROM wms_inventory.bins
+		WHERE bin_id = $1 AND section = 'SHIPPING_BUFFER'`
+
+	var bin domain.Bin
+	err := r.q.QueryRow(ctx, query, bufferBinID).Scan(
+		&bin.BinID,
+		&bin.WarehouseID,
+		&bin.Code,
+		&bin.Section,
+		&bin.Volume,
+		&bin.DestinationID,
+		&bin.CreatedAt,
+		&bin.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("assembly.Repository.GetShippingBufferBinByID: %w", ErrBinNotShippingBuffer)
+		}
+		return nil, fmt.Errorf("assembly.Repository.GetShippingBufferBinByID scan: %w", err)
+	}
+	return &bin, nil
+}
+
+// ValidateCartDestination проверяет, что все товары в корзине принадлежат одному destination
+// Возвращает destinationID и ошибку, если есть несоответствие
+func (r *Repository) ValidateCartDestination(ctx context.Context, productIDs []uuid.UUID, expectedDestinationID uuid.UUID) error {
+	if len(productIDs) == 0 {
+		return nil
+	}
+
+	const query = `
+		SELECT COUNT(*)
+		FROM wms_inventory.products p
+		JOIN wms_inventory.orders o ON p.order_id = o.order_id
+		WHERE p.product_id = ANY($1::uuid[]) AND o.destination_id != $2`
+
+	var count int
+	err := r.q.QueryRow(ctx, query, productIDs, expectedDestinationID).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("assembly.Repository.ValidateCartDestination query: %w", err)
+	}
+	if count > 0 {
+		return ErrDestinationMismatch
+	}
+	return nil
+}
+
+// UpdateProductsToReadyToShip обновляет товары в буфере отгрузки
+func (r *Repository) UpdateProductsToReadyToShip(ctx context.Context, productIDs []uuid.UUID, binID uuid.UUID) (int, error) {
+	if len(productIDs) == 0 {
+		return 0, nil
+	}
+
+	const query = `
+		UPDATE wms_inventory.products
+		SET bin_id = $2, status = 'READY_TO_SHIP', updated_at = NOW()
+		WHERE product_id = ANY($1::uuid[]) AND status = 'ASSEMBLED'`
+
+	tag, err := r.q.Exec(ctx, query, productIDs, binID)
+	if err != nil {
+		return 0, fmt.Errorf("assembly.Repository.UpdateProductsToReadyToShip exec: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// UpdateOrdersToAssembled обновляет статусы заказов, у которых все товары в READY_TO_SHIP
+func (r *Repository) UpdateOrdersToAssembled(ctx context.Context, orderIDs []uuid.UUID) (int, error) {
+	if len(orderIDs) == 0 {
+		return 0, nil
+	}
+
+	const query = `
+		UPDATE wms_inventory.orders
+		SET status = $2, updated_at = NOW()
+		WHERE order_id = ANY($1::uuid[])
+		  AND NOT EXISTS (
+			SELECT 1 FROM wms_inventory.products
+			WHERE order_id = orders.order_id AND status != 'READY_TO_SHIP'
+		  )`
+
+	tag, err := r.q.Exec(ctx, query, orderIDs, string(domain.OrderStatusAssembled))
+	if err != nil {
+		return 0, fmt.Errorf("assembly.Repository.UpdateOrdersToAssembled exec: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// GetOrderIDsByProductIDs возвращает уникальные ID заказов для списка товаров
+func (r *Repository) GetOrderIDsByProductIDs(ctx context.Context, productIDs []uuid.UUID) ([]uuid.UUID, error) {
+	if len(productIDs) == 0 {
+		return []uuid.UUID{}, nil
+	}
+
+	const query = `
+		SELECT DISTINCT order_id
+		FROM wms_inventory.products
+		WHERE product_id = ANY($1::uuid[]) AND order_id IS NOT NULL`
+
+	rows, err := r.q.Query(ctx, query, productIDs)
+	if err != nil {
+		return nil, fmt.Errorf("assembly.Repository.GetOrderIDsByProductIDs query: %w", err)
+	}
+	defer rows.Close()
+
+	orderIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var orderID uuid.UUID
+		if err := rows.Scan(&orderID); err != nil {
+			return nil, fmt.Errorf("assembly.Repository.GetOrderIDsByProductIDs scan: %w", err)
+		}
+		orderIDs = append(orderIDs, orderID)
+	}
+	return orderIDs, nil
+}

@@ -26,6 +26,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/allocate", h.Allocate).Methods(http.MethodPost)
 	router.HandleFunc("/tasks", h.GetTasks).Methods(http.MethodGet)
 	router.HandleFunc("/pick", h.Pick).Methods(http.MethodPost)
+	router.HandleFunc("/scan-shipping-buffer", h.ScanShippingBuffer).Methods(http.MethodPost)
 }
 
 // Allocate - ищет новые заказы (NEW) для магазина (destinationID)
@@ -133,6 +134,45 @@ func (h *Handler) Pick(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
+func (h *Handler) ScanShippingBuffer(w http.ResponseWriter, r *http.Request) {
+	authOperatorID, ok := requireOperator(w, r)
+	if !ok {
+		return
+	}
+
+	var req ScanShippingBufferRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
+		return
+	}
+
+	bufferBinID, err := uuid.Parse(req.BufferBinID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "buffer_bin_id не uuid")
+		return
+	}
+
+	operatorID, err := uuid.Parse(req.OperatorID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "operator_id не uuid")
+		return
+	}
+
+	if authOperatorID != operatorID {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "operator_id не соответствует авторизованному пользователю")
+		return
+	}
+
+	result, err := h.svc.ScanShippingBuffer(r.Context(), operatorID, bufferBinID)
+	if err != nil {
+		status, code, message := mapServiceError(err)
+		writeError(w, status, code, message)
+		return
+	}
+
+	writeSuccess(w, http.StatusOK, result)
+}
+
 type envelope struct {
 	Success bool       `json:"success"`
 	Data    any        `json:"data"`
@@ -208,6 +248,12 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "PRODUCT_NOT_ALLOCATED", "Товар не в статусе ALLOCATED"
 	case errors.Is(err, ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
+	case errors.Is(err, ErrBinNotShippingBuffer):
+		return http.StatusBadRequest, "BIN_NOT_SHIPPING_BUFFER", "Ячейка не является буфером отгрузки"
+	case errors.Is(err, ErrCartEmpty):
+		return http.StatusConflict, "CART_EMPTY", "Корзина оператора пуста"
+	case errors.Is(err, ErrDestinationMismatch):
+		return http.StatusConflict, "DESTINATION_MISMATCH", "Товары в корзине принадлежат другому магазину"
 	default:
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"
 	}
