@@ -21,14 +21,7 @@ import (
 	"ledger-adapter/internal/store"
 )
 
-// topics — WMS-topic'и которые слушает адаптер. Маппинг в solidity-методы
-// BatchMappingWMS — в chain.topicToMethod.
-var topics = []string{
-	"wms.receiving.v1",
-	"wms.putaway.v1",
-	"wms.picking.v1",
-	"wms.shipping.v1",
-}
+const eventsTopic = "wms.events.v1"
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -41,9 +34,7 @@ func main() {
 }
 
 // run собирает и запускает pipeline: config → store → chain client →
-// dlq producer → Flusher → N consumer goroutines + health HTTP server.
-// Блокирует до SIGTERM/SIGINT или до падения одного из consumer'ов, потом
-// graceful shutdown (errgroup cancel'ит остальные + HTTP shutdown).
+// dlq producer → Flusher → единственный consumer goroutine + health HTTP server.
 func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -52,6 +43,7 @@ func run(log *slog.Logger) error {
 	log.Info("config loaded",
 		"port", cfg.Port,
 		"kafka_brokers", cfg.KafkaBrokers,
+		"topic", eventsTopic,
 		"contract_addr", cfg.ContractAddr,
 		"batch_size", cfg.BatchSize,
 		"batch_timeout", cfg.BatchTimeout)
@@ -79,31 +71,21 @@ func run(log *slog.Logger) error {
 
 	flusher := consumer.NewFlusher(cli, repo, prod, cfg.ReceiptPollTimeout, log)
 
-	// errgroup: если любой consumer упадёт с ошибкой (не по ctx-cancel'у),
-	// gCtx cancel'ится и остальные тоже остановятся → run() вернёт ошибку
-	// → main() exit 1 → k8s рестартит pod. Без errgroup dead consumer молча
-	// выходил из горутины, остальные работали, pod жил — событие могло зависнуть.
 	g, gCtx := errgroup.WithContext(rootCtx)
-	for _, topic := range topics {
-		t := topic
-		g.Go(func() error {
-			tlog := log.With("topic", t)
-			c := consumer.NewConsumer(brokers, t, cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, tlog)
-			if err := c.Run(gCtx); err != nil && gCtx.Err() == nil {
-				tlog.Error("consumer stopped unexpectedly", "err", err)
-				return err
-			}
-			return nil
-		})
-	}
+	g.Go(func() error {
+		tlog := log.With("topic", eventsTopic)
+		c := consumer.NewConsumer(brokers, eventsTopic, cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, tlog)
+		if err := c.Run(gCtx); err != nil && gCtx.Err() == nil {
+			tlog.Error("consumer stopped unexpectedly", "err", err)
+			return err
+		}
+		return nil
+	})
 
 	srv := startHealthServer(log, cfg.Port)
 
-	// Ждём либо signal → rootCtx отменяется → gCtx отменяется → все consumer'ы
-	// выйдут чисто (g.Wait вернёт nil), либо падение consumer'а → gCtx
-	// отменится изнутри → g.Wait вернёт его error.
 	runErr := g.Wait()
-	log.Info("consumers stopped, shutting down http")
+	log.Info("consumer stopped, shutting down http")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
@@ -114,7 +96,7 @@ func run(log *slog.Logger) error {
 	if runErr != nil {
 		return runErr
 	}
-	log.Info("all consumers drained, bye")
+	log.Info("consumer drained, bye")
 	return nil
 }
 

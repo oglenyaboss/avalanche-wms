@@ -23,17 +23,23 @@ import (
 
 type stubChain struct {
 	mu          sync.Mutex
-	calls       []string
+	calls       []string // aggregate_type записи
 	callErr     error
+	callErrFor  map[string]error // per-aggregate error
 	receipt     *types.Receipt
 	receiptErr  error
-	receiptWait int // сколько раз возвращать NotFound до успеха
+	receiptWait int
 }
 
-func (s *stubChain) BatchCall(_ context.Context, topic string, _, _ []*big.Int) (common.Hash, error) {
+func (s *stubChain) BatchCall(_ context.Context, aggregateType string, _, _ []*big.Int) (common.Hash, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls = append(s.calls, topic)
+	s.calls = append(s.calls, aggregateType)
+	if s.callErrFor != nil {
+		if err, ok := s.callErrFor[aggregateType]; ok {
+			return common.Hash{}, err
+		}
+	}
 	if s.callErr != nil {
 		return common.Hash{}, s.callErr
 	}
@@ -56,7 +62,7 @@ func (s *stubChain) TransactionReceipt(_ context.Context, _ common.Hash) (*types
 type stubStore struct {
 	mu        sync.Mutex
 	exists    map[uuid.UUID]bool
-	statuses  map[uuid.UUID]string // "PENDING"/"SENT"/"COMMITTED"/"FAILED"
+	statuses  map[uuid.UUID]string
 	inserted  map[uuid.UUID]string
 	sent      map[uuid.UUID]string
 	committed map[uuid.UUID]bool
@@ -96,7 +102,6 @@ func (s *stubStore) Status(_ context.Context, id uuid.UUID) (string, error) {
 	if st, ok := s.statuses[id]; ok {
 		return st, nil
 	}
-	// Дефолт для existing row без явного статуса — PENDING (retry-able).
 	return "PENDING", nil
 }
 
@@ -173,15 +178,15 @@ func newFlusherT() (*Flusher, *stubChain, *stubStore, *stubDLQ) {
 	return f, ch, st, dq
 }
 
-func makeMessages(n int, topic, aggType string) []*Message {
+func makeMessages(n int, aggType string) []*Message {
 	msgs := make([]*Message, n)
 	for i := range msgs {
 		msgs[i] = &Message{
 			EventID:       uuid.New(),
 			ProductID:     uuid.New(),
 			AggregateType: aggType,
-			Topic:         topic,
-			KafkaMsg:      kafka.Message{Topic: topic},
+			Topic:         "wms.events.v1",
+			KafkaMsg:      kafka.Message{Topic: "wms.events.v1"},
 		}
 	}
 	return msgs
@@ -191,13 +196,13 @@ func makeMessages(n int, topic, aggType string) []*Message {
 
 func TestFlusher_HappyPath(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
-	msgs := makeMessages(3, "wms.receiving.v1", "receiving")
+	msgs := makeMessages(3, "receiving")
 
-	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if len(ch.calls) != 1 || ch.calls[0] != "wms.receiving.v1" {
-		t.Errorf("expected 1 BatchCall to wms.receiving.v1, got %v", ch.calls)
+	if len(ch.calls) != 1 || ch.calls[0] != "receiving" {
+		t.Errorf("expected 1 BatchCall to receiving, got %v", ch.calls)
 	}
 	if len(st.committed) != 3 {
 		t.Errorf("expected 3 committed, got %d", len(st.committed))
@@ -212,14 +217,13 @@ func TestFlusher_HappyPath(t *testing.T) {
 
 func TestFlusher_Idempotency_SkipsAllExisting(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
-	msgs := makeMessages(2, "wms.receiving.v1", "receiving")
-	// Пометим как existing + COMMITTED — terminal статус, должны скипнуться.
+	msgs := makeMessages(2, "receiving")
 	for _, m := range msgs {
 		st.exists[m.EventID] = true
 		st.statuses[m.EventID] = "COMMITTED"
 	}
 
-	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if len(ch.calls) != 0 {
@@ -233,9 +237,9 @@ func TestFlusher_Idempotency_SkipsAllExisting(t *testing.T) {
 func TestFlusher_ChainCallFails_GoesToDLQ(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted: Duplicate eventId")
-	msgs := makeMessages(2, "wms.putaway.v1", "putaway")
+	msgs := makeMessages(2, "putaway")
 
-	if err := f.Flush(context.Background(), "wms.putaway.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("chain revert should NOT return error (offsets must commit): %v", err)
 	}
 	if len(st.failed) != 2 {
@@ -251,10 +255,10 @@ func TestFlusher_ChainCallFails_GoesToDLQ(t *testing.T) {
 
 func TestFlusher_ReceiptStatusZero_GoesToDLQ(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
-	ch.receipt = &types.Receipt{Status: 0} // reverted on-chain
-	msgs := makeMessages(1, "wms.picking.v1", "picking")
+	ch.receipt = &types.Receipt{Status: 0}
+	msgs := makeMessages(1, "picking")
 
-	if err := f.Flush(context.Background(), "wms.picking.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("revert should NOT return error: %v", err)
 	}
 	if len(st.failed) != 1 {
@@ -268,9 +272,9 @@ func TestFlusher_ReceiptStatusZero_GoesToDLQ(t *testing.T) {
 func TestFlusher_StoreExistsError_ReturnsTransient(t *testing.T) {
 	f, _, st, _ := newFlusherT()
 	st.existsErr = errors.New("connection refused")
-	msgs := makeMessages(1, "wms.receiving.v1", "receiving")
+	msgs := makeMessages(1, "receiving")
 
-	err := f.Flush(context.Background(), "wms.receiving.v1", msgs)
+	err := f.Flush(context.Background(), msgs)
 	if err == nil {
 		t.Fatal("store error should propagate (transient, retry)")
 	}
@@ -278,7 +282,7 @@ func TestFlusher_StoreExistsError_ReturnsTransient(t *testing.T) {
 
 func TestFlusher_EmptyBatch_NoOp(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
-	if err := f.Flush(context.Background(), "wms.receiving.v1", nil); err != nil {
+	if err := f.Flush(context.Background(), nil); err != nil {
 		t.Fatalf("empty batch: %v", err)
 	}
 	if len(ch.calls) != 0 || len(st.inserted) != 0 {
@@ -288,14 +292,13 @@ func TestFlusher_EmptyBatch_NoOp(t *testing.T) {
 
 func TestFlusher_PartialDuplicates_ProcessesOnlyNew(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
-	msgs := makeMessages(3, "wms.shipping.v1", "shipping")
-	// Первые 2 уже existing в terminal COMMITTED — скипнутся.
+	msgs := makeMessages(3, "shipping")
 	st.exists[msgs[0].EventID] = true
 	st.statuses[msgs[0].EventID] = "COMMITTED"
 	st.exists[msgs[1].EventID] = true
 	st.statuses[msgs[1].EventID] = "COMMITTED"
 
-	if err := f.Flush(context.Background(), "wms.shipping.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if len(ch.calls) != 1 {
@@ -307,20 +310,15 @@ func TestFlusher_PartialDuplicates_ProcessesOnlyNew(t *testing.T) {
 }
 
 func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
-	// Когда chain revert'ит И DLQ down — Flush должен вернуть error, чтобы
-	// offsets не закоммитились. После reorder (DLQ first) MarkFailed НЕ
-	// вызывается при DLQ-сбое — short-circuit on error. Retry на next tick.
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted")
 	dq.publishErr = errors.New("kafka broker down")
-	msgs := makeMessages(2, "wms.putaway.v1", "putaway")
+	msgs := makeMessages(2, "putaway")
 
-	err := f.Flush(context.Background(), "wms.putaway.v1", msgs)
+	err := f.Flush(context.Background(), msgs)
 	if err == nil {
 		t.Fatal("DLQ publish fail should propagate (transient, block offset commit)")
 	}
-	// После reorder: DLQ вызывается первым, short-circuit — MarkFailed не должен
-	// был выполниться.
 	if len(st.failed) != 0 {
 		t.Errorf("MarkFailed should NOT run when DLQ fails (reordered), got %d", len(st.failed))
 	}
@@ -330,21 +328,15 @@ func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
 }
 
 func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) {
-	// После reorder: DLQ publish happens first. Если затем MarkFailed падает —
-	// Flush возвращает error (offsets не коммитятся), DLQ-запись уже есть,
-	// row остаётся PENDING. На retry DLQ опубликуется повторно (дубликат в
-	// DLQ-topic приемлем, consumer там должен быть idempotent), MarkFailed
-	// снова попытается и в итоге пройдёт.
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted")
 	st.failedErr = errors.New("db connection refused")
-	msgs := makeMessages(1, "wms.picking.v1", "picking")
+	msgs := makeMessages(1, "picking")
 
-	err := f.Flush(context.Background(), "wms.picking.v1", msgs)
+	err := f.Flush(context.Background(), msgs)
 	if err == nil {
 		t.Fatal("MarkFailed fail should propagate (transient, block offset commit)")
 	}
-	// DLQ был первым, он успел отработать до того как упал MarkFailed.
 	if len(dq.messages) != 1 {
 		t.Errorf("DLQ should publish before MarkFailed (reordered), got %d", len(dq.messages))
 	}
@@ -354,15 +346,12 @@ func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) 
 }
 
 func TestFlusher_StrandedPending_GetsRetried(t *testing.T) {
-	// Row залип в PENDING (MarkSent упал в прошлом tick). Сейчас Exists=true,
-	// Status=PENDING — не terminal → прогоняем через chain снова. InsertPending
-	// не вызывается (NULL-op из-за уже существующей записи), MarkSent проходит.
 	f, ch, st, _ := newFlusherT()
-	msgs := makeMessages(1, "wms.receiving.v1", "receiving")
+	msgs := makeMessages(1, "receiving")
 	st.exists[msgs[0].EventID] = true
 	st.statuses[msgs[0].EventID] = "PENDING"
 
-	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("retry of stranded PENDING should succeed, got: %v", err)
 	}
 	if len(ch.calls) != 1 {
@@ -371,21 +360,18 @@ func TestFlusher_StrandedPending_GetsRetried(t *testing.T) {
 	if len(st.committed) != 1 {
 		t.Errorf("expected 1 COMMITTED after successful retry, got %d", len(st.committed))
 	}
-	// InsertPending не должен был вызваться — row уже существовал.
 	if len(st.inserted) != 0 {
 		t.Errorf("InsertPending should skip existing row, got %d inserts", len(st.inserted))
 	}
 }
 
 func TestFlusher_CommittedEventSkipped(t *testing.T) {
-	// Row уже COMMITTED от прошлого успешного flush'а. Должен полностью
-	// скипнуться — ни chain call, ни InsertPending.
 	f, ch, st, dq := newFlusherT()
-	msgs := makeMessages(1, "wms.receiving.v1", "receiving")
+	msgs := makeMessages(1, "receiving")
 	st.exists[msgs[0].EventID] = true
 	st.statuses[msgs[0].EventID] = "COMMITTED"
 
-	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if len(ch.calls) != 0 {
@@ -400,13 +386,12 @@ func TestFlusher_CommittedEventSkipped(t *testing.T) {
 }
 
 func TestFlusher_FailedEventSkipped(t *testing.T) {
-	// Terminal FAILED — тоже terminal, скип.
 	f, ch, st, _ := newFlusherT()
-	msgs := makeMessages(1, "wms.receiving.v1", "receiving")
+	msgs := makeMessages(1, "receiving")
 	st.exists[msgs[0].EventID] = true
 	st.statuses[msgs[0].EventID] = "FAILED"
 
-	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if len(ch.calls) != 0 {
@@ -415,13 +400,11 @@ func TestFlusher_FailedEventSkipped(t *testing.T) {
 }
 
 func TestFlusher_ChainTransientError_NoDLQ_ReturnsError(t *testing.T) {
-	// ErrChainTransient (RPC down) — не DLQ'им, возвращаем error → offsets
-	// не коммитятся → ретрай.
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = fmt.Errorf("%w: dial failed", chain.ErrChainTransient)
-	msgs := makeMessages(2, "wms.receiving.v1", "receiving")
+	msgs := makeMessages(2, "receiving")
 
-	err := f.Flush(context.Background(), "wms.receiving.v1", msgs)
+	err := f.Flush(context.Background(), msgs)
 	if err == nil {
 		t.Fatal("transient chain error should propagate")
 	}
@@ -437,13 +420,11 @@ func TestFlusher_ChainTransientError_NoDLQ_ReturnsError(t *testing.T) {
 }
 
 func TestFlusher_ChainRevertError_GoesToDLQ(t *testing.T) {
-	// ErrChainRevert (terminal) — DLQ + MarkFailed, возвращаем nil (offsets
-	// commit'ятся).
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = fmt.Errorf("%w: execution reverted: Duplicate eventId", chain.ErrChainRevert)
-	msgs := makeMessages(2, "wms.receiving.v1", "receiving")
+	msgs := makeMessages(2, "receiving")
 
-	if err := f.Flush(context.Background(), "wms.receiving.v1", msgs); err != nil {
+	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("revert should return nil (DLQ success), got: %v", err)
 	}
 	if len(st.failed) != 2 {
@@ -455,15 +436,11 @@ func TestFlusher_ChainRevertError_GoesToDLQ(t *testing.T) {
 }
 
 func TestFlusher_ChainTransientError_PropagatesAsError_NoDLQ(t *testing.T) {
-	// Regression guard для MR !35 M7: не-EstimateGas RPC error (например
-	// PendingNonceAt дропнулся из-за dial tcp refused) — должен быть
-	// classified как ErrChainTransient, НЕ терминальный → offsets не
-	// коммитим, DLQ/FAILED не пишем, retry при следующем tick.
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = fmt.Errorf("%w: nonce: dial tcp: connection refused", chain.ErrChainTransient)
-	msgs := makeMessages(2, "wms.receiving.v1", "receiving")
+	msgs := makeMessages(2, "receiving")
 
-	err := f.Flush(context.Background(), "wms.receiving.v1", msgs)
+	err := f.Flush(context.Background(), msgs)
 	if err == nil {
 		t.Fatal("transient chain error should propagate (no offset commit)")
 	}
@@ -475,5 +452,121 @@ func TestFlusher_ChainTransientError_PropagatesAsError_NoDLQ(t *testing.T) {
 	}
 	if len(dq.messages) != 0 {
 		t.Errorf("transient should NOT publish DLQ, got %d", len(dq.messages))
+	}
+}
+
+// --- mixed-batch tests ---------------------------------------------------
+
+func TestFlusher_MixedBatch_OrderedByFSM(t *testing.T) {
+	f, ch, st, _ := newFlusherT()
+	recvA := makeMessages(1, "receiving")
+	recvB := makeMessages(1, "receiving")
+	putA := makeMessages(1, "putaway")
+	// Simulate mixed batch: [recv-A, putaway-A, recv-B] — could arrive in any
+	// order within a single Kafka batch window.
+	msgs := append(recvA, putA...)
+	msgs = append(msgs, recvB...)
+
+	if err := f.Flush(context.Background(), msgs); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	// FSM order: receiving first, then putaway.
+	if len(ch.calls) != 2 {
+		t.Fatalf("expected 2 chain calls (receiving + putaway), got %v", ch.calls)
+	}
+	if ch.calls[0] != "receiving" {
+		t.Errorf("first call should be receiving, got %q", ch.calls[0])
+	}
+	if ch.calls[1] != "putaway" {
+		t.Errorf("second call should be putaway, got %q", ch.calls[1])
+	}
+	if len(st.committed) != 3 {
+		t.Errorf("all 3 should be committed, got %d", len(st.committed))
+	}
+}
+
+func TestFlusher_MixedBatch_PartialFailure(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	ch.callErrFor = map[string]error{
+		"putaway": fmt.Errorf("%w: Invalid status transition", chain.ErrChainRevert),
+	}
+	recvMsgs := makeMessages(2, "receiving")
+	putMsgs := makeMessages(1, "putaway")
+	msgs := append(recvMsgs, putMsgs...)
+
+	// Receiving succeeds, putaway reverts → putaway goes to DLQ.
+	// Flush returns nil (all sub-batches handled: recv committed, putaway DLQ'd).
+	if err := f.Flush(context.Background(), msgs); err != nil {
+		t.Fatalf("partial failure should not propagate: %v", err)
+	}
+	if len(st.committed) != 2 {
+		t.Errorf("receiving events should be committed, got %d", len(st.committed))
+	}
+	if len(st.failed) != 1 {
+		t.Errorf("putaway event should be failed, got %d", len(st.failed))
+	}
+	if len(dq.messages) != 1 {
+		t.Errorf("expected 1 DLQ publish for putaway, got %d", len(dq.messages))
+	}
+}
+
+func TestFlusher_SingleTypeBatch(t *testing.T) {
+	f, ch, st, _ := newFlusherT()
+	msgs := makeMessages(5, "shipping")
+
+	if err := f.Flush(context.Background(), msgs); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 1 || ch.calls[0] != "shipping" {
+		t.Errorf("expected single shipping call, got %v", ch.calls)
+	}
+	if len(st.committed) != 5 {
+		t.Errorf("expected 5 committed, got %d", len(st.committed))
+	}
+}
+
+func TestFlusher_MixedBatch_TransientMidFSM_StopsAndReturnsError(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	ch.callErrFor = map[string]error{
+		"putaway": fmt.Errorf("%w: dial failed", chain.ErrChainTransient),
+	}
+	recvMsgs := makeMessages(2, "receiving")
+	putMsgs := makeMessages(1, "putaway")
+	shipMsgs := makeMessages(1, "shipping")
+	msgs := append(recvMsgs, putMsgs...)
+	msgs = append(msgs, shipMsgs...)
+
+	err := f.Flush(context.Background(), msgs)
+	if err == nil {
+		t.Fatal("transient mid-FSM should propagate error to block offset commit")
+	}
+	if len(ch.calls) != 2 {
+		t.Errorf("expected 2 calls (receiving ok + putaway transient), got %v", ch.calls)
+	}
+	if len(st.committed) != 2 {
+		t.Errorf("receiving should be committed, got %d", len(st.committed))
+	}
+	if len(st.failed) != 0 {
+		t.Errorf("transient should NOT mark failed, got %d", len(st.failed))
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("transient should NOT publish DLQ, got %d", len(dq.messages))
+	}
+}
+
+func TestFlusher_AggregateTypes_ConsistentWithChain(t *testing.T) {
+	chainTypes := make(map[string]bool)
+	for _, a := range chain.AggregateTypes() {
+		chainTypes[a] = true
+	}
+	for _, a := range fsmOrder {
+		if !chainTypes[a] {
+			t.Errorf("fsmOrder contains %q but chain.AggregateTypes() does not", a)
+		}
+	}
+	for a := range chainTypes {
+		if !validAggregates[a] {
+			t.Errorf("chain.AggregateTypes() contains %q but validAggregates does not", a)
+		}
 	}
 }

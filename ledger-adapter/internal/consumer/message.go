@@ -8,8 +8,8 @@ import (
 )
 
 // Message — распарсенное kafka-сообщение с идентификаторами event/product и
-// типом агрегата (derivable от topic'а). KafkaMsg храним полностью для commit-
-// of-offset и DLQ-republish (оригинальный headers + value).
+// типом агрегата (из Kafka header aggregate_type, проставленного Debezium
+// EventRouter). KafkaMsg храним полностью для commit-of-offset и DLQ-republish.
 //
 // Передавать только через pointer (gocritic hugeParam: kafka.Message ~152 байт).
 type Message struct {
@@ -20,19 +20,19 @@ type Message struct {
 	KafkaMsg      kafka.Message
 }
 
-// topicToAggregate — mapping WMS-topic → aggregate_type для onchain_events и
-// для диспатча в chain.BatchCall. Держим здесь (в consumer), а не в chain,
-// потому что aggregate_type — поле persistent слоя (БД), а не chain-специфичное.
-var topicToAggregate = map[string]string{
-	"wms.receiving.v1": "receiving",
-	"wms.putaway.v1":   "putaway",
-	"wms.picking.v1":   "picking",
-	"wms.shipping.v1":  "shipping",
-}
+// validAggregates derived from fsmOrder — single source of truth for known types.
+var validAggregates = func() map[string]bool {
+	m := make(map[string]bool, len(fsmOrder))
+	for _, a := range fsmOrder {
+		m[a] = true
+	}
+	return m
+}()
 
 // Parse извлекает EventID из header "id", ProductID из m.Key (Debezium outbox
-// aggregate_id), AggregateType из topic'а. Невалидное сообщение — error;
-// вызывающий должен коммитнуть offset и отправить в DLQ.
+// aggregate_id), AggregateType из header "aggregate_type" (добавлен через
+// transforms.outbox.table.fields.additional.placement). Невалидное сообщение —
+// error; вызывающий должен коммитнуть offset и отправить в DLQ.
 func Parse(m *kafka.Message) (*Message, error) {
 	eventIDStr := headerValue(m.Headers, "id")
 	if eventIDStr == "" {
@@ -51,9 +51,12 @@ func Parse(m *kafka.Message) (*Message, error) {
 		return nil, fmt.Errorf("parse product_id %q: %w", string(m.Key), err)
 	}
 
-	agg, ok := topicToAggregate[m.Topic]
-	if !ok {
-		return nil, fmt.Errorf("unknown topic: %s", m.Topic)
+	agg := headerValue(m.Headers, "aggregate_type")
+	if agg == "" {
+		return nil, fmt.Errorf("missing 'aggregate_type' header")
+	}
+	if !validAggregates[agg] {
+		return nil, fmt.Errorf("unknown aggregate_type: %s", agg)
 	}
 
 	return &Message{

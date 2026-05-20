@@ -15,7 +15,7 @@
     "publication.name": "outbox_publication",
     "publication.autocreate.mode": "filtered",
 
-    "snapshot.mode": "initial",
+    "snapshot.mode": "never",
     "max.batch.size": 2048,
     "max.queue.size": 8192,
     "poll.interval.ms": 5000,
@@ -29,7 +29,8 @@
     "transforms.outbox.table.field.event.payload": "payload_hash",
 
     "transforms.outbox.route.by.field": "aggregate_type",
-    "transforms.outbox.route.topic.replacement": "wms.${routedByValue}.v1",
+    "transforms.outbox.route.topic.replacement": "wms.events.v1",
+    "transforms.outbox.table.fields.additional.placement": "aggregate_type:header:aggregate_type",
     "transforms.outbox.table.expand.json.payload": "false",
 
     "key.converter": "org.apache.kafka.connect.storage.StringConverter",

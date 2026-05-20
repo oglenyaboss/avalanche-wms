@@ -150,7 +150,7 @@ func (c *Consumer) flush(ctx context.Context) error {
 	if len(msgs) == 0 {
 		return nil
 	}
-	if err := c.flusher.Flush(ctx, c.topic, msgs); err != nil {
+	if err := c.flusher.Flush(ctx, msgs); err != nil {
 		c.log.Warn("flush failed — unshifting messages back for retry", "err", err, "n", len(msgs))
 		c.batcher.Unshift(msgs)
 		return err
@@ -174,7 +174,7 @@ func (c *Consumer) finalFlush() error {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := c.flusher.Flush(shutdownCtx, c.topic, msgs); err != nil {
+	if err := c.flusher.Flush(shutdownCtx, msgs); err != nil {
 		c.log.Error("final flush failed", "err", err)
 		return err
 	}

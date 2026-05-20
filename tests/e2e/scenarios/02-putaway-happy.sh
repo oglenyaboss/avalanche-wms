@@ -14,12 +14,12 @@ ITEM_ID=$(cast_cmd keccak "$PRODUCT_ID" | tr -d '[:space:]')
 
 # Накатываем Accepted через receiving (prerequisite)
 RECV_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-publish_event "wms.receiving.v1" "$RECV_ID" "$PRODUCT_ID" '{}'
+publish_event "receiving" "$RECV_ID" "$PRODUCT_ID" '{}'
 wait_for_status "$RECV_ID" "COMMITTED" 30 2
 wait_for_item_status "$ITEM_ID" "1" 10 1
 
 # Теперь putaway
-publish_event "wms.putaway.v1" "$EVENT_ID" "$PRODUCT_ID" '{}'
+publish_event "putaway" "$EVENT_ID" "$PRODUCT_ID" '{}'
 wait_for_status "$EVENT_ID" "COMMITTED" 30 2
 wait_for_item_status "$ITEM_ID" "2" 10 1
 

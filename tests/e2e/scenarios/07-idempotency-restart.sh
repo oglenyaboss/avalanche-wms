@@ -13,7 +13,7 @@ PRODUCT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 ITEM_ID=$(cast_cmd keccak "$PRODUCT_ID" | tr -d '[:space:]')
 
 # 1. Публикуем receiving, дожимаем до COMMITTED
-publish_event "wms.receiving.v1" "$EVENT_ID" "$PRODUCT_ID" '{}'
+publish_event "receiving" "$EVENT_ID" "$PRODUCT_ID" '{}'
 wait_for_status "$EVENT_ID" "COMMITTED" 30 2
 wait_for_item_status "$ITEM_ID" "1" 10 1
 
@@ -33,7 +33,7 @@ for _ in $(seq 1 30); do
 done
 
 # 3. Re-publish того же event_id+product_id — adapter должен пропустить (Exists=true)
-publish_event "wms.receiving.v1" "$EVENT_ID" "$PRODUCT_ID" '{}'
+publish_event "receiving" "$EVENT_ID" "$PRODUCT_ID" '{}'
 sleep 5
 
 # onchain_events: тот же event_id, тот же tx_hash (НЕ заменился)
