@@ -292,7 +292,7 @@ func (r *Repository) GetProductByIDForUpdate(ctx context.Context, productID uuid
 func (r *Repository) MarkTaskDone(ctx context.Context, eventID, operatorID uuid.UUID) error {
 	const query = `
 		UPDATE wms_ops.assembly_tasks
-		SET status = 'DONE', operator_id = $2, onchain_status = 'PENDING_ONCHAIN',
+		SET status = 'DONE', operator_id = $2,
 		    occurred_at = NOW(), updated_at = NOW()
 		WHERE event_id = $1 AND status = 'PENDING'`
 

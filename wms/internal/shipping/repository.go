@@ -298,7 +298,6 @@ func (r *Repository) BatchInsertShippings(
 			product_id,
 			dispatch_id,
 			operator_id,
-			onchain_status,
 			shipped_at,
 			occurred_at
 		)
@@ -307,7 +306,6 @@ func (r *Repository) BatchInsertShippings(
 			product_id,
 			$3,
 			$4,
-			'PENDING_ONCHAIN',
 			NOW(),
 			NOW()
 		FROM unnest($1::uuid[], $2::uuid[]) AS events(event_id, product_id)`
