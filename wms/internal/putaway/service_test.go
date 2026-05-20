@@ -44,8 +44,9 @@ type mockPutawayRepo struct {
 	insertedPutaways []*InsertPutawayParams
 
 	// InsertOutboxEvents
-	insertOutboxErr error
-	outboxCalls     int
+	insertOutboxErr  error
+	outboxCalls      int
+	lastOutboxParams *OutboxEventsParams
 
 	// WithTx tracking
 	withTxCalls int
@@ -138,8 +139,9 @@ func (m *mockPutawayRepo) InsertPutaway(_ context.Context, params *InsertPutaway
 	return nil
 }
 
-func (m *mockPutawayRepo) InsertOutboxEvents(_ context.Context, _ *OutboxEventsParams) error {
+func (m *mockPutawayRepo) InsertOutboxEvents(_ context.Context, params *OutboxEventsParams) error {
 	m.outboxCalls++
+	m.lastOutboxParams = params
 	if m.insertOutboxErr != nil {
 		return m.insertOutboxErr
 	}
@@ -487,6 +489,45 @@ func TestPlaceProductsToStorageBinSuccess(t *testing.T) {
 	// Проверяем, что корзина очистилась
 	if size := svc.GetCartSize(operatorID); size != 0 {
 		t.Fatalf("expected cart to be cleared, got size %d", size)
+	}
+}
+
+func TestPlaceProductsEventIDSharing(t *testing.T) {
+	operatorID := uuid.New()
+	storageBinID := uuid.New()
+	bufferBinID := uuid.New()
+	productID1 := uuid.New()
+	productID2 := uuid.New()
+
+	mockRepo := &mockPutawayRepo{
+		storageBin: &domain.Bin{BinID: storageBinID, Code: "M2-A-03"},
+		productsMap: map[uuid.UUID]*domain.Product{
+			productID1: {ProductID: productID1, Status: "RECEIVED", BinID: &bufferBinID},
+			productID2: {ProductID: productID2, Status: "RECEIVED", BinID: &bufferBinID},
+		},
+	}
+
+	svc := NewService(mockRepo)
+	_, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, []uuid.UUID{productID1, productID2}, storageBinID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(mockRepo.insertedPutaways) != 2 {
+		t.Fatalf("expected 2 putaway records, got %d", len(mockRepo.insertedPutaways))
+	}
+	if mockRepo.lastOutboxParams == nil {
+		t.Fatal("expected outbox params to be captured")
+	}
+	if len(mockRepo.lastOutboxParams.EventIDs) != 2 {
+		t.Fatalf("expected 2 outbox event IDs, got %d", len(mockRepo.lastOutboxParams.EventIDs))
+	}
+
+	for i, putaway := range mockRepo.insertedPutaways {
+		if putaway.EventID != mockRepo.lastOutboxParams.EventIDs[i] {
+			t.Fatalf("putaway[%d].EventID=%s != outbox.EventIDs[%d]=%s",
+				i, putaway.EventID, i, mockRepo.lastOutboxParams.EventIDs[i])
+		}
 	}
 }
 

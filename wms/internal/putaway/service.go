@@ -148,9 +148,8 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 			return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin: %w", err)
 		}
 
-		// Кэш проверенных буферных ячеек: типично все товары из одного буфера, но
-		// API не запрещает раскладку из нескольких — кэшируем чтобы избежать N запросов.
 		verifiedBuffers := make(map[uuid.UUID]struct{})
+		eventIDs := make([]uuid.UUID, 0, len(productsIDs))
 
 		for _, productID := range productsIDs {
 			product, err := txRepo.GetProductsByIDForUpdate(ctx, productID)
@@ -162,9 +161,6 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 			}
 			fromBinID := *product.BinID
 
-			// Защита от drift: статус RECEIVED + bin = storage (не buffer) означает, что
-			// putaway уже произошёл, но статус продукта почему-то не обновился. Без этой
-			// проверки получим лишний putaway outbox event и FSM revert на чейне.
 			if _, ok := verifiedBuffers[fromBinID]; !ok {
 				if _, err := txRepo.GetBufferBinByID(ctx, fromBinID); err != nil {
 					if errors.Is(err, ErrBufferBinNotFound) {
@@ -179,14 +175,16 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin update product %s: %w", productID, err)
 			}
 
+			eventID := uuid.New()
+			eventIDs = append(eventIDs, eventID)
+
 			if err := txRepo.InsertPutaway(ctx, &InsertPutawayParams{
-				EventID:       uuid.New(),
-				ProductID:     productID,
-				FromBinID:     fromBinID,
-				BinID:         storageBinID,
-				OperatorID:    operatorID,
-				OnChainStatus: "PENDING_ONCHAIN",
-				OccurredAt:    occurredAt,
+				EventID:    eventID,
+				ProductID:  productID,
+				FromBinID:  fromBinID,
+				BinID:      storageBinID,
+				OperatorID: operatorID,
+				OccurredAt: occurredAt,
 			}); err != nil {
 				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin insert putaway: %w", err)
 			}
@@ -195,6 +193,7 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 		}
 
 		if err := txRepo.InsertOutboxEvents(ctx, &OutboxEventsParams{
+			EventIDs:     eventIDs,
 			ProductIDs:   productsIDs,
 			StorageBinID: storageBinID,
 		}); err != nil {

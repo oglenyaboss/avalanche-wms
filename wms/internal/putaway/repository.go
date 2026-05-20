@@ -206,10 +206,10 @@ func (r *Repository) UpdateProductStorage(ctx context.Context, productID, binID 
 // InsertPutaway создает запись о размещении в wms_ops.putaway
 func (r *Repository) InsertPutaway(ctx context.Context, params *InsertPutawayParams) error {
 	const query = `
-		INSERT INTO wms_ops.putaways(event_id, product_id, from_bin_id, bin_id, operator_id, onchain_status, occurred_at)
-		VALUES($1, $2, $3, $4, $5, $6, $7)`
+		INSERT INTO wms_ops.putaways(event_id, product_id, from_bin_id, bin_id, operator_id, occurred_at)
+		VALUES($1, $2, $3, $4, $5, $6)`
 
-	_, err := r.q.Exec(ctx, query, params.EventID, params.ProductID, params.FromBinID, params.BinID, params.OperatorID, params.OnChainStatus, params.OccurredAt)
+	_, err := r.q.Exec(ctx, query, params.EventID, params.ProductID, params.FromBinID, params.BinID, params.OperatorID, params.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("putaway.Repository.InsertPutaway exec: %w", err)
 	}
@@ -223,7 +223,6 @@ func (r *Repository) InsertOutboxEvents(ctx context.Context, params *OutboxEvent
 		return nil
 	}
 
-	eventIDs := make([]uuid.UUID, 0, len(params.ProductIDs))
 	aggregateIDs := make([]uuid.UUID, 0, len(params.ProductIDs))
 	payloadHashes := make([]string, 0, len(params.ProductIDs))
 
@@ -233,7 +232,6 @@ func (r *Repository) InsertOutboxEvents(ctx context.Context, params *OutboxEvent
 			return fmt.Errorf("putaway.Repository.InsertOutboxEvents build payload hash: %w", err)
 		}
 
-		eventIDs = append(eventIDs, uuid.New())
 		aggregateIDs = append(aggregateIDs, productID)
 		payloadHashes = append(payloadHashes, payloadHash)
 	}
@@ -243,7 +241,7 @@ func (r *Repository) InsertOutboxEvents(ctx context.Context, params *OutboxEvent
 		SELECT event_id, aggregate_id, 'putaway', 'wms.putaway.v1', payload_hash
 		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
 
-	if _, err := r.q.Exec(ctx, query, eventIDs, aggregateIDs, payloadHashes); err != nil {
+	if _, err := r.q.Exec(ctx, query, params.EventIDs, aggregateIDs, payloadHashes); err != nil {
 		return fmt.Errorf("putaway.Repository.InsertOutboxEvents exec: %w", err)
 	}
 
