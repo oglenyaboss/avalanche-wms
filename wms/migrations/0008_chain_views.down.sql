@@ -1,5 +1,12 @@
 BEGIN;
 
+-- WARNING: Rolling back restores columns with DEFAULT values.
+-- Rows committed on-chain will lose their status. Run this backfill after rollback:
+--
+-- UPDATE wms_ops.putaways p SET onchain_status='ONCHAIN_COMMITTED', onchain_tx_hash=oe.tx_hash
+-- FROM public.onchain_events oe WHERE oe.event_id=p.event_id AND oe.status='COMMITTED';
+-- (analogous for shippings and assembly_tasks)
+
 DROP VIEW IF EXISTS wms_ops.v_putaways_with_chain;
 DROP VIEW IF EXISTS wms_ops.v_shippings_with_chain;
 DROP VIEW IF EXISTS wms_ops.v_assembly_tasks_with_chain;
