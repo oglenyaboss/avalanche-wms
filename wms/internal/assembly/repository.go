@@ -82,18 +82,6 @@ func (r *Repository) GetOrdersByDestinationForUpdate(ctx context.Context, destin
 	return orders, nil
 }
 
-// AreAllTasksDoneForOrder проверяет, все ли задачи заказа выполнены (статус DONE)
-func (r *Repository) AreAllTasksDoneForOrder(ctx context.Context, orderID uuid.UUID) (bool, error) {
-	const query = `
-        SELECT NOT EXISTS(
-            SELECT 1 FROM wms_ops.assembly_tasks
-            WHERE order_id = $1 AND status != 'DONE'
-        )`
-	var allDone bool
-	err := r.q.QueryRow(ctx, query, orderID).Scan(&allDone)
-	return allDone, err
-}
-
 // GetOrderLinesByOrderID возвращает строки заказа
 // (по id заказа возвращает все товары (идентификаторы sku_id) и их количество (quantity))
 func (r *Repository) GetOrderLinesByOrderID(ctx context.Context, orderID uuid.UUID) ([]domain.OrderLine, error) {
@@ -335,9 +323,8 @@ func (r *Repository) SetProductAssembled(ctx context.Context, productID uuid.UUI
 	return nil
 }
 
-// InsertPickOutboxEvent создает outbox событие для pick
-func (r *Repository) InsertPickOutboxEvent(ctx context.Context, productID uuid.UUID) error {
-	eventID := uuid.New()
+// InsertPickOutboxEvent создает outbox событие для pick, используя event_id из assembly_task
+func (r *Repository) InsertPickOutboxEvent(ctx context.Context, productID, eventID uuid.UUID) error {
 	payloadHash, err := payloadHashForPick(productID)
 	if err != nil {
 		return fmt.Errorf("assembly.Repository.InsertPickOutboxEvent build hash: %w", err)
@@ -492,6 +479,7 @@ func (r *Repository) UpdateOrdersToAssembled(ctx context.Context, orderIDs []uui
 		UPDATE wms_inventory.orders
 		SET status = $2, updated_at = NOW()
 		WHERE order_id = ANY($1::uuid[])
+		  AND status = 'ALLOCATED'
 		  AND NOT EXISTS (
 			SELECT 1 FROM wms_inventory.products
 			WHERE order_id = orders.order_id AND status != 'READY_TO_SHIP'
@@ -530,21 +518,4 @@ func (r *Repository) GetOrderIDsByProductIDs(ctx context.Context, productIDs []u
 		orderIDs = append(orderIDs, orderID)
 	}
 	return orderIDs, nil
-}
-
-// UpdateOrderStatusToAssembled обновляет статус заказа на ASSEMBLED (без проверки на NEW)
-func (r *Repository) UpdateOrderStatusToAssembled(ctx context.Context, orderID uuid.UUID) error {
-	const query = `
-		UPDATE wms_inventory.orders
-		SET status = $2, updated_at = NOW()
-		WHERE order_id = $1 AND status = 'ALLOCATED'`
-
-	tag, err := r.q.Exec(ctx, query, orderID, string(domain.OrderStatusAssembled))
-	if err != nil {
-		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled exec: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled: order %s not found or not in ALLOCATED status", orderID)
-	}
-	return nil
 }

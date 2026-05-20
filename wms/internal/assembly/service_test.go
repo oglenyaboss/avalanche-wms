@@ -70,10 +70,6 @@ type mockAssemblyRepo struct {
 	tasksResult []TaskItem
 	tasksErr    error
 
-	// AreAllTasksDoneForOrder
-	areAllTasksDone    bool
-	areAllTasksDoneErr error
-
 	// WithTx tracking
 	withTxMu    sync.Mutex
 	withTxCalls int
@@ -216,7 +212,7 @@ func (m *mockAssemblyRepo) SetProductAssembled(_ context.Context, productID uuid
 	return nil
 }
 
-func (m *mockAssemblyRepo) InsertPickOutboxEvent(_ context.Context, _ uuid.UUID) error {
+func (m *mockAssemblyRepo) InsertPickOutboxEvent(_ context.Context, _, _ uuid.UUID) error {
 	m.outboxCalls++
 	if m.insertOutboxErr != nil {
 		return m.insertOutboxErr
@@ -229,24 +225,6 @@ func (m *mockAssemblyRepo) GetTasks(_ context.Context, _, _ uuid.UUID, _ string)
 		return nil, m.tasksErr
 	}
 	return m.tasksResult, nil
-}
-
-func (m *mockAssemblyRepo) AreAllTasksDoneForOrder(_ context.Context, _ uuid.UUID) (bool, error) {
-	if m.areAllTasksDoneErr != nil {
-		return false, m.areAllTasksDoneErr
-	}
-	return m.areAllTasksDone, nil
-}
-
-func (m *mockAssemblyRepo) UpdateOrderStatusToAssembled(_ context.Context, orderID uuid.UUID) error {
-	if m.updateOrderStatusErr != nil {
-		return m.updateOrderStatusErr
-	}
-	if m.updatedOrderStatus == nil {
-		m.updatedOrderStatus = make(map[uuid.UUID]string)
-	}
-	m.updatedOrderStatus[orderID] = string(domain.OrderStatusAssembled)
-	return nil
 }
 
 func (m *mockAssemblyRepo) GetShippingBufferBinByID(_ context.Context, _ uuid.UUID) (*domain.Bin, error) {
@@ -449,7 +427,6 @@ func TestPickHappyPath(t *testing.T) {
 		productsByID: map[uuid.UUID]*domain.Product{
 			productID: {ProductID: productID, Status: "ALLOCATED"},
 		},
-		areAllTasksDone: false, // не все задачи выполнены
 	}
 
 	svc := NewService(mockRepo)
@@ -478,8 +455,8 @@ func TestPickHappyPath(t *testing.T) {
 	}
 }
 
-// TestPickUpdatesOrderStatusWhenAllTasksDone - проверка обновления статуса заказа
-func TestPickUpdatesOrderStatusWhenAllTasksDone(t *testing.T) {
+// TestPickDoesNotUpdateOrderStatus - Pick не должен менять статус заказа (это делает ScanShippingBuffer)
+func TestPickDoesNotUpdateOrderStatus(t *testing.T) {
 	operatorID := uuid.New()
 	productID := uuid.New()
 	orderID := uuid.New()
@@ -492,7 +469,6 @@ func TestPickUpdatesOrderStatusWhenAllTasksDone(t *testing.T) {
 		productsByID: map[uuid.UUID]*domain.Product{
 			productID: {ProductID: productID, Status: "ALLOCATED"},
 		},
-		areAllTasksDone: true, // все задачи выполнены
 	}
 
 	svc := NewService(mockRepo)
@@ -501,17 +477,11 @@ func TestPickUpdatesOrderStatusWhenAllTasksDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.ProductID != productID.String() {
-		t.Fatalf("expected ProductID %s, got %s", productID.String(), result.ProductID)
-	}
 	if result.CartSize != 1 {
 		t.Fatalf("expected CartSize 1, got %d", result.CartSize)
 	}
-
-	if status, ok := mockRepo.updatedOrderStatus[orderID]; !ok {
-		t.Fatalf("expected order status to be updated")
-	} else if status != string(domain.OrderStatusAssembled) {
-		t.Fatalf("expected order status ASSEMBLED, got %s", status)
+	if len(mockRepo.updatedOrderStatus) != 0 {
+		t.Fatalf("expected no order status updates, got %v", mockRepo.updatedOrderStatus)
 	}
 }
 
