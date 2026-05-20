@@ -52,7 +52,6 @@ type PickResponse struct {
 
 type ScanShippingBufferRequest struct {
 	BufferBinID string `json:"buffer_bin_id"`
-	OperatorID  string `json:"operator_id"`
 }
 
 type ScanShippingBufferResponse struct {

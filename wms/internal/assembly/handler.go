@@ -135,7 +135,7 @@ func (h *Handler) Pick(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ScanShippingBuffer(w http.ResponseWriter, r *http.Request) {
-	authOperatorID, ok := requireOperator(w, r)
+	operatorID, ok := requireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -149,17 +149,6 @@ func (h *Handler) ScanShippingBuffer(w http.ResponseWriter, r *http.Request) {
 	bufferBinID, err := uuid.Parse(req.BufferBinID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "buffer_bin_id не uuid")
-		return
-	}
-
-	operatorID, err := uuid.Parse(req.OperatorID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "operator_id не uuid")
-		return
-	}
-
-	if authOperatorID != operatorID {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "operator_id не соответствует авторизованному пользователю")
 		return
 	}
 
@@ -254,6 +243,8 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "CART_EMPTY", "Корзина оператора пуста"
 	case errors.Is(err, ErrDestinationMismatch):
 		return http.StatusConflict, "DESTINATION_MISMATCH", "Товары в корзине принадлежат другому магазину"
+	case errors.Is(err, ErrPartialPlacement):
+		return http.StatusConflict, "PARTIAL_PLACEMENT", "Не все товары из корзины были размещены"
 	default:
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"
 	}

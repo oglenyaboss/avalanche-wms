@@ -420,23 +420,6 @@ func payloadHashForPick(productID uuid.UUID) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// UpdateOrderStatusToAssembled обновляет статус заказа на ASSEMBLED (без проверки на NEW)
-func (r *Repository) UpdateOrderStatusToAssembled(ctx context.Context, orderID uuid.UUID) error {
-	const query = `
-		UPDATE wms_inventory.orders
-		SET status = $2, updated_at = NOW()
-		WHERE order_id = $1 AND status = 'ALLOCATED'`
-
-	tag, err := r.q.Exec(ctx, query, orderID, string(domain.OrderStatusAssembled))
-	if err != nil {
-		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled exec: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled: order %s not found or not in ALLOCATED status", orderID)
-	}
-	return nil
-}
-
 // GetShippingBufferBinByID возвращает ячейку буфера отгрузки по ID
 func (r *Repository) GetShippingBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error) {
 	const query = `
@@ -446,14 +429,8 @@ func (r *Repository) GetShippingBufferBinByID(ctx context.Context, bufferBinID u
 
 	var bin domain.Bin
 	err := r.q.QueryRow(ctx, query, bufferBinID).Scan(
-		&bin.BinID,
-		&bin.WarehouseID,
-		&bin.Code,
-		&bin.Section,
-		&bin.Volume,
-		&bin.DestinationID,
-		&bin.CreatedAt,
-		&bin.UpdatedAt,
+		&bin.BinID, &bin.WarehouseID, &bin.Code, &bin.Section,
+		&bin.Volume, &bin.DestinationID, &bin.CreatedAt, &bin.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -465,7 +442,6 @@ func (r *Repository) GetShippingBufferBinByID(ctx context.Context, bufferBinID u
 }
 
 // ValidateCartDestination проверяет, что все товары в корзине принадлежат одному destination
-// Возвращает destinationID и ошибку, если есть несоответствие
 func (r *Repository) ValidateCartDestination(ctx context.Context, productIDs []uuid.UUID, expectedDestinationID uuid.UUID) error {
 	if len(productIDs) == 0 {
 		return nil
@@ -554,4 +530,21 @@ func (r *Repository) GetOrderIDsByProductIDs(ctx context.Context, productIDs []u
 		orderIDs = append(orderIDs, orderID)
 	}
 	return orderIDs, nil
+}
+
+// UpdateOrderStatusToAssembled обновляет статус заказа на ASSEMBLED (без проверки на NEW)
+func (r *Repository) UpdateOrderStatusToAssembled(ctx context.Context, orderID uuid.UUID) error {
+	const query = `
+		UPDATE wms_inventory.orders
+		SET status = $2, updated_at = NOW()
+		WHERE order_id = $1 AND status = 'ALLOCATED'`
+
+	tag, err := r.q.Exec(ctx, query, orderID, string(domain.OrderStatusAssembled))
+	if err != nil {
+		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled exec: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("assembly.Repository.UpdateOrderStatusToAssembled: order %s not found or not in ALLOCATED status", orderID)
+	}
+	return nil
 }
