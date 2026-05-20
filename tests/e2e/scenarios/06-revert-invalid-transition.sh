@@ -13,7 +13,7 @@ PRODUCT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 ITEM_ID=$(cast_cmd keccak "$PRODUCT_ID" | tr -d '[:space:]')
 
 # Продукт в состоянии None (0) → batchPick требует PutAway (2) → revert ожидаем.
-publish_event "wms.picking.v1" "$EVENT_ID" "$PRODUCT_ID" '{}'
+publish_event "picking" "$EVENT_ID" "$PRODUCT_ID" '{}'
 
 # Adapter должен поймать revert на EstimateGas, MarkFailed, DLQ publish
 wait_for_status "$EVENT_ID" "FAILED" 30 2

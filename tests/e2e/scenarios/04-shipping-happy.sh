@@ -14,14 +14,14 @@ ITEM_ID=$(cast_cmd keccak "$PRODUCT_ID" | tr -d '[:space:]')
 # Prerequisites
 for agg in receiving putaway picking; do
   E=$(uuidgen | tr '[:upper:]' '[:lower:]')
-  publish_event "wms.$agg.v1" "$E" "$PRODUCT_ID" '{}'
+  publish_event "$agg" "$E" "$PRODUCT_ID" '{}'
   wait_for_status "$E" "COMMITTED" 30 2
 done
 wait_for_item_status "$ITEM_ID" "3" 10 1
 
 # Ship
 SHIP=$(uuidgen | tr '[:upper:]' '[:lower:]')
-publish_event "wms.shipping.v1" "$SHIP" "$PRODUCT_ID" '{}'
+publish_event "shipping" "$SHIP" "$PRODUCT_ID" '{}'
 wait_for_status "$SHIP" "COMMITTED" 30 2
 wait_for_item_status "$ITEM_ID" "4" 10 1
 

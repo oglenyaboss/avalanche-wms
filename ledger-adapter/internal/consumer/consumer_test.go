@@ -17,13 +17,13 @@ func TestConsumer_ParseFail_GoesToDLQ(t *testing.T) {
 	dq := &stubDLQ{}
 	c := &Consumer{
 		dlq:   dq,
-		topic: "wms.receiving.v1",
+		topic: "wms.events.v1",
 		log:   slog.Default(),
 	}
 
 	// Сообщение без header 'id' — Parse вернёт ошибку.
 	m := &kafka.Message{
-		Topic:   "wms.receiving.v1",
+		Topic:   "wms.events.v1",
 		Key:     []byte("some-key"),
 		Value:   []byte(`{"foo":"bar"}`),
 		Offset:  42,
@@ -41,7 +41,7 @@ func TestConsumer_ParseFail_GoesToDLQ(t *testing.T) {
 		t.Errorf("expected 1 message in DLQ batch, got %d", len(dq.messages[0]))
 	}
 	stub := dq.messages[0][0]
-	if stub.Topic != "wms.receiving.v1" {
+	if stub.Topic != "wms.events.v1" {
 		t.Errorf("Topic: got %q", stub.Topic)
 	}
 	if string(stub.KafkaMsg.Value) != `{"foo":"bar"}` {
@@ -58,10 +58,10 @@ func TestConsumer_ParseFail_DLQDown_ReturnsError(t *testing.T) {
 	dq := &stubDLQ{publishErr: errors.New("kafka broker down")}
 	c := &Consumer{
 		dlq:   dq,
-		topic: "wms.receiving.v1",
+		topic: "wms.events.v1",
 		log:   slog.Default(),
 	}
-	m := &kafka.Message{Topic: "wms.receiving.v1"}
+	m := &kafka.Message{Topic: "wms.events.v1"}
 
 	err := c.handleParseFailure(context.Background(), m, errors.New("parse err"))
 	if err == nil {

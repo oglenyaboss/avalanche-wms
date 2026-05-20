@@ -28,14 +28,14 @@ func TestABI_Parses(t *testing.T) {
 	}
 }
 
-func TestABI_TopicMapping(t *testing.T) {
-	for topic, method := range topicToMethod {
+func TestABI_AggregateMapping(t *testing.T) {
+	for agg, method := range aggregateToMethod {
 		parsed, err := abi.JSON(strings.NewReader(ContractABI))
 		if err != nil {
 			t.Fatalf("parse ABI: %v", err)
 		}
 		if _, ok := parsed.Methods[method]; !ok {
-			t.Errorf("topicToMethod[%q] = %q — метод отсутствует в ABI", topic, method)
+			t.Errorf("aggregateToMethod[%q] = %q — метод отсутствует в ABI", agg, method)
 		}
 	}
 }

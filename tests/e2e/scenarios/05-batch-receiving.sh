@@ -26,7 +26,7 @@ done
 
 # Публикуем подряд без sleep — batcher должен накопить
 for i in 0 1 2; do
-  publish_event "wms.receiving.v1" "${EVT_IDS[$i]}" "${PROD_IDS[$i]}" '{}'
+  publish_event "receiving" "${EVT_IDS[$i]}" "${PROD_IDS[$i]}" '{}'
 done
 
 # Все 3 должны быть COMMITTED

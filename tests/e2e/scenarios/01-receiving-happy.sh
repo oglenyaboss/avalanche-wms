@@ -21,7 +21,7 @@ pre=$(cast_cmd call "$CONTRACT_ADDR" "itemStatus(uint256)(uint8)" "$ITEM_ID" --r
 [ "$pre" = "0" ] || { echo "FAIL: initial status != 0, got $pre"; exit 1; }
 
 # 2. Publish в wms.receiving.v1 с header id=$EVENT_ID, key=$PRODUCT_ID
-publish_event "wms.receiving.v1" "$EVENT_ID" "$PRODUCT_ID" '{"type":"receiving_close"}'
+publish_event "receiving" "$EVENT_ID" "$PRODUCT_ID" '{"type":"receiving_close"}'
 echo "published to kafka"
 
 # 3. Ждём транзит PENDING→SENT→COMMITTED в onchain_events (max 60s)

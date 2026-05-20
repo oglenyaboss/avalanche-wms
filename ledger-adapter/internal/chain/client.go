@@ -41,11 +41,7 @@ func isRevertError(err error) bool {
 }
 
 // Client обёртка над ethclient с методами для BatchMappingWMS.
-//
-// sendMu сериализует nonce-critical секцию в sendMethod — все 4 topic-consumer
-// goroutine'ы шарят один *Client с одним fromAddress, и без мьютекса могут
-// параллельно получить одинаковый PendingNonceAt → один tx вытеснит другой или
-// node вернёт "nonce too low". См. go-review MR !35 C1.
+// sendMu сериализует nonce-critical секцию в sendMethod.
 type Client struct {
 	eth          *ethclient.Client
 	privateKey   *ecdsa.PrivateKey
@@ -96,19 +92,28 @@ func (c *Client) Close() { c.eth.Close() }
 // FromAddress — адрес, из-под которого клиент подписывает tx.
 func (c *Client) FromAddress() common.Address { return c.fromAddress }
 
-// topicToMethod маппит WMS kafka-topic'и в solidity-методы BatchMappingWMS.
-var topicToMethod = map[string]string{
-	"wms.receiving.v1": "batchAccept",
-	"wms.putaway.v1":   "batchPutAway",
-	"wms.picking.v1":   "batchPick",
-	"wms.shipping.v1":  "batchShip",
+// aggregateToMethod маппит WMS aggregate_type в solidity-методы BatchMappingWMS.
+var aggregateToMethod = map[string]string{
+	"receiving": "batchAccept",
+	"putaway":   "batchPutAway",
+	"picking":   "batchPick",
+	"shipping":  "batchShip",
 }
 
-// BatchCall отправляет batch-tx по имени topic'а. Диспатчер для consumer.
-func (c *Client) BatchCall(ctx context.Context, topic string, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	method, ok := topicToMethod[topic]
+// AggregateTypes returns the set of aggregate_type strings known to the chain layer.
+func AggregateTypes() []string {
+	out := make([]string, 0, len(aggregateToMethod))
+	for k := range aggregateToMethod {
+		out = append(out, k)
+	}
+	return out
+}
+
+// BatchCall отправляет batch-tx по aggregate_type. Диспатчер для flusher.
+func (c *Client) BatchCall(ctx context.Context, aggregateType string, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
+	method, ok := aggregateToMethod[aggregateType]
 	if !ok {
-		return common.Hash{}, fmt.Errorf("unknown topic: %s", topic)
+		return common.Hash{}, fmt.Errorf("unknown aggregate_type: %s", aggregateType)
 	}
 	return c.sendMethod(ctx, method, eventIDs, itemIDs)
 }
@@ -144,9 +149,7 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 		return common.Hash{}, fmt.Errorf("pack %s: %w", method, err)
 	}
 
-	// Сериализуем nonce-fetch + sign + send: 4 topic-consumer'а шарят один
-	// fromAddress. Hot path быстрый (<200ms типично), EstimateGas и ChainID
-	// можно было бы вынести наружу, но простота > микро-оптимизация.
+	// Сериализуем nonce-fetch + sign + send: один fromAddress.
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
