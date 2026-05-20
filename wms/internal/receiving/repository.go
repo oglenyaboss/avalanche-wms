@@ -200,6 +200,33 @@ func (r *Repository) GetCargoplaceByID(ctx context.Context, cargoplaceID uuid.UU
 	return &cp, nil
 }
 
+func (r *Repository) GetCargoplaceByIDForUpdate(ctx context.Context, cargoplaceID uuid.UUID) (*domain.Cargoplace, error) {
+	const query = `
+		SELECT cargoplace_id, shipment_id, cargoplace_code, status, received_at_gate_at, created_at, updated_at
+		FROM wms_inventory.cargoplaces
+		WHERE cargoplace_id = $1
+		FOR UPDATE`
+
+	var cp domain.Cargoplace
+	err := r.q.QueryRow(ctx, query, cargoplaceID).Scan(
+		&cp.CargoplaceID,
+		&cp.ShipmentID,
+		&cp.CargoplaceCode,
+		&cp.Status,
+		&cp.ReceivedAtGateAt,
+		&cp.CreatedAt,
+		&cp.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("receiving.Repository.GetCargoplaceByIDForUpdate: %w", ErrCargoplaceNotFound)
+		}
+		return nil, fmt.Errorf("receiving.Repository.GetCargoplaceByIDForUpdate scan: %w", err)
+	}
+
+	return &cp, nil
+}
+
 func (r *Repository) UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, newStatus, expectedStatus string) error {
 	const query = `
 		UPDATE wms_inventory.inbound_shipments
@@ -710,6 +737,20 @@ func (r *Repository) CloseCargoplaceWithOutbox(
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
+
+	var cpStatus string
+	err = tx.QueryRow(ctx,
+		`SELECT status FROM wms_inventory.cargoplaces WHERE cargoplace_id = $1 FOR UPDATE`,
+		params.CargoplaceID).Scan(&cpStatus)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox: %w", ErrCargoplaceNotFound)
+		}
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox lock cargoplace: %w", err)
+	}
+	if cpStatus != cargoplaceStatusTableInProgress {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox: %w", ErrCargoplaceNotInProgress)
+	}
 
 	const updateCargoplaceQuery = `
 		UPDATE wms_inventory.cargoplaces

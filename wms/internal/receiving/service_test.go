@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -188,6 +189,13 @@ func (m *mockReceivingRepo) GetCargoplaceByShipmentAndCode(
 }
 
 func (m *mockReceivingRepo) GetCargoplaceByID(_ context.Context, _ uuid.UUID) (*domain.Cargoplace, error) {
+	if m.cargoplaceByIDErr != nil {
+		return nil, m.cargoplaceByIDErr
+	}
+	return m.cargoplaceByID, nil
+}
+
+func (m *mockReceivingRepo) GetCargoplaceByIDForUpdate(_ context.Context, _ uuid.UUID) (*domain.Cargoplace, error) {
 	if m.cargoplaceByIDErr != nil {
 		return nil, m.cargoplaceByIDErr
 	}
@@ -406,6 +414,9 @@ func (m *mockReceivingRepo) CloseCargoplaceWithOutbox(
 ) (*CloseCargoplaceTxResult, error) {
 	if m.closeCargoplaceOutboxErr != nil {
 		return nil, m.closeCargoplaceOutboxErr
+	}
+	if m.cargoplaceByID != nil && m.cargoplaceByID.Status != cargoplaceStatusTableInProgress {
+		return nil, fmt.Errorf("mock.CloseCargoplaceWithOutbox: %w", ErrCargoplaceNotInProgress)
 	}
 	return m.closeCargoplaceTxResult, nil
 }
