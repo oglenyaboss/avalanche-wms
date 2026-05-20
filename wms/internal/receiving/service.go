@@ -449,7 +449,7 @@ func (s *Service) ScanBox(
 		}
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("receiving.Service.ScanBox: %w", err)
 	}
 
 	return &ScanBoxResult{
@@ -509,7 +509,7 @@ func (s *Service) ScanSKU(
 			OccurredAt:   time.Now().UTC(),
 		})
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("receiving.Service.ScanSKU: %w", err)
 	}
 
 	return &ScanSKUResult{
@@ -626,23 +626,23 @@ func (s *Service) CloseBox(
 		return nil, fmt.Errorf("receiving.Service.CloseBox: %w", ErrInvalidInput)
 	}
 
-	box, err := s.repo.GetBoxByID(ctx, boxID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.CloseBox get box: %w", err)
-	}
-	if box.Status != boxStatusOpen {
-		return nil, fmt.Errorf("receiving.Service.CloseBox: %w", ErrBoxNotOpen)
-	}
-
-	cargoplace, err := s.repo.GetCargoplaceByID(ctx, box.CargoplaceID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.CloseBox get cargoplace: %w", err)
-	}
-	if cargoplace.Status != cargoplaceStatusTableInProgress {
-		return nil, fmt.Errorf("receiving.Service.CloseBox: %w", ErrCargoplaceNotInProgress)
-	}
-
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		box, err := txRepo.GetBoxByID(ctx, boxID)
+		if err != nil {
+			return fmt.Errorf("receiving.Service.CloseBox get box: %w", err)
+		}
+		if box.Status != boxStatusOpen {
+			return fmt.Errorf("receiving.Service.CloseBox: %w", ErrBoxNotOpen)
+		}
+
+		cargoplace, err := txRepo.GetCargoplaceByIDForUpdate(ctx, box.CargoplaceID)
+		if err != nil {
+			return fmt.Errorf("receiving.Service.CloseBox get cargoplace: %w", err)
+		}
+		if cargoplace.Status != cargoplaceStatusTableInProgress {
+			return fmt.Errorf("receiving.Service.CloseBox: %w", ErrCargoplaceNotInProgress)
+		}
+
 		if err := txRepo.UpdateBoxStatus(ctx, boxID, boxStatusClosed); err != nil {
 			return fmt.Errorf("receiving.Service.CloseBox update box status: %w", err)
 		}
@@ -659,7 +659,7 @@ func (s *Service) CloseBox(
 
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("receiving.Service.CloseBox: %w", err)
 	}
 
 	productsInBox, err := s.repo.CountProductsByBox(ctx, boxID)
@@ -684,14 +684,6 @@ func (s *Service) ScanBuffer(
 		return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", ErrInvalidInput)
 	}
 
-	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanBuffer get cargoplace: %w", err)
-	}
-	if cargoplace.Status != cargoplaceStatusTableInProgress {
-		return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", ErrCargoplaceNotInProgress)
-	}
-
 	bufferBin, err := s.repo.GetBinByID(ctx, bufferBinID)
 	if err != nil {
 		if errors.Is(err, ErrBinNotFound) {
@@ -705,6 +697,14 @@ func (s *Service) ScanBuffer(
 
 	var productsPlaced int
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		cargoplace, err := txRepo.GetCargoplaceByIDForUpdate(ctx, cargoplaceID)
+		if err != nil {
+			return fmt.Errorf("receiving.Service.ScanBuffer get cargoplace: %w", err)
+		}
+		if cargoplace.Status != cargoplaceStatusTableInProgress {
+			return fmt.Errorf("receiving.Service.ScanBuffer: %w", ErrCargoplaceNotInProgress)
+		}
+
 		var txErr error
 		productsPlaced, txErr = txRepo.ScanBufferWithLog(ctx, cargoplaceID, bufferBinID, &TableLogParams{
 			CargoplaceID: cargoplaceID,
@@ -715,7 +715,7 @@ func (s *Service) ScanBuffer(
 		})
 		return txErr
 	}); err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanBuffer scan buffer with log: %w", err)
+		return nil, fmt.Errorf("receiving.Service.ScanBuffer: %w", err)
 	}
 
 	return &ScanBufferResult{

@@ -222,6 +222,10 @@ func (r *Repository) InsertOutboxEvents(ctx context.Context, params *OutboxEvent
 	if len(params.ProductIDs) == 0 {
 		return nil
 	}
+	if len(params.EventIDs) != len(params.ProductIDs) {
+		return fmt.Errorf("putaway.Repository.InsertOutboxEvents: EventIDs/ProductIDs length mismatch: %d != %d",
+			len(params.EventIDs), len(params.ProductIDs))
+	}
 
 	aggregateIDs := make([]uuid.UUID, 0, len(params.ProductIDs))
 	payloadHashes := make([]string, 0, len(params.ProductIDs))
