@@ -82,8 +82,13 @@ func (s *Service) AddToPutawayCart(ctx context.Context, operatorID, productID, b
 	var product *domain.Product
 	var sku *domain.SKU
 
-	// Без блокировки: AddToPutawayCart не модифицирует БД (только in-memory cart),
-	// реальный lock берётся в PlaceProductsToStorageBin внутри транзакции.
+	if _, err := s.repo.GetBufferBinByID(ctx, bufferBinID); err != nil {
+		if errors.Is(err, ErrBufferBinNotFound) {
+			return nil, fmt.Errorf("putaway.Service.AddToPutawayCart: %w", ErrBufferBinNotFound)
+		}
+		return nil, fmt.Errorf("putaway.Service.AddToPutawayCart verify buffer: %w", err)
+	}
+
 	product, err := s.repo.GetProductByID(ctx, productID)
 	if err != nil {
 		return nil, err
@@ -205,7 +210,23 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 
 	key := operatorID.String()
 	s.mu.Lock()
-	delete(s.carts, key)
+	if currentCart, ok := s.carts[key]; ok {
+		placedSet := make(map[uuid.UUID]struct{}, len(productsIDs))
+		for _, id := range productsIDs {
+			placedSet[id] = struct{}{}
+		}
+		remaining := make([]uuid.UUID, 0, len(currentCart))
+		for _, id := range currentCart {
+			if _, placed := placedSet[id]; !placed {
+				remaining = append(remaining, id)
+			}
+		}
+		if len(remaining) == 0 {
+			delete(s.carts, key)
+		} else {
+			s.carts[key] = remaining
+		}
+	}
 	s.mu.Unlock()
 
 	return &ScanStorageBinResponse{

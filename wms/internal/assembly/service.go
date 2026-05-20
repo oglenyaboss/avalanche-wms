@@ -344,7 +344,7 @@ func (s *Service) ScanShippingBuffer(ctx context.Context, operatorID, bufferBinI
 	for _, id := range cart {
 		snapshotSet[id] = struct{}{}
 	}
-	remaining := s.carts[key][:0]
+	remaining := make([]uuid.UUID, 0, len(s.carts[key]))
 	for _, id := range s.carts[key] {
 		if _, inSnapshot := snapshotSet[id]; !inSnapshot {
 			remaining = append(remaining, id)

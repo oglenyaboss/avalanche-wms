@@ -360,9 +360,14 @@ func (r *Repository) UpdateOrdersShippedConditional(ctx context.Context, orderID
 	}
 
 	const query = `
+		WITH locked AS (
+			SELECT order_id FROM wms_inventory.orders
+			WHERE order_id = ANY($1::uuid[]) AND status = 'ASSEMBLED'
+			FOR UPDATE
+		)
 		UPDATE wms_inventory.orders
 		SET status = 'SHIPPED', updated_at = NOW()
-		WHERE order_id = ANY($1::uuid[])
+		WHERE order_id IN (SELECT order_id FROM locked)
 		  AND NOT EXISTS (
 			SELECT 1
 			FROM wms_inventory.products
@@ -380,8 +385,11 @@ func (r *Repository) UpdateOrdersShippedConditional(ctx context.Context, orderID
 func (r *Repository) CountReadyToShipProductsInBuffer(ctx context.Context, binID uuid.UUID) (int, error) {
 	const query = `
 		SELECT COUNT(*)
-		FROM wms_inventory.products
-		WHERE bin_id = $1 AND status = 'READY_TO_SHIP'`
+		FROM wms_inventory.products p
+		JOIN wms_inventory.bins b ON p.bin_id = b.bin_id
+		WHERE b.destination_id = (SELECT destination_id FROM wms_inventory.bins WHERE bin_id = $1)
+		  AND UPPER(TRIM(b.section)) = 'SHIPPING_BUFFER'
+		  AND p.status = 'READY_TO_SHIP'`
 
 	var count int
 	if err := r.q.QueryRow(ctx, query, binID).Scan(&count); err != nil {

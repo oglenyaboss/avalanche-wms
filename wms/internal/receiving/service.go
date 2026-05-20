@@ -111,11 +111,21 @@ func (s *Service) ScanTTN(ctx context.Context, operatorID uuid.UUID, ttnCode str
 		if shipment.Status == shipmentStatusCreated {
 			if err := txRepo.UpdateShipmentStatus(ctx, shipment.ShipmentID, shipmentStatusGateInProgress, shipmentStatusCreated); err != nil {
 				if errors.Is(err, ErrShipmentNotFound) {
-					return fmt.Errorf("receiving.Service.ScanTTN: %w", ErrShipmentAlreadyClosed)
+					current, getErr := txRepo.GetShipmentByID(ctx, shipment.ShipmentID)
+					if getErr != nil {
+						return fmt.Errorf("receiving.Service.ScanTTN recheck shipment: %w", getErr)
+					}
+					if current.Status == shipmentStatusGateInProgress {
+						shipment.Status = shipmentStatusGateInProgress
+					} else {
+						return fmt.Errorf("receiving.Service.ScanTTN: %w", ErrShipmentAlreadyClosed)
+					}
+				} else {
+					return fmt.Errorf("receiving.Service.ScanTTN update shipment status: %w", err)
 				}
-				return fmt.Errorf("receiving.Service.ScanTTN update shipment status: %w", err)
+			} else {
+				shipment.Status = shipmentStatusGateInProgress
 			}
-			shipment.Status = shipmentStatusGateInProgress
 		}
 
 		if err := txRepo.InsertReceivingGateLog(ctx, &GateLogParams{

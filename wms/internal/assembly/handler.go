@@ -92,6 +92,12 @@ func (h *Handler) GetTasks(w http.ResponseWriter, r *http.Request) {
 	if taskStatus == "" {
 		taskStatus = string(domain.TaskStatusPending)
 	}
+	switch domain.TaskStatus(taskStatus) {
+	case domain.TaskStatusPending, domain.TaskStatusInProgress, domain.TaskStatusDone, domain.TaskStatusCancelled:
+	default:
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "неизвестный статус задачи")
+		return
+	}
 
 	result, err := h.svc.GetTasks(r.Context(), destinationID, operatorIDFilter, taskStatus)
 	if err != nil {
