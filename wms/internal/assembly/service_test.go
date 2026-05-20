@@ -78,6 +78,17 @@ type mockAssemblyRepo struct {
 	withTxMu    sync.Mutex
 	withTxCalls int
 	withTxFn    func(func(assemblyRepository) error) error
+
+	// ScanShippingBuffer
+	shippingBufferBin      *domain.Bin
+	shippingBufferBinErr   error
+	validateDestinationErr error
+	productsUpdated        int
+	productsUpdatedErr     error
+	orderIDs               []uuid.UUID
+	orderIDsErr            error
+	ordersUpdated          int
+	ordersUpdatedErr       error
 }
 
 func (m *mockAssemblyRepo) WithTx(_ context.Context, fn func(assemblyRepository) error) error {
@@ -236,6 +247,42 @@ func (m *mockAssemblyRepo) UpdateOrderStatusToAssembled(_ context.Context, order
 	}
 	m.updatedOrderStatus[orderID] = string(domain.OrderStatusAssembled)
 	return nil
+}
+
+func (m *mockAssemblyRepo) GetShippingBufferBinByID(_ context.Context, _ uuid.UUID) (*domain.Bin, error) {
+	if m.shippingBufferBinErr != nil {
+		return nil, m.shippingBufferBinErr
+	}
+	return m.shippingBufferBin, nil
+}
+
+func (m *mockAssemblyRepo) ValidateCartDestination(_ context.Context, _ []uuid.UUID, _ uuid.UUID) error {
+	return m.validateDestinationErr
+}
+
+func (m *mockAssemblyRepo) UpdateProductsToReadyToShip(_ context.Context, _ []uuid.UUID, _ uuid.UUID) (int, error) {
+	if m.productsUpdatedErr != nil {
+		return 0, m.productsUpdatedErr
+	}
+	return m.productsUpdated, nil
+}
+
+func (m *mockAssemblyRepo) UpdateOrdersToAssembled(_ context.Context, _ []uuid.UUID) (int, error) {
+	if m.ordersUpdatedErr != nil {
+		return 0, m.ordersUpdatedErr
+	}
+	return m.ordersUpdated, nil
+}
+
+func (m *mockAssemblyRepo) GetOrderIDsByProductIDs(_ context.Context, _ []uuid.UUID) ([]uuid.UUID, error) {
+	if m.orderIDsErr != nil {
+		return nil, m.orderIDsErr
+	}
+	return m.orderIDs, nil
+}
+
+func stringPtr(s string) *string {
+	return &s
 }
 
 // TestAllocateHappyPath - успешная аллокация одного заказа
@@ -680,7 +727,245 @@ func TestServiceImplementsInterface(_ *testing.T) {
 		Allocate(context.Context, uuid.UUID) (*AllocateResponse, error)
 		GetTasks(context.Context, uuid.UUID, uuid.UUID, string) (*TaskResponse, error)
 		Pick(context.Context, uuid.UUID, uuid.UUID) (*PickResponse, error)
+		ScanShippingBuffer(context.Context, uuid.UUID, uuid.UUID) (*ScanShippingBufferResponse, error)
 	} = (*Service)(nil)
+}
+
+// TestScanShippingBuffer_HappyPath - успешное размещение в буфере
+func TestScanShippingBuffer_HappyPath(t *testing.T) {
+	operatorID := uuid.New()
+	bufferBinID := uuid.New()
+	destinationID := uuid.New()
+	productID1 := uuid.New()
+	productID2 := uuid.New()
+	orderID1 := uuid.New()
+	orderID2 := uuid.New()
+
+	destID := destinationID
+	mockRepo := &mockAssemblyRepo{
+		shippingBufferBin: &domain.Bin{
+			BinID:         bufferBinID,
+			Code:          "SHIP-BUF-01",
+			Section:       stringPtr("SHIPPING_BUFFER"),
+			DestinationID: &destID,
+		},
+		productsUpdated: 2,
+		orderIDs:        []uuid.UUID{orderID1, orderID2},
+		ordersUpdated:   2,
+	}
+
+	svc := NewService(mockRepo)
+	svc.carts[operatorID.String()] = []uuid.UUID{productID1, productID2}
+
+	result, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.BufferBinID != bufferBinID.String() {
+		t.Errorf("expected BufferBinID %s, got %s", bufferBinID.String(), result.BufferBinID)
+	}
+	if result.ProductsPlaced != 2 {
+		t.Errorf("expected ProductsPlaced 2, got %d", result.ProductsPlaced)
+	}
+	if result.OrdersAssembled != 2 {
+		t.Errorf("expected OrdersAssembled 2, got %d", result.OrdersAssembled)
+	}
+	if mockRepo.withTxCalls != 1 {
+		t.Errorf("expected WithTx called, got %d", mockRepo.withTxCalls)
+	}
+	if size := svc.GetCartSize(operatorID); size != 0 {
+		t.Errorf("expected cart cleared, got size %d", size)
+	}
+}
+
+// TestScanShippingBuffer_CartEmpty - пустая корзина
+func TestScanShippingBuffer_CartEmpty(t *testing.T) {
+	operatorID := uuid.New()
+	bufferBinID := uuid.New()
+
+	svc := NewService(&mockAssemblyRepo{})
+
+	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
+
+	if !errors.Is(err, ErrCartEmpty) {
+		t.Errorf("expected ErrCartEmpty, got %v", err)
+	}
+}
+
+// TestScanShippingBuffer_BinNotShippingBuffer - ячейка не SHIPPING_BUFFER
+func TestScanShippingBuffer_BinNotShippingBuffer(t *testing.T) {
+	operatorID := uuid.New()
+	bufferBinID := uuid.New()
+	productID := uuid.New()
+
+	mockRepo := &mockAssemblyRepo{
+		shippingBufferBinErr: ErrBinNotShippingBuffer,
+	}
+
+	svc := NewService(mockRepo)
+	svc.carts[operatorID.String()] = []uuid.UUID{productID}
+
+	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
+
+	if !errors.Is(err, ErrBinNotShippingBuffer) {
+		t.Errorf("expected ErrBinNotShippingBuffer, got %v", err)
+	}
+}
+
+// TestScanShippingBuffer_DestinationMismatch - несоответствие destination (cart не очищается)
+func TestScanShippingBuffer_DestinationMismatch(t *testing.T) {
+	operatorID := uuid.New()
+	bufferBinID := uuid.New()
+	destinationID := uuid.New()
+	productID := uuid.New()
+
+	destID := destinationID
+	mockRepo := &mockAssemblyRepo{
+		shippingBufferBin: &domain.Bin{
+			BinID:         bufferBinID,
+			Code:          "SHIP-BUF-01",
+			Section:       stringPtr("SHIPPING_BUFFER"),
+			DestinationID: &destID,
+		},
+		validateDestinationErr: ErrDestinationMismatch,
+	}
+
+	svc := NewService(mockRepo)
+	svc.carts[operatorID.String()] = []uuid.UUID{productID}
+
+	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
+
+	if !errors.Is(err, ErrDestinationMismatch) {
+		t.Errorf("expected ErrDestinationMismatch, got %v", err)
+	}
+	if size := svc.GetCartSize(operatorID); size != 1 {
+		t.Errorf("expected cart not cleared, got size %d", size)
+	}
+}
+
+// TestScanShippingBuffer_InvalidInput - невалидные входные данные
+func TestScanShippingBuffer_InvalidInput(t *testing.T) {
+	svc := NewService(&mockAssemblyRepo{})
+
+	_, err := svc.ScanShippingBuffer(context.Background(), uuid.Nil, uuid.New())
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for nil operatorID, got %v", err)
+	}
+
+	_, err = svc.ScanShippingBuffer(context.Background(), uuid.New(), uuid.Nil)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("expected ErrInvalidInput for nil bufferBinID, got %v", err)
+	}
+}
+
+// TestScanShippingBuffer_BinWithoutDestination - буфер без destination_id
+func TestScanShippingBuffer_BinWithoutDestination(t *testing.T) {
+	operatorID := uuid.New()
+	bufferBinID := uuid.New()
+	productID := uuid.New()
+
+	mockRepo := &mockAssemblyRepo{
+		shippingBufferBin: &domain.Bin{
+			BinID:         bufferBinID,
+			Code:          "SHIP-BUF-01",
+			Section:       stringPtr("SHIPPING_BUFFER"),
+			DestinationID: nil,
+		},
+	}
+
+	svc := NewService(mockRepo)
+	svc.carts[operatorID.String()] = []uuid.UUID{productID}
+
+	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
+
+	if !errors.Is(err, ErrDestinationNotFound) {
+		t.Errorf("expected ErrDestinationNotFound, got %v", err)
+	}
+}
+
+// TestScanShippingBuffer_PartialPlacement - не все товары размещены
+func TestScanShippingBuffer_PartialPlacement(t *testing.T) {
+	operatorID := uuid.New()
+	bufferBinID := uuid.New()
+	destinationID := uuid.New()
+	productID1 := uuid.New()
+	productID2 := uuid.New()
+
+	destID := destinationID
+	mockRepo := &mockAssemblyRepo{
+		shippingBufferBin: &domain.Bin{
+			BinID:         bufferBinID,
+			Code:          "SHIP-BUF-01",
+			Section:       stringPtr("SHIPPING_BUFFER"),
+			DestinationID: &destID,
+		},
+		productsUpdated: 1, // только 1 из 2 размещён
+	}
+
+	svc := NewService(mockRepo)
+	svc.carts[operatorID.String()] = []uuid.UUID{productID1, productID2}
+
+	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
+
+	if !errors.Is(err, ErrPartialPlacement) {
+		t.Errorf("expected ErrPartialPlacement, got %v", err)
+	}
+	if size := svc.GetCartSize(operatorID); size != 2 {
+		t.Errorf("expected cart NOT cleared on failure, got size %d", size)
+	}
+}
+
+// TestScanShippingBuffer_ConcurrentPickPreservesNewItems - гонка: Pick добавляет элемент во время ScanShippingBuffer
+func TestScanShippingBuffer_ConcurrentPickPreservesNewItems(t *testing.T) {
+	operatorID := uuid.New()
+	bufferBinID := uuid.New()
+	destinationID := uuid.New()
+	productID1 := uuid.New()
+	productID2 := uuid.New()
+	productIDNew := uuid.New()
+
+	destID := destinationID
+	mockRepo := &mockAssemblyRepo{
+		shippingBufferBin: &domain.Bin{
+			BinID:         bufferBinID,
+			Code:          "SHIP-BUF-01",
+			Section:       stringPtr("SHIPPING_BUFFER"),
+			DestinationID: &destID,
+		},
+		productsUpdated: 2,
+		orderIDs:        []uuid.UUID{uuid.New()},
+		ordersUpdated:   1,
+	}
+
+	svc := NewService(mockRepo)
+	svc.carts[operatorID.String()] = []uuid.UUID{productID1, productID2}
+
+	// Симулируем: после снапшота но перед очисткой, Pick добавляет новый элемент
+	mockRepo.withTxFn = func(fn func(assemblyRepository) error) error {
+		err := fn(mockRepo)
+		if err != nil {
+			return err
+		}
+		// Симулируем конкурентный Pick — добавляем productIDNew в cart
+		svc.mu.Lock()
+		svc.carts[operatorID.String()] = append(svc.carts[operatorID.String()], productIDNew)
+		svc.mu.Unlock()
+		return nil
+	}
+
+	result, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.ProductsPlaced != 2 {
+		t.Errorf("expected 2 products placed, got %d", result.ProductsPlaced)
+	}
+	// productIDNew должен остаться в cart
+	if size := svc.GetCartSize(operatorID); size != 1 {
+		t.Errorf("expected cart size 1 (new item preserved), got %d", size)
+	}
 }
 
 // BenchmarkAllocate - бенчмарк для аллокации

@@ -37,6 +37,11 @@ type assemblyRepository interface {
 	GetTasks(ctx context.Context, destinationID, operatorID uuid.UUID, status string) ([]TaskItem, error)
 	AreAllTasksDoneForOrder(ctx context.Context, orderID uuid.UUID) (bool, error)
 	UpdateOrderStatusToAssembled(ctx context.Context, orderID uuid.UUID) error
+	GetShippingBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error)
+	ValidateCartDestination(ctx context.Context, productIDs []uuid.UUID, expectedDestinationID uuid.UUID) error
+	UpdateProductsToReadyToShip(ctx context.Context, productIDs []uuid.UUID, binID uuid.UUID) (int, error)
+	UpdateOrdersToAssembled(ctx context.Context, orderIDs []uuid.UUID) (int, error)
+	GetOrderIDsByProductIDs(ctx context.Context, productIDs []uuid.UUID) ([]uuid.UUID, error)
 }
 
 func NewService(repo assemblyRepository) *Service {
@@ -263,7 +268,6 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 			if err := txRepo.UpdateOrderStatusToAssembled(ctx, task.OrderID); err != nil {
 				return fmt.Errorf("assembly.Service.Pick update order status: %w", err)
 			}
-			s.CleanupCart(operatorID)
 		}
 
 		return nil
@@ -282,6 +286,95 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 	return &PickResponse{
 		ProductID: productID.String(),
 		CartSize:  cartSize,
+	}, nil
+}
+
+// ScanShippingBuffer размещает товары из корзины оператора в буфер отгрузки магазина
+func (s *Service) ScanShippingBuffer(ctx context.Context, operatorID, bufferBinID uuid.UUID) (*ScanShippingBufferResponse, error) {
+	if operatorID == uuid.Nil || bufferBinID == uuid.Nil {
+		return nil, fmt.Errorf("assembly.Service.ScanShippingBuffer: %w", ErrInvalidInput)
+	}
+
+	key := operatorID.String()
+	s.mu.RLock()
+	cart := make([]uuid.UUID, len(s.carts[key]))
+	copy(cart, s.carts[key])
+	s.mu.RUnlock()
+
+	if len(cart) == 0 {
+		return nil, ErrCartEmpty
+	}
+
+	var bufferBin *domain.Bin
+	var productsPlaced int
+	var ordersAssembled int
+
+	err := s.repo.WithTx(ctx, func(txRepo assemblyRepository) error {
+		var err error
+		bufferBin, err = txRepo.GetShippingBufferBinByID(ctx, bufferBinID)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer get bin: %w", err)
+		}
+
+		if bufferBin.DestinationID == nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer: %w", ErrDestinationNotFound)
+		}
+
+		if err := txRepo.ValidateCartDestination(ctx, cart, *bufferBin.DestinationID); err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer validate destination: %w", err)
+		}
+
+		placed, err := txRepo.UpdateProductsToReadyToShip(ctx, cart, bufferBinID)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer update products: %w", err)
+		}
+		if placed != len(cart) {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer placed %d of %d: %w", placed, len(cart), ErrPartialPlacement)
+		}
+		productsPlaced = placed
+
+		orderIDs, err := txRepo.GetOrderIDsByProductIDs(ctx, cart)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer get order IDs: %w", err)
+		}
+
+		assembled, err := txRepo.UpdateOrdersToAssembled(ctx, orderIDs)
+		if err != nil {
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer update orders: %w", err)
+		}
+		ordersAssembled = assembled
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// FIX: удаляем только элементы из снапшота, а не весь cart,
+	// чтобы не потерять продукты, добавленные конкурентным Pick
+	s.mu.Lock()
+	snapshotSet := make(map[uuid.UUID]struct{}, len(cart))
+	for _, id := range cart {
+		snapshotSet[id] = struct{}{}
+	}
+	remaining := s.carts[key][:0]
+	for _, id := range s.carts[key] {
+		if _, inSnapshot := snapshotSet[id]; !inSnapshot {
+			remaining = append(remaining, id)
+		}
+	}
+	if len(remaining) == 0 {
+		delete(s.carts, key)
+	} else {
+		s.carts[key] = remaining
+	}
+	s.mu.Unlock()
+
+	return &ScanShippingBufferResponse{
+		BufferBinID:     bufferBin.BinID.String(),
+		ProductsPlaced:  productsPlaced,
+		OrdersAssembled: ordersAssembled,
 	}, nil
 }
 
