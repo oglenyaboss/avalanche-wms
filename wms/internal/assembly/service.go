@@ -33,10 +33,8 @@ type assemblyRepository interface {
 	GetProductByIDForUpdate(ctx context.Context, productID uuid.UUID) (*domain.Product, error)
 	MarkTaskDone(ctx context.Context, eventID, operatorID uuid.UUID) error
 	SetProductAssembled(ctx context.Context, productID uuid.UUID) error
-	InsertPickOutboxEvent(ctx context.Context, productID uuid.UUID) error
+	InsertPickOutboxEvent(ctx context.Context, productID, eventID uuid.UUID) error
 	GetTasks(ctx context.Context, destinationID, operatorID uuid.UUID, status string) ([]TaskItem, error)
-	AreAllTasksDoneForOrder(ctx context.Context, orderID uuid.UUID) (bool, error)
-	UpdateOrderStatusToAssembled(ctx context.Context, orderID uuid.UUID) error
 	GetShippingBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error)
 	ValidateCartDestination(ctx context.Context, productIDs []uuid.UUID, expectedDestinationID uuid.UUID) error
 	UpdateProductsToReadyToShip(ctx context.Context, productIDs []uuid.UUID, binID uuid.UUID) (int, error)
@@ -230,7 +228,6 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 	}
 
 	var task *Task
-	var allTasksDone bool
 
 	err := s.repo.WithTx(ctx, func(txRepo assemblyRepository) error {
 		var err error
@@ -255,19 +252,8 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 			return fmt.Errorf("assembly.Service.Pick set product assembled: %w", err)
 		}
 
-		if err := txRepo.InsertPickOutboxEvent(ctx, productID); err != nil {
+		if err := txRepo.InsertPickOutboxEvent(ctx, productID, task.EventID); err != nil {
 			return fmt.Errorf("assembly.Service.Pick insert outbox: %w", err)
-		}
-
-		allTasksDone, err = txRepo.AreAllTasksDoneForOrder(ctx, task.OrderID)
-		if err != nil {
-			return fmt.Errorf("assembly.Service.Pick check all tasks: %w", err)
-		}
-
-		if allTasksDone {
-			if err := txRepo.UpdateOrderStatusToAssembled(ctx, task.OrderID); err != nil {
-				return fmt.Errorf("assembly.Service.Pick update order status: %w", err)
-			}
 		}
 
 		return nil
