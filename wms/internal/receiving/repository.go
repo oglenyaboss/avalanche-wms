@@ -264,9 +264,9 @@ func (r *Repository) MarkExpectedAsNotReceived(
 	const query = `
 		UPDATE wms_inventory.cargoplaces
 		SET status = $2
-		WHERE shipment_id = $1 AND status = 'EXPECTED'`
+		WHERE shipment_id = $1 AND status = $3`
 
-	if _, err := r.q.Exec(ctx, query, shipmentID, notReceivedStatus); err != nil {
+	if _, err := r.q.Exec(ctx, query, shipmentID, notReceivedStatus, cargoplaceStatusExpected); err != nil {
 		return fmt.Errorf("receiving.Repository.MarkExpectedAsNotReceived exec: %w", err)
 	}
 	return nil
@@ -352,7 +352,17 @@ func (r *Repository) UpsertBox(
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("receiving.Repository.UpsertBox: %w", ErrBoxNotOpen)
+			// ErrNoRows здесь возможен только при ON CONFLICT DO UPDATE WHERE status != 'CLOSED'
+			// — то есть существующий box в статусе CLOSED. Проверяем явно, чтобы не маппить
+			// слепо все ErrNoRows в BoxNotOpen (защита от будущих изменений в SQL).
+			existing, getErr := r.GetBoxByCargoplaceAndBarcode(ctx, cargoplaceID, boxBarcode)
+			if getErr != nil {
+				return nil, fmt.Errorf("receiving.Repository.UpsertBox verify state: %w", getErr)
+			}
+			if existing.Status == boxStatusClosed {
+				return nil, fmt.Errorf("receiving.Repository.UpsertBox: %w", ErrBoxNotOpen)
+			}
+			return nil, fmt.Errorf("receiving.Repository.UpsertBox: unexpected no rows with box status %s", existing.Status)
 		}
 		return nil, fmt.Errorf("receiving.Repository.UpsertBox scan: %w", err)
 	}
@@ -562,10 +572,16 @@ func (r *Repository) ScanBufferWithLog(
 	bufferBinID uuid.UUID,
 	logParams *TableLogParams,
 ) (int, error) {
+	// Перемещаем только продукты из закрытых boxes — flow требует close-box перед scan-buffer.
+	// Без этого фильтра OPEN box с частично заполненными QR'ами тоже попадёт в буфер.
 	const moveQuery = `
-		UPDATE wms_inventory.products
+		UPDATE wms_inventory.products p
 		SET bin_id = $2, updated_at = now()
-		WHERE cargoplace_id = $1 AND status = 'RECEIVED'`
+		FROM wms_inventory.boxes b
+		WHERE p.box_id = b.box_id
+		  AND p.cargoplace_id = $1
+		  AND p.status = 'RECEIVED'
+		  AND b.status = 'CLOSED'`
 
 	tag, err := r.q.Exec(ctx, moveQuery, cargoplaceID, bufferBinID)
 	if err != nil {
@@ -678,6 +694,11 @@ func (r *Repository) InsertReceivingTableLog(ctx context.Context, params *TableL
 }
 
 // CloseCargoplaceWithOutbox
+// CloseCargoplaceWithOutbox: закрытие cargoplace + продукты + outbox в одной транзакции.
+//
+// ВНИМАНИЕ: метод сам управляет транзакцией через r.db.Begin — НЕ оборачивать в WithTx.
+// При оборачивании внешняя tx и внутренний Begin возьмут разные коннекты из пула,
+// нарушится изоляция, FOR UPDATE'ы и видимость промежуточных записей сломаются.
 func (r *Repository) CloseCargoplaceWithOutbox(
 	ctx context.Context,
 	params *CloseCargoplaceParams,
@@ -919,6 +940,16 @@ func (r *Repository) listReceivedProductCountsBySKUTx(
 	return items, nil
 }
 
+// insertOutboxEventsTx вставляет outbox-события для всех продуктов закрываемого cargoplace.
+//
+// Защита от дублей сейчас обеспечивается на уровне UPDATE wms_inventory.cargoplaces
+// в CloseCargoplaceWithOutbox: повторный вызов второй раз не пройдёт WHERE status='TABLE_IN_PROGRESS'
+// и метод вернёт ErrCargoplaceNotInProgress до этого INSERT'а. Поэтому отдельный
+// ON CONFLICT здесь не нужен — event_id всегда новый (uuid.New()).
+//
+// Если в будущем появится worker-level retry (с тем же payload), потребуется
+// unique constraint на (aggregate_id, payload_hash) в public.outbox_events
+// и соответствующий ON CONFLICT — это вне scope текущей задачи.
 func (r *Repository) insertOutboxEventsTx(
 	ctx context.Context,
 	tx pgx.Tx,

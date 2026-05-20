@@ -13,18 +13,22 @@ import (
 )
 
 type mockReceivingRepo struct {
-	shipmentByTTN                *domain.InboundShipment
-	shipmentByTTNErr             error
-	shipmentByID                 *domain.InboundShipment
-	shipmentByIDErr              error
-	cargoplaces                  []domain.Cargoplace
-	listCargoplacesErr           error
-	cargoplace                   *domain.Cargoplace
-	cargoplaceErr                error
-	cargoplaceByID               *domain.Cargoplace
-	cargoplaceByIDErr            error
-	updateShipmentStatusCalls    []string
-	updateShipmentStatusErr      error
+	shipmentByTTN             *domain.InboundShipment
+	shipmentByTTNErr          error
+	shipmentByID              *domain.InboundShipment
+	shipmentByIDErr           error
+	cargoplaces               []domain.Cargoplace
+	listCargoplacesErr        error
+	cargoplace                *domain.Cargoplace
+	cargoplaceErr             error
+	cargoplaceByID            *domain.Cargoplace
+	cargoplaceByIDErr         error
+	updateShipmentStatusCalls []string
+	updateShipmentStatusErr   error
+	// simulateConcurrentClose: при true UpdateShipmentStatus возвращает ErrShipmentNotFound
+	// (как при конкурентном закрытии shipment), но при этом ставит shipmentByID.Status = newStatus
+	// — имитирует «другой оператор уже закрыл shipment».
+	simulateConcurrentClose      bool
 	updateCargoplaceID           uuid.UUID
 	updateCargoplaceStatus       string
 	updateCargoplaceReceivedAt   time.Time
@@ -192,6 +196,17 @@ func (m *mockReceivingRepo) GetCargoplaceByID(_ context.Context, _ uuid.UUID) (*
 
 func (m *mockReceivingRepo) UpdateShipmentStatus(_ context.Context, shipmentID uuid.UUID, status, _ string) error {
 	m.updateShipmentStatusCalls = append(m.updateShipmentStatusCalls, shipmentID.String()+":"+status)
+	if m.simulateConcurrentClose {
+		// Конкурент уже выполнил такой же UPDATE → наш WHERE не нашёл строки.
+		// Сам конкурент уже выставил status, имитируем эффект.
+		if m.shipmentByID != nil && m.shipmentByID.ShipmentID == shipmentID {
+			m.shipmentByID.Status = status
+		}
+		if m.shipmentByTTN != nil && m.shipmentByTTN.ShipmentID == shipmentID {
+			m.shipmentByTTN.Status = status
+		}
+		return ErrShipmentNotFound
+	}
 	if m.updateShipmentStatusErr != nil {
 		return m.updateShipmentStatusErr
 	}
@@ -567,6 +582,48 @@ func TestServiceScanCargoplaceAutoClosesShipmentWhenAllReceived(t *testing.T) {
 	}
 }
 
+func TestServiceScanCargoplaceAutoCloseIdempotentOnRace(t *testing.T) {
+	// Гонка: оператор B сканирует последний cargoplace, но shipment уже закрыт оператором A.
+	// tryAutoCloseShipment получает ErrShipmentNotFound, но это не должно приводить к ошибке —
+	// конкурент успешно закрыл shipment, а скан B уже учтён в UpdateCargoplaceReceivedAtGate.
+	shipmentID := uuid.New()
+	operatorID := uuid.New()
+	repo := &mockReceivingRepo{
+		shipmentByID: &domain.InboundShipment{
+			ShipmentID: shipmentID,
+			TTNCode:    "TTN-RACE",
+			Status:     shipmentStatusGateInProgress,
+		},
+		cargoplace: &domain.Cargoplace{
+			CargoplaceID:   uuid.New(),
+			ShipmentID:     shipmentID,
+			CargoplaceCode: "CP-RACE",
+			Status:         cargoplaceStatusExpected,
+		},
+		countTotal: 1,
+		countByStatus: map[string]int{
+			cargoplaceStatusReceivedAtGate: 1,
+		},
+		simulateConcurrentClose: true,
+	}
+
+	_, err := NewService(repo).ScanCargoplace(context.Background(), operatorID, shipmentID, "CP-RACE")
+	if err != nil {
+		t.Fatalf("expected no error on concurrent close race, got %v", err)
+	}
+	if len(repo.updateShipmentStatusCalls) != 1 {
+		t.Fatalf("expected single UpdateShipmentStatus attempt, got %d", len(repo.updateShipmentStatusCalls))
+	}
+	// Лог SHIPMENT_ACCEPTED — только один (от SCAN_CARGOPLACE), второй (от auto-close) НЕ должен
+	// быть вставлен — его уже вставил конкурент. Иначе получим дубль лога SHIPMENT_ACCEPTED.
+	if len(repo.insertReceivingGateLogs) != 1 {
+		t.Fatalf("expected single gate log (SCAN_CARGOPLACE), got %d: %+v", len(repo.insertReceivingGateLogs), repo.insertReceivingGateLogs)
+	}
+	if repo.insertReceivingGateLogs[0].Action != "SCAN_CARGOPLACE" {
+		t.Fatalf("expected SCAN_CARGOPLACE log, got %+v", repo.insertReceivingGateLogs[0])
+	}
+}
+
 func TestServiceAcceptShipmentMarksMissingAsNotReceived(t *testing.T) {
 	shipmentID := uuid.New()
 	operatorID := uuid.New()
@@ -579,6 +636,7 @@ func TestServiceAcceptShipmentMarksMissingAsNotReceived(t *testing.T) {
 		countTotal: 4,
 		countByStatus: map[string]int{
 			cargoplaceStatusReceivedAtGate: 3,
+			cargoplaceStatusNotReceived:    1,
 		},
 	}
 

@@ -2,6 +2,7 @@ package putaway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ type putawayRepository interface {
 	GetBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error)
 	GetStorageBinByID(ctx context.Context, StorageBinID uuid.UUID) (*domain.Bin, error)
 	ListProductsByBufferBin(ctx context.Context, bufferBinID uuid.UUID) ([]*ProductBufferItem, error)
+	GetProductByID(ctx context.Context, productID uuid.UUID) (*domain.Product, error)
 	GetProductsByIDForUpdate(ctx context.Context, productID uuid.UUID) (*domain.Product, error)
 	GetSKUByProductID(ctx context.Context, productID uuid.UUID) (*domain.SKU, error)
 	UpdateProductStorage(ctx context.Context, productID, binID uuid.UUID) error
@@ -80,7 +82,14 @@ func (s *Service) AddToPutawayCart(ctx context.Context, operatorID, productID, b
 	var product *domain.Product
 	var sku *domain.SKU
 
-	product, err := s.repo.GetProductsByIDForUpdate(ctx, productID)
+	if _, err := s.repo.GetBufferBinByID(ctx, bufferBinID); err != nil {
+		if errors.Is(err, ErrBufferBinNotFound) {
+			return nil, fmt.Errorf("putaway.Service.AddToPutawayCart: %w", ErrBufferBinNotFound)
+		}
+		return nil, fmt.Errorf("putaway.Service.AddToPutawayCart verify buffer: %w", err)
+	}
+
+	product, err := s.repo.GetProductByID(ctx, productID)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +148,10 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 			return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin: %w", err)
 		}
 
+		// Кэш проверенных буферных ячеек: типично все товары из одного буфера, но
+		// API не запрещает раскладку из нескольких — кэшируем чтобы избежать N запросов.
+		verifiedBuffers := make(map[uuid.UUID]struct{})
+
 		for _, productID := range productsIDs {
 			product, err := txRepo.GetProductsByIDForUpdate(ctx, productID)
 			if err != nil {
@@ -148,6 +161,19 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin product %s: %w", productID, ErrProductNotInBuffer)
 			}
 			fromBinID := *product.BinID
+
+			// Защита от drift: статус RECEIVED + bin = storage (не buffer) означает, что
+			// putaway уже произошёл, но статус продукта почему-то не обновился. Без этой
+			// проверки получим лишний putaway outbox event и FSM revert на чейне.
+			if _, ok := verifiedBuffers[fromBinID]; !ok {
+				if _, err := txRepo.GetBufferBinByID(ctx, fromBinID); err != nil {
+					if errors.Is(err, ErrBufferBinNotFound) {
+						return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin product %s: %w", productID, ErrProductNotInBuffer)
+					}
+					return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin verify buffer for product %s: %w", productID, err)
+				}
+				verifiedBuffers[fromBinID] = struct{}{}
+			}
 
 			if err := txRepo.UpdateProductStorage(ctx, productID, storageBinID); err != nil {
 				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin update product %s: %w", productID, err)
@@ -184,7 +210,23 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 
 	key := operatorID.String()
 	s.mu.Lock()
-	delete(s.carts, key)
+	if currentCart, ok := s.carts[key]; ok {
+		placedSet := make(map[uuid.UUID]struct{}, len(productsIDs))
+		for _, id := range productsIDs {
+			placedSet[id] = struct{}{}
+		}
+		remaining := make([]uuid.UUID, 0, len(currentCart))
+		for _, id := range currentCart {
+			if _, placed := placedSet[id]; !placed {
+				remaining = append(remaining, id)
+			}
+		}
+		if len(remaining) == 0 {
+			delete(s.carts, key)
+		} else {
+			s.carts[key] = remaining
+		}
+	}
 	s.mu.Unlock()
 
 	return &ScanStorageBinResponse{

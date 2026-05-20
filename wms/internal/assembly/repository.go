@@ -236,7 +236,7 @@ func (r *Repository) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID, s
 	const query = `
 		UPDATE wms_inventory.orders
 		SET status = $2, updated_at = NOW()
-		WHERE order_id = $1`
+		WHERE order_id = $1 AND status = 'NEW'`
 
 	tag, err := r.q.Exec(ctx, query, orderID, status)
 	if err != nil {
@@ -294,7 +294,7 @@ func (r *Repository) MarkTaskDone(ctx context.Context, eventID, operatorID uuid.
 		UPDATE wms_ops.assembly_tasks
 		SET status = 'DONE', operator_id = $2, onchain_status = 'PENDING_ONCHAIN',
 		    occurred_at = NOW(), updated_at = NOW()
-		WHERE event_id = $1`
+		WHERE event_id = $1 AND status = 'PENDING'`
 
 	tag, err := r.q.Exec(ctx, query, eventID, operatorID)
 	if err != nil {

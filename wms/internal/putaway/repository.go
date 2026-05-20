@@ -57,11 +57,12 @@ func (r *Repository) WithTx(ctx context.Context, fn func(putawayRepository) erro
 }
 
 // GetBufferBinID возвращает буферную ячейку по ID (именно буферную!)
+// Сравнение через UPPER(TRIM(...)) — устойчивость к дрифту регистра/пробелов в seed-данных.
 func (r *Repository) GetBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error) {
 	const query = `
 		SELECT bin_id, warehouse_id, code, section, volume, created_at, updated_at
 		FROM wms_inventory.bins
-		WHERE bin_id = $1 AND section = 'BUFFER'`
+		WHERE bin_id = $1 AND UPPER(TRIM(section)) = 'BUFFER'`
 	var bin domain.Bin
 	err := r.q.QueryRow(ctx, query, bufferBinID).Scan(&bin.BinID, &bin.WarehouseID, &bin.Code, &bin.Section, &bin.Volume, &bin.CreatedAt, &bin.UpdatedAt)
 	if err != nil {
@@ -76,11 +77,14 @@ func (r *Repository) GetBufferBinByID(ctx context.Context, bufferBinID uuid.UUID
 // GetStorageBinID возвращает ячейку хранения по ID (любая ячейка кроме буфера).
 // Поле bins.section — произвольная метка зоны склада. Зарезервировано 2 токена: 'BUFFER' и 'SHIPPING_BUFFER',
 // размещение в которые через putaway запрещено. Прочие значения рассматриваются как зоны хранения.
+// Сравнение через UPPER(TRIM(...)) — устойчивость к дрифту регистра/пробелов в seed-данных.
 func (r *Repository) GetStorageBinByID(ctx context.Context, storageBinID uuid.UUID) (*domain.Bin, error) {
 	const query = `
 		SELECT bin_id, warehouse_id, code, section, volume, created_at, updated_at
 		FROM wms_inventory.bins
-		WHERE bin_id = $1 AND section IS DISTINCT FROM 'BUFFER' AND section IS DISTINCT FROM 'SHIPPING_BUFFER'`
+		WHERE bin_id = $1
+		  AND UPPER(TRIM(section)) IS DISTINCT FROM 'BUFFER'
+		  AND UPPER(TRIM(section)) IS DISTINCT FROM 'SHIPPING_BUFFER'`
 	var bin domain.Bin
 	err := r.q.QueryRow(ctx, query, storageBinID).Scan(&bin.BinID, &bin.WarehouseID, &bin.Code, &bin.Section, &bin.Volume, &bin.CreatedAt, &bin.UpdatedAt)
 	if err != nil {
@@ -122,8 +126,28 @@ func (r *Repository) ListProductsByBufferBin(ctx context.Context, bufferBinID uu
 	return products, nil
 }
 
-// GetProductsByBinID возвращает товар  по ID и блокирует строку для предотвращения конкурентных изменений
-// таким образом мы избавляемся от ошибки, когда два оператора раскладывают один и тот же товар
+// GetProductByID возвращает товар по ID без блокировки. Использовать для read-only сценариев
+// (валидация, отображение). Для модифицирующих операций — GetProductsByIDForUpdate внутри транзакции.
+func (r *Repository) GetProductByID(ctx context.Context, productID uuid.UUID) (*domain.Product, error) {
+	const query = `
+		SELECT product_id, sku_id, shipment_id, cargoplace_id, box_id, qr_code, bin_id, order_id, status, created_at, updated_at
+		FROM wms_inventory.products
+		WHERE product_id = $1`
+
+	var p domain.Product
+	err := r.q.QueryRow(ctx, query, productID).Scan(&p.ProductID, &p.SKUID, &p.ShipmentID, &p.CargoplaceID, &p.BoxID, &p.QRCode, &p.BinID, &p.OrderID, &p.Status, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("putaway.Repository.GetProductByID: %w", ErrProductNotFound)
+		}
+		return nil, fmt.Errorf("putaway.Repository.GetProductByID scan: %w", err)
+	}
+	return &p, nil
+}
+
+// GetProductsByIDForUpdate возвращает товар по ID и блокирует строку для предотвращения конкурентных
+// изменений. Имеет смысл только внутри транзакции (WithTx) — иначе FOR UPDATE снимется сразу после
+// auto-commit и lock будет фиктивным.
 func (r *Repository) GetProductsByIDForUpdate(ctx context.Context, productID uuid.UUID) (*domain.Product, error) {
 	const query = `
 		SELECT product_id, sku_id, shipment_id, cargoplace_id, box_id, qr_code, bin_id, order_id, status, created_at, updated_at
