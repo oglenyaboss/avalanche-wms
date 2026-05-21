@@ -1,4 +1,4 @@
-.PHONY: help up down build logs lint test tidy vendor init migrate seed
+.PHONY: help up down build logs lint test tidy vendor init migrate seed e2e-test-outbound
 
 COMPOSE := docker compose
 
@@ -52,6 +52,9 @@ vendor-ledger: ## Rebuild ledger-adapter vendor
 lint: lint-wms lint-ledger ## Lint all Go code
 
 test: test-wms test-ledger ## Run all tests
+
+e2e-test-outbound: ## Run full outbound WMS API -> DB -> Kafka -> chain e2e test
+	cd tests/e2e && RPC_URL=http://localhost:9650/ext/bc/C/rpc go test -tags=e2e -count=1 -timeout=15m ./...
 
 tidy: tidy-wms tidy-ledger ## Tidy all go.mod
 
