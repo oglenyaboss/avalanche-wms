@@ -105,7 +105,8 @@ FROM (
     ('Кроссовки Nike Air Max 90', 'Повседневные кроссовки, мужская линейка', 9.5::numeric),
     ('Футболка Adidas Originals', 'Базовая хлопковая футболка', 1.2::numeric),
     ('Рюкзак Puma Core', 'Городской рюкзак 22 литра', 7.0::numeric),
-    ('Куртка The North Face', 'Демисезонная куртка', 12.0::numeric)
+    ('Куртка The North Face', 'Демисезонная куртка', 12.0::numeric),
+    ('E2E Seed Outbound SKU', 'Dedicated SKU for seeded outbound e2e flow', 1.0::numeric)
 ) AS v(name, description, volume)
 ON CONFLICT DO NOTHING;
 
@@ -118,7 +119,8 @@ FROM (
     ('Кроссовки Nike Air Max 90', '4600000000028'),
     ('Футболка Adidas Originals', '4600000000035'),
     ('Рюкзак Puma Core', '4600000000042'),
-    ('Куртка The North Face', '4600000000059')
+    ('Куртка The North Face', '4600000000059'),
+    ('E2E Seed Outbound SKU', '4600000099999')
 ) AS v(sku_name, barcode)
 JOIN wms_inventory.skus s ON s.name = v.sku_name
 ON CONFLICT (barcode) DO NOTHING;
@@ -247,7 +249,8 @@ SELECT
 FROM (
   VALUES
     ('CP-TABLE-001', 'Кроссовки Nike Air Max 90', 2),
-    ('CP-TABLE-001', 'Футболка Adidas Originals', 1)
+    ('CP-TABLE-001', 'Футболка Adidas Originals', 1),
+    ('CP-TABLE-001', 'E2E Seed Outbound SKU', 1)
 ) AS v(cargoplace_code, sku_name, expected_qty)
 JOIN wms_inventory.inbound_shipments sh ON sh.ttn_code = 'ТТН-2026-TABLE-001'
 JOIN wms_inventory.cargoplaces c
@@ -390,7 +393,8 @@ FROM (
   VALUES
     ('ORD-2026-0042', 'SHOP-5', 'ALLOCATED'),
     ('ORD-2026-0043', 'SHOP-7', 'SHIPPED'),
-    ('ORD-2026-0501', 'SHOP-5', 'NEW')
+    ('ORD-2026-0501', 'SHOP-5', 'NEW'),
+    ('ORD-2026-E2E-OUTBOUND', 'SHOP-7', 'NEW')
 ) AS v(external_order_no, destination_code, status)
 JOIN public.users u ON u.username = 'customer'
 JOIN wms_inventory.warehouses w ON w.name = 'Склад Москва-Север'
@@ -474,7 +478,8 @@ FROM (
     ('ORD-2026-0043', 'Рюкзак Puma Core', 1),
     ('ORD-2026-0043', 'Куртка The North Face', 1),
     ('ORD-2026-0501', 'Кроссовки Nike Air Max 90', 5),
-    ('ORD-2026-0501', 'Футболка Adidas Originals', 5)
+    ('ORD-2026-0501', 'Футболка Adidas Originals', 5),
+    ('ORD-2026-E2E-OUTBOUND', 'E2E Seed Outbound SKU', 1)
 ) AS v(external_order_no, sku_name, qty)
 JOIN wms_inventory.orders o ON o.external_order_no = v.external_order_no
 JOIN wms_inventory.skus s ON s.name = v.sku_name
@@ -509,7 +514,8 @@ SELECT
   now()
 FROM (
   VALUES
-    ('DSP-2026-0421-001', 'SHOP-5', 'A123BC777', 'Иван Петров', '+7 (999) 555-00-11', 'SCHEDULED', now() + interval '1 day')
+    ('DSP-2026-0421-001', 'SHOP-5', 'A123BC777', 'Иван Петров', '+7 (999) 555-00-11', 'SCHEDULED', now() + interval '1 day'),
+    ('DSP-2026-E2E-OUTBOUND', 'SHOP-7', 'E2E777', 'E2E Driver', '+7 (999) 555-00-22', 'SCHEDULED', now() + interval '1 day')
 ) AS v(dispatch_code, destination_code, vehicle_number, driver_name, driver_phone, status, scheduled_at)
 JOIN wms_inventory.warehouses w ON w.name = 'Склад Москва-Север'
 JOIN wms_inventory.destinations d
