@@ -10,10 +10,10 @@ import type { LoginFormValues } from './schema'
 
 function getLoginErrorMessage(error: unknown) {
   if (isAxiosError(error) && error.response?.status === 401) {
-    return 'РќРµРІРµСЂРЅС‹Р№ Р»РѕРіРёРЅ РёР»Рё РїР°СЂРѕР»СЊ'
+    return 'Неверный логин или пароль'
   }
 
-  return 'РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹РїРѕР»РЅРёС‚СЊ РІС…РѕРґ'
+  return 'Не удалось выполнить вход'
 }
 
 export function useLogin() {

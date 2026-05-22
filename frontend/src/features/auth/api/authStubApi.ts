@@ -4,13 +4,9 @@
 } from '../model/schema'
 
 export async function submitTemporaryRegistration(
-  values: RegistrationFormValues,
-) {
-  void values
-}
+  _values: RegistrationFormValues,
+) {}
 
 export async function submitTemporaryPasswordReset(
-  values: PasswordResetFormValues,
-) {
-  void values
-}
+  _values: PasswordResetFormValues,
+) {}

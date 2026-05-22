@@ -36,19 +36,19 @@ export function PasswordResetForm({
       <form onSubmit={onSubmit}>
         <FieldGroup className="gap-5">
           <Field>
-            <FieldLabel htmlFor="password-reset-username">Почта</FieldLabel>
+            <FieldLabel htmlFor="password-reset-username">Логин</FieldLabel>
             <Input
               id="password-reset-username"
               autoComplete="username"
               aria-invalid={Boolean(errors.username)}
-              placeholder="Введите вашу почту"
+              placeholder="Введите ваш логин"
               {...register('username')}
             />
           </Field>
           <Field>
             <FieldLabel htmlFor="password-reset-password">Пароль</FieldLabel>
             <FieldDescription className="min-h-5">
-              Пароль должен содержать не менее 8 символов
+              Пароль должен содержать не менее 6 символов
             </FieldDescription>
             <PasswordInput
               id="password-reset-password"

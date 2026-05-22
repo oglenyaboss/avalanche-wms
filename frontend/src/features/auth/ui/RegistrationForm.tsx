@@ -36,19 +36,19 @@ export function RegistrationForm({
       <form onSubmit={onSubmit}>
         <FieldGroup className="gap-5">
           <Field>
-            <FieldLabel htmlFor="registration-username">Почта</FieldLabel>
+            <FieldLabel htmlFor="registration-username">Логин</FieldLabel>
             <Input
               id="registration-username"
               autoComplete="username"
               aria-invalid={Boolean(errors.username)}
-              placeholder="Введите вашу почту"
+              placeholder="Введите ваш логин"
               {...register('username')}
             />
           </Field>
           <Field>
             <FieldLabel htmlFor="registration-password">Пароль</FieldLabel>
             <FieldDescription className="min-h-5">
-              Пароль должен содержать не менее 8 символов
+              Пароль должен содержать не менее 6 символов
             </FieldDescription>
             <PasswordInput
               id="registration-password"

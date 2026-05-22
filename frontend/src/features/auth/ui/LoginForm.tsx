@@ -1,7 +1,6 @@
 ﻿import {
   Button,
   Field,
-  FieldDescription,
   FieldGroup,
   FieldLabel,
   Input,
@@ -43,15 +42,8 @@ export function LoginForm({
   const status = loginError ? (
     <AuthStatusAlert
       variant="destructive"
-      title="Неправильные данные"
-      description={
-        <>
-          Пожалуйста, проверьте корректность вводимых почты и пароля.
-          <br />
-          Убедитесь, что аккаунт, зарегистрированный под данной почтой,
-          существует.
-        </>
-      }
+      title="Не удалось войти"
+      description={loginError}
     />
   ) : successAlert ? (
     <AuthStatusAlert
@@ -66,20 +58,17 @@ export function LoginForm({
       <form onSubmit={onSubmit}>
         <FieldGroup className="gap-5">
           <Field>
-            <FieldLabel htmlFor="username">Почта</FieldLabel>
+            <FieldLabel htmlFor="username">Логин</FieldLabel>
             <Input
               id="username"
               autoComplete="username"
               aria-invalid={Boolean(errors.username)}
-              placeholder="Введите вашу почту"
+              placeholder="Введите ваш логин"
               {...register('username')}
             />
           </Field>
           <Field>
             <FieldLabel htmlFor="password">Пароль</FieldLabel>
-            <FieldDescription className="min-h-5">
-              Пароль должен содержать не менее 8 символов
-            </FieldDescription>
             <PasswordInput
               id="password"
               autoComplete="current-password"
