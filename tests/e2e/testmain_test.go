@@ -24,6 +24,26 @@ import (
 // blockchain_project_e2e_* resources and never wipes a developer's dev stack.
 const e2eProjectName = "blockchain_project_e2e"
 
+// e2eTestJWTSecret is the JWT secret the e2e stack runs wms_app with. It is
+// deterministic and non-secret, but long enough (>= 32 chars) and absent from the
+// WMS config's insecure-secret blocklist, so wms_app accepts it at startup.
+const e2eTestJWTSecret = "e2e-test-secret-at-least-32-chars"
+
+// insecureJWTPlaceholders mirrors the blocklist in wms/internal/config/config.go.
+// wms_app rejects these at startup, and it resolves JWT_SECRET via ${JWT_SECRET}
+// interpolation from the repo-root .env — which wins over the compose stack's
+// WithEnv injection. A .env materialized verbatim from .env.example ships such a
+// placeholder, so ensureEnvFile substitutes e2eTestJWTSecret for any of them.
+// Kept in sync manually because the e2e module cannot import the wms module.
+var insecureJWTPlaceholders = map[string]struct{}{
+	"":                                     {},
+	"change-me":                            {},
+	"dev-secret":                           {},
+	"replace-me":                           {},
+	"replace-with-a-random-32-byte-secret": {},
+	"replace-with-a-random-64-character-secret": {},
+}
+
 var testEnv *env
 
 type env struct {
@@ -96,7 +116,7 @@ func TestMain(m *testing.M) {
 		// 7. Inject test environment variables, start compose, and wait for WMS and ledger-adapter health checks.
 		err = stack.
 			WithEnv(map[string]string{
-				"JWT_SECRET":        getenv("JWT_SECRET", "e2e-test-secret-at-least-32-chars"),
+				"JWT_SECRET":        getenv("JWT_SECRET", e2eTestJWTSecret),
 				"DB_USER":           getenv("DB_USER", "root"),
 				"DB_PASSWORD":       getenv("DB_PASSWORD", "root"),
 				"DB_NAME":           getenv("DB_NAME", "wms_blockchain_db"),
@@ -171,20 +191,59 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// ensureEnvFile materializes a .env file at the repo root from .env.example when
-// one does not already exist. The testcontainers compose loader treats the
-// debezium service's env_file as Required and fails to parse the stack if it is
-// missing, so this guarantees the file is present before the stack is created.
+// ensureEnvFile guarantees a repo-root .env that wms_app will accept. The
+// testcontainers compose loader treats the debezium service's env_file as Required,
+// and wms_app resolves JWT_SECRET via ${JWT_SECRET} interpolation from this .env, so
+// it must both exist and carry a valid secret before the stack is created. When .env
+// is absent it is materialized from .env.example; in either case an empty or
+// blocklisted JWT_SECRET is replaced with e2eTestJWTSecret. A developer's real secret
+// is never overwritten.
 func ensureEnvFile(root string) error {
 	envPath := filepath.Join(root, ".env")
-	if _, err := os.Stat(envPath); err == nil {
-		return nil
+
+	existing, err := os.ReadFile(envPath)
+	switch {
+	case err == nil:
+		repaired, changed := withValidJWTSecret(string(existing))
+		if !changed {
+			return nil
+		}
+		return os.WriteFile(envPath, []byte(repaired), 0o600)
+	case os.IsNotExist(err):
+		src, rerr := os.ReadFile(filepath.Join(root, ".env.example"))
+		if rerr != nil {
+			return fmt.Errorf("read .env.example: %w", rerr)
+		}
+		repaired, _ := withValidJWTSecret(string(src))
+		return os.WriteFile(envPath, []byte(repaired), 0o600)
+	default:
+		return fmt.Errorf("stat .env: %w", err)
 	}
-	src, err := os.ReadFile(filepath.Join(root, ".env.example"))
-	if err != nil {
-		return fmt.Errorf("read .env.example: %w", err)
+}
+
+// withValidJWTSecret returns content with JWT_SECRET set to e2eTestJWTSecret when the
+// current value is empty or a known insecure placeholder, reporting whether anything
+// changed. A real (non-blocklisted) secret is left untouched; if no JWT_SECRET line
+// exists, one is appended.
+func withValidJWTSecret(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	found, changed := false, false
+	for i, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "JWT_SECRET=") {
+			continue
+		}
+		found = true
+		value := strings.TrimSpace(strings.SplitN(line, "=", 2)[1])
+		if _, insecure := insecureJWTPlaceholders[value]; insecure {
+			lines[i] = "JWT_SECRET=" + e2eTestJWTSecret
+			changed = true
+		}
 	}
-	return os.WriteFile(envPath, src, 0o600)
+	if !found {
+		lines = append(lines, "JWT_SECRET="+e2eTestJWTSecret)
+		changed = true
+	}
+	return strings.Join(lines, "\n"), changed
 }
 
 // getenv reads an environment variable and returns the fallback when the variable is empty.
