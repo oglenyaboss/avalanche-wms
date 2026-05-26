@@ -49,12 +49,32 @@ The suite uses an **isolated compose project `blockchain_project_e2e`**, so it c
 Helpers: `api_test.go` (HTTP + auth + error helpers), `db_assertions_test.go`, `chain_assertions_test.go`, `fixtures_test.go` (per-run unique fixtures + FK-ordered cleanup).
 
 ## Bash adapter-level scenarios
+Bring the stack up under the **same compose project the `lib/` scripts target** —
+`lib/env.sh` and `lib/kafka.sh` reference the `blockchain_project_e2e_*` network and
+volumes, so the `-p blockchain_project_e2e` flag is required (omitting it names the
+project after the directory and the scripts then fail with `network ... not found`).
+Use raw `docker compose`, not the Go harness: a testcontainers stack
+(`E2E_KEEP_STACK=true`) is reaped by Ryuk when the test process exits and is unusable
+by these scripts.
+
 ```bash
-docker compose --profile test up -d
+docker compose -p blockchain_project_e2e --profile test up -d
 ./tests/e2e/wait_for_ready.sh
 ./tests/e2e/run_all.sh
-docker compose --profile test down -v
+docker compose -p blockchain_project_e2e --profile test down -v
 ```
+
+Scenarios `10` and `11` need a temporary ledger-adapter env override. Keep
+`docker-compose.yaml` untouched by using an overlay file and recreating just the adapter:
+
+```bash
+printf 'services:\n  ledger-adapter:\n    environment:\n      BATCH_TIMEOUT: "5s"\n' > /tmp/o.yaml
+docker compose -p blockchain_project_e2e -f docker-compose.yaml -f /tmp/o.yaml \
+  --profile test up -d --no-deps --force-recreate ledger-adapter
+bash tests/e2e/scenarios/10-s3-batch-poisoning.sh    # use RECEIPT_POLL_TIMEOUT: "1ms" for 11
+docker compose -p blockchain_project_e2e --profile test up -d --no-deps --force-recreate ledger-adapter  # restore
+```
+
 All scenarios publish to the **single unified topic `wms.events.v1`** with an `aggregate_type` header (the #42 consolidation), via `kcat`.
 
 | Файл | Что проверяет |
@@ -79,4 +99,4 @@ All scenarios publish to the **single unified topic `wms.events.v1`** with an `a
 
 ## Known limitations
 - Product bugs are encoded as `t.Skip` specs in `known_failures_test.go` and, for S2/S3/N1, as off-gate bash repros `scenarios/09-11`. The full prioritised backlog — every defect and untested path from the 2026-05-25 multi-module bug-hunt — is in [BUGHUNT.md](BUGHUNT.md). Remove a stub's skip / implement its body once the product is fixed.
-- `scenarios/10` and `11` need a temporary adapter env override (documented in their headers) and are **UNVALIDATED** pending a live run; `09` is self-contained.
+- `scenarios/09`, `10`, and `11` were **validated on a live stack 2026-05-26** — each exits non-zero, reproducing its bug (09→S2, 10→S3, 11→N1). `10`/`11` require the adapter env override above; `09` is self-contained.

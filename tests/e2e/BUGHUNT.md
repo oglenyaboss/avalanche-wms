@@ -12,10 +12,12 @@ the worktree at sweep time; re-confirm before acting.
 **Severity:** CRITICAL = data loss / silent DB↔chain divergence · HIGH = functional bug or
 stuck state · MEDIUM = maintainability/robustness · LOW = minor/style.
 
-> ⚠️ The reproduction recipes below and in the `*_pendingFix` stubs were derived from code
-> analysis, **not** from a live run (the suite was not executable at authoring time — a host
-> port clash held :5432/:9092). Validate the CRITICAL/HIGH recipes on a live stack before
-> trusting them; a wrong recipe in a stub is debt.
+> ⚠️ The reproduction recipes were originally derived from code analysis, **not** a live run
+> (the suite was not executable at authoring time — a host port clash held :5432/:9092).
+> **Update 2026-05-26:** the suite is now runnable end-to-end (clean-checkout `JWT_SECRET`
+> hermeticity fix) and the three off-gate scenarios `09`/`10`/`11` were **validated live** —
+> each exits non-zero, reproducing S2/S3/N1 respectively (see §1). The `*_pendingFix` `t.Skip`
+> stubs remain code-analysis-only; validate before trusting.
 
 ---
 
@@ -34,9 +36,9 @@ stuck state · MEDIUM = maintainability/robustness · LOW = minor/style.
 
 | Artifact | Proves | Status |
 |---|---|---|
-| `scenarios/09-s2-crash-recovery.sh` | **S2** (CRITICAL) — fills the blind spot in `07` | Self-contained; ready to run |
-| `scenarios/10-s3-batch-poisoning.sh` | **S3** (HIGH) adapter-side fan-out | Needs `BATCH_TIMEOUT` override (header); UNVALIDATED |
-| `scenarios/11-receipt-timeout.sh` | **N1** (CRITICAL) | Needs `RECEIPT_POLL_TIMEOUT` override (header); UNVALIDATED |
+| `scenarios/09-s2-crash-recovery.sh` | **S2** (CRITICAL) — fills the blind spot in `07` | ✅ Validated live 2026-05-26 (exit 1, S2 confirmed: redelivered SENT row → FAILED while COMMITTED on-chain) |
+| `scenarios/10-s3-batch-poisoning.sh` | **S3** (HIGH) adapter-side fan-out | ✅ Validated live 2026-05-26 (`BATCH_TIMEOUT=5s`; exit 1, S3 confirmed: valid sibling dragged to FAILED) |
+| `scenarios/11-receipt-timeout.sh` | **N1** (CRITICAL) | ✅ Validated live 2026-05-26 (`RECEIPT_POLL_TIMEOUT=1ms`; exit 1, N1 confirmed: mined tx left DB FAILED) |
 
 **`t.Skip` documentation stubs added to `known_failures_test.go`** (same convention as S1/S2/S3):
 `TestAssemblyCartLostOnRestart_pendingFix`, `TestAdapterN1_ReceiptTimeoutDivergence_pendingFix`,
