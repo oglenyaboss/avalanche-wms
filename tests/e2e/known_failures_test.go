@@ -149,3 +149,40 @@ func TestReceivingOpenBoxReachesChain_pendingFix(t *testing.T) {
 	// still in OPEN boxes (or must require all boxes closed first), so every on-chain Accepted
 	// item is physically placed and can proceed through putaway.
 }
+
+// ─── Defects found in the 2026-05-26 backend audit sweep ────────────────────
+
+// TestDispatchesAuth_CustomerAccess_pendingFix documents Dispatches-1: the three
+// dispatches handlers (GetDispatches, NewDispatch, GetDispatchByID) never call
+// requireOperator, so a CUSTOMER-role JWT can list, create, and look up dispatches.
+// All other modules (receiving/putaway/assembly/shipping) enforce OPERATOR-only.
+func TestDispatchesAuth_CustomerAccess_pendingFix(t *testing.T) {
+	t.Skip("documents Dispatches-1 (missing requireOperator in dispatches handlers); pending product fix")
+
+	// Reproduction (pure HTTP — add dispatches endpoints to TestAuth_OperatorOnlyEndpoints):
+	//  1. Authenticate as CUSTOMER: POST /auth/login {username:"customer",password:"customer"}.
+	//  2. GET /dispatches/ with the CUSTOMER token → currently 200 (should be 403 FORBIDDEN).
+	//  3. POST /dispatches/ with a valid destination_id → currently 200 (should be 403).
+	//  4. GET /dispatches/{existing-id} → currently 200 (should be 403).
+	// Invariant that SHOULD hold: dispatches handlers must call requireOperator like
+	// all other protected handlers, returning 403 FORBIDDEN for non-OPERATOR roles.
+}
+
+// TestAdapterN9_IntraBatchDuplicate_pendingFix documents N9: if Kafka redelivers
+// the same event_id within a single flush window, filterAndMarkPending appends it
+// twice. buildBatchArgs produces [id, id], the contract reverts on duplicate
+// eventId, and the entire batch is marked FAILED+DLQ — even though all other
+// events are valid. Compounds S2 on crash recovery.
+func TestAdapterN9_IntraBatchDuplicate_pendingFix(t *testing.T) {
+	t.Skip("documents Adapter N9 (intra-batch duplicate event_id); pending product fix")
+
+	// Reproduction (needs Kafka message injection):
+	//  1. Set BATCH_SIZE=2 and BATCH_TIMEOUT=10s on ledger-adapter.
+	//  2. Inject two Kafka messages with identical event_id into the same partition.
+	//  3. Observe: filterAndMarkPending (flusher.go:155-180) appends the event twice,
+	//     buildBatchArgs produces [id, id], contract reverts "Duplicate eventId",
+	//     both rows → FAILED in onchain_events.
+	// Invariant that SHOULD hold: filterAndMarkPending must deduplicate within the
+	// current batch (e.g., track seen event_ids in a set) so a redelivered message
+	// within one flush window does not poison the batch.
+}

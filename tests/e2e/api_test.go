@@ -259,6 +259,33 @@ func postExpectError(t *testing.T, env *env, token, path string, body any) (stat
 	return resp.StatusCode, envelope.Error.Code, envelope.Error.Message
 }
 
+// getExpectError sends a GET that is expected to fail, decodes the error
+// envelope, and returns the HTTP status, error.code, and error.message.
+func getExpectError(t *testing.T, env *env, token, path string) (status int, code, message string) {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, env.wmsURL+path, nil)
+	require.NoError(t, err)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := env.httpClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var envelope struct {
+		Success bool      `json:"success"`
+		Error   *apiError `json:"error"`
+	}
+	require.NoErrorf(t, json.Unmarshal(respBody, &envelope), "GET %s response: %s", path, string(respBody))
+	require.NotNilf(t, envelope.Error, "GET %s expected error envelope, got: %s", path, string(respBody))
+	return resp.StatusCode, envelope.Error.Code, envelope.Error.Message
+}
+
 // postRaw sends raw request bytes (for malformed-JSON or unknown-field tests)
 // and returns the HTTP status plus the raw response body as text.
 func postRaw(t *testing.T, env *env, token, path, rawBody string) (status int, bodyText string) {

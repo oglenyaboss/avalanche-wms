@@ -58,7 +58,7 @@ MR-59 review; N*/BUG-* are new from this sweep.
 
 | ID | Sev | Defect | Key ref | Tracked as |
 |---|---|---|---|---|
-| S1 | CRITICAL | WMS never reads `onchain_events.status`; a chain revert/DLQ leaves the order SHIPPED with no compensation (one-way coupling). | `shipping/service.go` Ship; no reader of `onchain_events` in `wms/**` | `TestS1_*` stub |
+| S1 | CRITICAL | WMS never reads `onchain_events.status`; a chain revert/DLQ leaves the order SHIPPED with no compensation (one-way coupling). **Data model fixed:** migration 0008 created VIEWs (`v_*_with_chain`) joining via `event_id`; reverse-outbox deferred to issue #41. Go code still does not query chain_status. | `shipping/service.go` Ship; VIEWs in `0008_chain_views.up.sql`; no reader in `wms/**/*.go` | `TestS1_*` stub; data model ready (#24 merged), behavior pending (#41) |
 | S2 | CRITICAL | Crash-recovery resubmits PENDING/SENT events → contract `Duplicate eventId` revert → event wrongly FAILED+DLQ despite succeeding. | `consumer/flusher.go:155-180` (skips only COMMITTED/FAILED), `:117` | `TestS2_*` stub + `scenarios/09` |
 | N1 | CRITICAL | `WaitReceipt` timeout marks event FAILED while the tx is still mining → tx mines → DB FAILED vs chain COMMITTED forever. No crash needed. | `consumer/flusher.go:124-129`; `RECEIPT_POLL_TIMEOUT` default 30s | `TestAdapterN1_*` stub + `scenarios/11` |
 | Assembly-1 | CRITICAL | Pick cart is process-memory only; no endpoint rebuilds it. WMS restart between Pick and ScanShippingBuffer strands products ASSEMBLED / order ALLOCATED forever. | `assembly/service.go:18,266-270,286,376` | `TestAssemblyCartLostOnRestart_*` stub |
@@ -67,7 +67,7 @@ MR-59 review; N*/BUG-* are new from this sweep.
 | Receiving-1 | HIGH | `close-cargoplace` emits a receiving event for every RECEIVED product regardless of box status, but ScanBuffer only moves CLOSED-box products. An OPEN-box product gets Accepted(1) on-chain with `bin_id` NULL — on-chain but physically unplaceable. | `receiving/repository.go` `listProductIDsByCargoplaceTx` (no box filter) vs `ScanBufferWithLog` (`b.status='CLOSED'`) | `TestReceivingOpenBoxReachesChain_*` stub (pure-HTTP repro) |
 | Shipping-5 | HIGH | `GET /dispatches/{id}` for a nonexistent id returns 503, not 404 (`pgx.ErrNoRows` unmapped). | `dispatches/repository.go:121-142`; `dispatches/handler.go:128-131` | Deferred — §3 (clean, trivial test) |
 | Shipping-3 | HIGH | Depart-with-unshipped scoping: `CountReadyToShipProductsInBuffer` spans all of a destination's bins; multiple AT_GATE dispatches for one destination can claim each other's cargo. | `shipping/repository.go:383-398` | Deferred — §3 |
-| Shipping-4 | HIGH | Two concurrent Ship calls draining the same buffer: one departs (200), the other hits `UpdateDispatchDeparted` 0-rows → unmapped error → 500, though its products did ship. | `shipping/repository.go:400-415` | Deferred — §3 |
+| Shipping-4 | MEDIUM | Two concurrent Ship calls draining the same buffer: one departs (200), the other hits `UpdateDispatchDeparted` 0-rows → 409 `DISPATCH_NOT_AT_GATE` (not 500 as originally stated — the error IS mapped). The shipped products are committed but the operator gets a misleading "dispatch not at gate" error instead of "already departed". | `shipping/repository.go:400-415` | Deferred — §3 |
 | Putaway-4 | HIGH | NULL-section bin is accepted as a storage destination (`section IS DISTINCT FROM 'BUFFER'` is TRUE for NULL) → products stored in an unclassified bin, on-chain advances to PutAway. | `putaway/repository.go:82-97`; `bins.section` nullable (`0001:216`) | Deferred — §3 (pure-HTTP repro) |
 | Putaway-5 | HIGH | No cross-warehouse enforcement: a product from warehouse A's buffer can be placed into warehouse B's bin. | `putaway/repository.go:62-97` | Deferred — §3 (needs 2nd warehouse) |
 | Receiving-2 | HIGH | Over-receipt: scanning a SKU not in `expected_cargoplace_skus` creates a ghost product that reaches the chain; the close summary hides the overage. | `receiving/service.go:498`; no join to `expected_cargoplace_skus` | Deferred — §3 (may be lenient-by-design; needs product call) |
@@ -91,41 +91,52 @@ MR-59 review; N*/BUG-* are new from this sweep.
 | Shipping-8 | LOW | `scheduled_at` past-check uses wall clock with no tolerance/injection. | `dispatches/handler.go:99` | Deferred |
 | N7 | LOW | `/health` always returns 200 — no pool/Kafka/RPC readiness probe, so a wedged adapter still reports healthy. | `ledger-adapter/internal/handler/handler.go:24-33` | Deferred |
 | N8 | LOW | `InsertPending` rows are not rolled back on a mid-loop error, expanding the S2 (resubmittable non-terminal) surface. | `consumer/flusher.go:172-176` | Deferred |
+| Dispatches-1 | HIGH | Dispatches handlers (`GetDispatches`, `NewDispatch`, `GetDispatchByID`) never call `requireOperator`; JWT middleware validates the token, but a CUSTOMER-role user can list, create, and look up dispatches. All other modules (receiving/putaway/assembly/shipping) enforce OPERATOR-only via `requireOperator`. | `dispatches/handler.go:37-141` (no `requireOperator` call) vs `assembly/handler.go:218-231` | Deferred — §3 (add to `TestAuth_OperatorOnlyEndpoints`) |
+| N9 | HIGH | Intra-batch duplicate: if Kafka redelivers the same `event_id` within a single flush window, `filterAndMarkPending` appends it twice (first iteration: `InsertPending`; second: `Exists=true, status=PENDING` → also appended). `buildBatchArgs` produces `[id, id]` → contract `Duplicate eventId` revert → entire batch FAILED+DLQ. Compounds S2 on recovery. | `consumer/flusher.go:155-180` | Deferred |
+| Assembly-6 | HIGH | `GetBinSectionByID` scans nullable `bins.section` into a plain `string`; a NULL section bin causes `pgx` scan error → 500 INTERNAL_ERROR on cart allocation. Related to Putaway-4 (NULL-section bin accepted). | `assembly/repository.go:175-186` | Deferred |
+| Assembly-7 | MEDIUM | `GetSKUByID` returns `ErrInsufficientStock` on `pgx.ErrNoRows` → allocate with a nonexistent SKU returns 422 `INSUFFICIENT_STOCK` instead of 404 `SKU_NOT_FOUND`. | `assembly/repository.go:140-155` | Deferred |
 
 ---
 
-## 3. Coverage gaps — correct behaviour, still untested (deferred green tests)
+## 3. Coverage gaps — correct behaviour
 
-Each is implementable through the existing HTTP + DB + chain assertion helpers; many reuse
-`newMultiProductFixture` / `newOutboundFixture`. Proposed shape = setup → action → assert.
+> **Update 2026-05-26 (batch 2):** the receiving, putaway, assembly, and shipping/dispatches
+> guard tests below were implemented as green tests on the `-tags=e2e` gate. Remaining gaps
+> marked *(still deferred)* below.
 
-**Receiving**
-- Gate flow: `ScanTTN` (CREATED→GATE_IN_PROGRESS) + `ScanCargoplace` (EXPECTED→RECEIVED_AT_GATE) + auto-close; `ScanTTN` on GATE_CLOSED → 409; duplicate `ScanCargoplace` → 409 `CARGOPLACE_ALREADY_RECEIVED`; `AcceptShipment` marks missing cargoplaces NOT_RECEIVED.
-- Table negatives: `ScanQR` duplicate → 409 `QR_ALREADY_EXISTS`; `ScanBox` on CLOSED box → 409 `BOX_NOT_OPEN`; `ScanSKU` unknown barcode → 404 `BARCODE_NOT_FOUND`; box from another cargoplace → 400 `BOX_NOT_IN_CARGOPLACE`; `ScanBuffer` non-buffer bin → 400 `BIN_NOT_BUFFER`.
+**Receiving** — ✅ shipped in `receiving_guards_test.go`
+- ✅ `TestReceiving_GateFlow` — scan-ttn → scan-cargoplace → accept-shipment (with custom `newGateFixture`)
+- ✅ `TestReceiving_ScanTTN_AlreadyClosed` — 409 SHIPMENT_ALREADY_CLOSED
+- ✅ `TestReceiving_ScanCargoplace_AlreadyReceived` — 409 CARGOPLACE_ALREADY_RECEIVED
+- ✅ `TestReceiving_ScanQR_Duplicate` — 409 QR_ALREADY_EXISTS
+- ✅ `TestReceiving_ScanBox_ClosedBox` — 409 BOX_NOT_OPEN (via scan-sku on closed box)
+- ✅ `TestReceiving_ScanSKU_UnknownBarcode` — 404 BARCODE_NOT_FOUND
+- ✅ `TestReceiving_ScanBuffer_NonBufferBin` — 400 BIN_NOT_BUFFER
+- *(still deferred)* box from another cargoplace → 400 `BOX_NOT_IN_CARGOPLACE`
 
-**Putaway**
-- Double-putaway idempotency: re-`scan-storage-bin` a STORED product → 409 `PRODUCT_NOT_IN_BUFFER`, outbox delta 0.
-- Storage-bin type guards at the HTTP layer: placing into a BUFFER / SHIPPING_BUFFER bin → 404 `STORAGE_BIN_NOT_FOUND`.
-- Already-STORED product via `scan-product` → 409 `PRODUCT_NOT_RECEIVED`.
-- **Putaway-4 (defect):** NULL-section bin currently accepted → should be 404. Insert a NULL-section bin, putaway into it; assert it is rejected once fixed.
-- Tx rollback: `scan-storage-bin` with `[P1, bogus]` → 404, P1 stays RECEIVED, no putaway outbox.
+**Putaway** — ✅ shipped in `putaway_guards_test.go`
+- ✅ `TestPutaway_DoublePlace_Conflict` — 409 PRODUCT_NOT_IN_BUFFER, outbox delta 0
+- ✅ `TestPutaway_PlaceIntoBufferBin_Rejected` — BUFFER/SHIPPING_BUFFER bins → 404 STORAGE_BIN_NOT_FOUND
+- ✅ `TestPutaway_ScanProduct_AlreadyStored` — 409 PRODUCT_NOT_RECEIVED
+- ✅ `TestPutaway_PlaceWithBogusProduct_Rollback` — tx rollback, P1 stays RECEIVED, no outbox
+- *(still deferred)* **Putaway-4 (defect):** NULL-section bin currently accepted → should be 404
 
-**Assembly**
-- Cart isolation across operators: op1 picks P; op2 `scan-shipping-buffer` → 409 `CART_EMPTY`; op1 still completes. (Reuse `operatorToken` twice.)
-- Concurrent allocate of one destination: two parallel `/assembly/allocate` → order allocated exactly once (sum `allocated_orders`==1), no product double-bound.
-- Double-allocate idempotency: second `/assembly/allocate` → that order `allocated_orders` contribution 0, task count unchanged.
+**Assembly** — ✅ shipped in `assembly_guards_test.go`
+- ✅ `TestAssembly_CartIsolation` — op1 picks, op2 CART_EMPTY, op1 completes
+- ✅ `TestAssembly_DoubleAllocate` — second allocate → allocated_orders=0, task count unchanged
+- *(still deferred)* Concurrent allocate race (needs parallel goroutines)
 
-**Shipping / dispatches**
-- Double-ship: re-ship a SHIPPED product (spot) → 409 `PRODUCT_NOT_IN_BUFFER`, one `shippings` row.
-- `scan-driver` idempotency: second scan of an AT_GATE dispatch → 200, `arrived_at` unchanged.
-- `scan-driver` on a DEPARTED dispatch → 409 `DISPATCH_ALREADY_DEPARTED`.
-- Destination mismatch: ship a SHOP-A buffer against a SHOP-B dispatch → 409 `DESTINATION_MISMATCH`.
-- **Shipping-5 (defect):** `GET /dispatches/{random uuid}` currently 503 → assert 404 once `pgx.ErrNoRows` is mapped.
+**Shipping / dispatches** — ✅ shipped in `shipping_guards_test.go`
+- ✅ `TestShipping_DoubleShip_Conflict` — 409 PRODUCT_NOT_IN_BUFFER
+- ✅ `TestShipping_ScanDriver_Idempotent` — 200, arrived_at unchanged
+- ✅ `TestShipping_ScanDriver_AlreadyDeparted` — 409 DISPATCH_ALREADY_DEPARTED
+- ✅ `TestShipping_DestinationMismatch` — 409 DESTINATION_MISMATCH (with ad-hoc second destination)
+- ✅ `TestDispatches_GetByID_NotFound` — documents Shipping-5 (currently 503, should be 404)
 
-**Adapter (off-gate scenarios)**
+**Adapter (off-gate scenarios)** — *(still deferred)*
 - N1/N2/N3/N4/N5 reproductions (see §2 refs). N1 has a scenario stub (`11`); the rest need RPC/chaos fault injection.
 
-**Fixture follow-ups (on-chain priming)**
+**Fixture follow-ups (on-chain priming)** — *(still deferred)*
 - `newMultiProductFixture` inserts pre-STORED products with no prior receiving/putaway events, so their on-chain `itemStatus` is `None` and any picking/shipping events they generate revert (land FAILED). `TestMultiProduct_AllocatePickAssemble` and `TestPartialShipment_MofN` therefore assert **DB state only**. To also verify on-chain partial isolation (shipped → Shipped(4) while the remainder stays Picked(3)), extend the fixture to emit a receiving + a putaway outbox event per product and `waitForOnchainCommitted` for both before returning (priming each item to PutAway on-chain). That also removes the FAILED-row residue the fixture currently cleans up. The same prerequisite applies before adding on-chain assertions to `TestShippingShipBeforeAssembled_*` (its DB assertion — order stuck ALLOCATED — needs no chain).
 
 ---
