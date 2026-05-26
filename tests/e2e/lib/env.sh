@@ -10,10 +10,10 @@ export DB_URL="postgres://${DB_USER}:${DB_PASSWORD}@localhost:5432/${DB_NAME}?ss
 # Chain — читаем RPC URL / contract address из shared volume, куда contract-deploy
 # их пишет после успешного деплоя.
 if [ -z "${RPC_URL:-}" ]; then
-  export RPC_URL=$(docker run --rm -v blockchain_project_shared_state:/s alpine cat /s/rpc_url.txt 2>/dev/null || echo "")
+  export RPC_URL=$(docker run --rm -v blockchain_project_e2e_shared_state:/s alpine cat /s/rpc_url.txt 2>/dev/null || echo "")
 fi
 if [ -z "${CONTRACT_ADDR:-}" ]; then
-  export CONTRACT_ADDR=$(docker run --rm -v blockchain_project_shared_state:/s alpine cat /s/contract_addr.txt 2>/dev/null || echo "")
+  export CONTRACT_ADDR=$(docker run --rm -v blockchain_project_e2e_shared_state:/s alpine cat /s/contract_addr.txt 2>/dev/null || echo "")
 fi
 
 if [ -z "$RPC_URL" ] || [ -z "$CONTRACT_ADDR" ]; then
@@ -34,5 +34,5 @@ psql_q() {
 }
 
 cast_cmd() {
-  docker run --rm --network blockchain_project_app_network --entrypoint cast "$CAST_IMAGE" "$@"
+  docker run --rm --network blockchain_project_e2e_app_network --entrypoint cast "$CAST_IMAGE" "$@"
 }

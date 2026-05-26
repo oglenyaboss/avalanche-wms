@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# NOTE (scope / false-confidence warning): this scenario does NOT cover the S2
+# crash-recovery bug. It drives the event to COMMITTED (a TERMINAL state) at step 1
+# BEFORE re-publishing, so filterAndMarkPending correctly skips it — only the happy
+# terminal-skip path is exercised. S2 occurs when the row is non-terminal (PENDING or
+# SENT) at redelivery, the window this scenario never creates. For that, see
+# 09-s2-crash-recovery.sh. Keep this test; just don't read it as crash-recovery proof.
+
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 source "$HERE/lib/env.sh"
 source "$HERE/lib/wait_for.sh"

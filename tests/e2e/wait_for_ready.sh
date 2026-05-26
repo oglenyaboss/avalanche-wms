@@ -63,10 +63,21 @@ wait_running() {
   return 1
 }
 
+# Probe an HTTP health endpoint for distroless services that expose /health
+# but have no Docker healthcheck (e.g. ledger-adapter).
+wait_health_http() {
+  local label=$1 url=$2 tries=${3:-60}
+  for i in $(seq 1 "$tries"); do
+    if curl -fsS "$url" >/dev/null 2>&1; then echo "  $label healthy ✓"; return 0; fi
+    echo "  [$i/$tries] $label not ready"; sleep 2
+  done
+  echo "Timeout: $label not ready" >&2; return 1
+}
+
 wait_healthy postgres_db
 wait_healthy kafka
 wait_healthy avalanchego
 wait_completed contract_deploy
-wait_running ledger-adapter
+wait_health_http ledger-adapter "http://localhost:8085/health"
 
 echo "=== All services ready ==="
