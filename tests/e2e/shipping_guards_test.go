@@ -252,6 +252,7 @@ func TestShipping_DestinationMismatch(t *testing.T) {
 			sql  string
 			args []any
 		}{
+			{`DELETE FROM wms_ops.shippings WHERE dispatch_id IN (SELECT dispatch_id FROM wms_inventory.outbound_dispatches WHERE dispatch_code=$1)`, []any{dispatchCode}},
 			{`DELETE FROM wms_inventory.outbound_dispatches WHERE dispatch_code=$1`, []any{dispatchCode}},
 			{`DELETE FROM wms_inventory.bins WHERE code=$1`, []any{binCode}},
 			{`DELETE FROM wms_inventory.destinations WHERE code=$1`, []any{destCode}},
