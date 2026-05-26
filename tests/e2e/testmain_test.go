@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +17,12 @@ import (
 	compose "github.com/testcontainers/testcontainers-go/modules/compose"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// e2eProjectName isolates the e2e compose stack from any dev stack sharing the
+// repo's default project name. Compose auto-prefixes volumes and networks with
+// the project name, so Down(RemoveVolumes(true)) only ever touches
+// blockchain_project_e2e_* resources and never wipes a developer's dev stack.
+const e2eProjectName = "blockchain_project_e2e"
 
 var testEnv *env
 
@@ -63,9 +70,17 @@ func TestMain(m *testing.M) {
 
 	// 5. Start the Docker Compose test profile by default; set E2E_USE_EXISTING_STACK=true to use an existing stack.
 	if os.Getenv("E2E_USE_EXISTING_STACK") != "true" {
+		// The compose loader requires the referenced .env file to exist because the
+		// debezium service declares it via `env_file` (Required), even though we
+		// inject the variables below through WithEnv. Materialize it from the
+		// example file when absent so the loader does not fail.
+		if err := ensureEnvFile(root); err != nil {
+			log.Fatalf("ensure .env: %v", err)
+		}
+
 		stack, err := compose.NewDockerComposeWith(
 			compose.WithStackFiles(filepath.Join(root, "docker-compose.yaml")),
-			compose.StackIdentifier("blockchain_project"),
+			compose.StackIdentifier(e2eProjectName),
 			compose.WithProfiles("test"),
 		)
 		if err != nil {
@@ -90,7 +105,17 @@ func TestMain(m *testing.M) {
 			}).
 			WaitForService("ledger-adapter", wait.ForHTTP("/health").WithPort("8085/tcp").WithStartupTimeout(3*time.Minute)).
 			WaitForService("wms_app", wait.ForHTTP("/health").WithPort("8080/tcp").WithStartupTimeout(4*time.Minute)).
-			Up(ctx, compose.Wait(true))
+			Up(ctx, compose.Wait(true), compose.RunServices(
+				"postgres",
+				"db-init",
+				"kafka",
+				"kafka-init",
+				"debezium",
+				"avalanchego",
+				"contract-deploy",
+				"ledger-adapter",
+				"wms_app",
+			))
 		if err != nil {
 			log.Fatalf("start compose stack: %v", err)
 		}
@@ -144,6 +169,22 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(code)
+}
+
+// ensureEnvFile materializes a .env file at the repo root from .env.example when
+// one does not already exist. The testcontainers compose loader treats the
+// debezium service's env_file as Required and fails to parse the stack if it is
+// missing, so this guarantees the file is present before the stack is created.
+func ensureEnvFile(root string) error {
+	envPath := filepath.Join(root, ".env")
+	if _, err := os.Stat(envPath); err == nil {
+		return nil
+	}
+	src, err := os.ReadFile(filepath.Join(root, ".env.example"))
+	if err != nil {
+		return fmt.Errorf("read .env.example: %w", err)
+	}
+	return os.WriteFile(envPath, src, 0o600)
 }
 
 // getenv reads an environment variable and returns the fallback when the variable is empty.

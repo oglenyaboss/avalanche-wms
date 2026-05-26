@@ -12,78 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// statusShipped is the on-chain itemStatus enum value for a Shipped item.
 const statusShipped uint8 = 4
 
-type scanTTNData struct {
-	ShipmentID uuid.UUID `json:"shipment_id"`
-}
-
-type scanGateCargoplaceData struct {
-	CargoplaceID uuid.UUID `json:"cargoplace_id"`
-	Status       string    `json:"status"`
-}
-
-type scanBoxData struct {
-	BoxID  uuid.UUID `json:"box_id"`
-	Status string    `json:"status"`
-}
-
-type scanSKUData struct {
-	SKUID uuid.UUID `json:"sku_id"`
-}
-
-type scanQRData struct {
-	ProductID uuid.UUID `json:"product_id"`
-	Status    string    `json:"status"`
-}
-
-type closeCargoplaceData struct {
-	OutboxEventsCreated int    `json:"outbox_events_created"`
-	Status              string `json:"status"`
-}
-
-type scanStorageBinData struct {
-	OutboxEventsCreated int `json:"outbox_events_created"`
-	ProductsPlaced      int `json:"products_placed"`
-}
-
-type allocateData struct {
-	AllocatedOrders   int `json:"allocated_orders"`
-	AllocatedProducts int `json:"allocated_products"`
-}
-
-type taskListData struct {
-	Tasks []taskData `json:"tasks"`
-}
-
-type taskData struct {
-	TaskID    string `json:"task_id"`
-	ProductID string `json:"product_id"`
-}
-
-type pickData struct {
-	ProductID string `json:"product_id"`
-	CartSize  int    `json:"cart_size"`
-}
-
-type scanShippingBufferData struct {
-	ProductsPlaced  int `json:"products_placed"`
-	OrdersAssembled int `json:"orders_assembled"`
-}
-
-type scanDriverData struct {
-	DispatchID uuid.UUID `json:"dispatch_id"`
-	Status     string    `json:"status"`
-}
-
-type shipData struct {
-	ProductsShipped     int  `json:"products_shipped"`
-	OutboxEventsCreated int  `json:"outbox_events_created"`
-	OrdersCompleted     int  `json:"orders_completed"`
-	DispatchDeparted    bool `json:"dispatch_departed"`
-	BufferRemaining     int  `json:"buffer_remaining"`
-}
-
+// TestOutboundFlow_EndToEnd drives the full happy path: WMS HTTP API -> outbox
+// -> Debezium -> Kafka -> ledger-adapter -> Avalanche C-Chain, for a fresh
+// per-run fixture, and verifies the on-chain FSM stage ordering at the end.
 func TestOutboundFlow_EndToEnd(t *testing.T) {
 	// 1. Create the test context and use the e2e environment prepared by TestMain.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -92,18 +26,23 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	// 2. Log in to WMS and load the dedicated seeded order, shipment, bins, SKU, and other fixture data.
+	// 2. Log in to WMS and build a dedicated per-run fixture (shipment, cargoplace,
+	//    bins, SKU, NEW order, SCHEDULED dispatch) so re-runs stay deterministic.
 	token := login(t, env)
-	fixture := loadSeedFixture(t, ctx, env)
+	fixture := newOutboundFixture(t, ctx, env)
 	requireOrderStatus(t, ctx, env, fixture.OrderID, "NEW")
 	requireDispatchStatus(t, ctx, env, fixture.DispatchID, "SCHEDULED")
 
-	// 3. Scan the seeded cargoplace at the receiving table so it moves to TABLE_IN_PROGRESS.
+	// stageEventIDs accumulates the onchain event ids per FSM stage for the final
+	// ordering assertion.
+	stageEventIDs := map[string][]uuid.UUID{}
+
+	// 3. Scan the cargoplace at the receiving table so it moves to TABLE_IN_PROGRESS.
 	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 	}, nil)
 
-	// 4. Scan the box, SKU barcode, and QR code; scan-qr creates the product that flows through this test.
+	// 4. Scan the box, SKU barcode, and QR code; scan-qr creates the product.
 	var box scanBoxData
 	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
@@ -129,7 +68,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	require.Equal(t, "RECEIVED", scannedProduct.Status)
 	requireProductStatus(t, ctx, env, scannedProduct.ProductID, "RECEIVED")
 
-	// 5. Close the box, move the product into the receiving buffer, close the cargoplace, and wait for receiving to commit on-chain.
+	// 5. Close box, move to receiving buffer, close cargoplace, wait for receiving on-chain.
 	postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
 		"box_id": box.BoxID.String(),
 	}, nil)
@@ -149,8 +88,9 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 
 	receivingEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "receiving")
 	waitForOnchainCommitted(t, ctx, env, receivingEventID, "receiving")
+	stageEventIDs["receiving"] = append(stageEventIDs["receiving"], receivingEventID)
 
-	// 6. Run putaway: scan the product from the receiving buffer, place it into the storage bin, and wait for putaway to commit on-chain.
+	// 6. Putaway: scan from buffer, place into storage bin, wait for putaway on-chain.
 	postJSON[map[string]any](t, env, token, "/putaway/scan-buffer", map[string]string{
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
@@ -171,8 +111,9 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 
 	putawayEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "putaway")
 	waitForOnchainCommitted(t, ctx, env, putawayEventID, "putaway")
+	stageEventIDs["putaway"] = append(stageEventIDs["putaway"], putawayEventID)
 
-	// 7. Allocate the dedicated seeded order and confirm the system only assigns the product stored by this test.
+	// 7. Allocate the dedicated order; only this run's product should be assigned.
 	var allocated allocateData
 	postJSON(t, env, token, "/assembly/allocate", map[string]string{
 		"destination_id": fixture.DestinationID.String(),
@@ -186,9 +127,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	productIDs := productIDsFromTasks(tasks.Tasks)
 	require.Equal(t, []string{scannedProduct.ProductID.String()}, productIDs)
 
-	// 8. Pick the product: complete the assembly task, create the picking outbox event, and wait for picking to commit on-chain.
-	eventIDs := []uuid.UUID{receivingEventID, putawayEventID}
-	expectedAggregates := []string{"receiving", "putaway"}
+	// 8. Pick the product: task DONE, product ASSEMBLED, picking outbox + on-chain.
 	for i, productID := range productIDs {
 		parsedProductID, err := uuid.Parse(productID)
 		require.NoError(t, err)
@@ -206,12 +145,11 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 
 		pickingEventID := eventIDForAggregate(t, ctx, env, parsedProductID, "picking")
 		waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
-		eventIDs = append(eventIDs, pickingEventID)
-		expectedAggregates = append(expectedAggregates, "picking")
+		stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
 	}
 	requireOutboxCount(t, ctx, env, "picking", len(productIDs))
 
-	// 9. Move the product from the picking cart into the shipping buffer so the order becomes ASSEMBLED.
+	// 9. Move from the picking cart into the shipping buffer so the order is ASSEMBLED.
 	var placed scanShippingBufferData
 	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
 		"buffer_bin_id": fixture.ShippingBinID.String(),
@@ -225,7 +163,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 		requireProductStatus(t, ctx, env, parsedProductID, "READY_TO_SHIP")
 	}
 
-	// 10. Scan the shipping buffer and driver, ship the product, wait for shipping to commit on-chain, and verify the contract status is Shipped.
+	// 10. Scan buffer + driver, ship, wait for shipping on-chain, verify contract status.
 	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fixture.ShippingBinID.String(),
 	}, nil)
@@ -260,21 +198,12 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 
 		shippingEventID := eventIDForAggregate(t, ctx, env, parsedProductID, "shipping")
 		waitForOnchainCommitted(t, ctx, env, shippingEventID, "shipping")
-		eventIDs = append(eventIDs, shippingEventID)
-		expectedAggregates = append(expectedAggregates, "shipping")
+		stageEventIDs["shipping"] = append(stageEventIDs["shipping"], shippingEventID)
 
 		status := callItemStatus(t, ctx, env, parsedProductID)
 		require.Equal(t, statusShipped, status)
 	}
 
-	// 11. Finally, verify the business order of the four on-chain events and ensure each tx_hash is present.
-	requireFSMSequence(t, ctx, env, eventIDs, expectedAggregates)
-}
-
-func productIDsFromTasks(tasks []taskData) []string {
-	ids := make([]string, 0, len(tasks))
-	for _, task := range tasks {
-		ids = append(ids, task.ProductID)
-	}
-	return ids
+	// 11. Verify the on-chain FSM stage ordering using transaction receipts.
+	requireOnchainFSMOrdering(t, ctx, env, stageEventIDs)
 }

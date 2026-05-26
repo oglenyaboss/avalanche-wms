@@ -393,8 +393,7 @@ FROM (
   VALUES
     ('ORD-2026-0042', 'SHOP-5', 'ALLOCATED'),
     ('ORD-2026-0043', 'SHOP-7', 'SHIPPED'),
-    ('ORD-2026-0501', 'SHOP-5', 'NEW'),
-    ('ORD-2026-E2E-OUTBOUND', 'SHOP-7', 'NEW')
+    ('ORD-2026-0501', 'SHOP-5', 'NEW')
 ) AS v(external_order_no, destination_code, status)
 JOIN public.users u ON u.username = 'customer'
 JOIN wms_inventory.warehouses w ON w.name = 'Склад Москва-Север'
@@ -478,8 +477,7 @@ FROM (
     ('ORD-2026-0043', 'Рюкзак Puma Core', 1),
     ('ORD-2026-0043', 'Куртка The North Face', 1),
     ('ORD-2026-0501', 'Кроссовки Nike Air Max 90', 5),
-    ('ORD-2026-0501', 'Футболка Adidas Originals', 5),
-    ('ORD-2026-E2E-OUTBOUND', 'E2E Seed Outbound SKU', 1)
+    ('ORD-2026-0501', 'Футболка Adidas Originals', 5)
 ) AS v(external_order_no, sku_name, qty)
 JOIN wms_inventory.orders o ON o.external_order_no = v.external_order_no
 JOIN wms_inventory.skus s ON s.name = v.sku_name
@@ -514,8 +512,7 @@ SELECT
   now()
 FROM (
   VALUES
-    ('DSP-2026-0421-001', 'SHOP-5', 'A123BC777', 'Иван Петров', '+7 (999) 555-00-11', 'SCHEDULED', now() + interval '1 day'),
-    ('DSP-2026-E2E-OUTBOUND', 'SHOP-7', 'E2E777', 'E2E Driver', '+7 (999) 555-00-22', 'SCHEDULED', now() + interval '1 day')
+    ('DSP-2026-0421-001', 'SHOP-5', 'A123BC777', 'Иван Петров', '+7 (999) 555-00-11', 'SCHEDULED', now() + interval '1 day')
 ) AS v(dispatch_code, destination_code, vehicle_number, driver_name, driver_phone, status, scheduled_at)
 JOIN wms_inventory.warehouses w ON w.name = 'Склад Москва-Север'
 JOIN wms_inventory.destinations d
