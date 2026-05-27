@@ -95,7 +95,8 @@ All 36 confirmed (1 corrected: Shipping-4 downgraded from HIGH to MEDIUM).
 
 ## Test plan
 
-- [ ] `go test -tags=e2e -timeout 20m ./...` passes with 0 failures
-- [ ] All chain assertions verified on Avalanche C-Chain
-- [ ] Tests are hermetic (re-runnable, no stale state)
-- [ ] Cleanup removes all fixture data via t.Cleanup
+- [x] `go test -tags=e2e -timeout 20m ./...` passes with 0 failures (47 tests: 38 PASS, 9 SKIP, 225s)
+- [x] All chain assertions verified on Avalanche C-Chain
+- [x] Tests are hermetic (re-runnable, no stale state)
+- [x] Cleanup removes all fixture data via t.Cleanup (incl. outbox/onchain rows)
+- [x] Code review: flaky assertions fixed, orphan cleanup added, dead code removed
