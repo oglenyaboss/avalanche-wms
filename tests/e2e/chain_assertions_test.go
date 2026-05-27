@@ -79,16 +79,12 @@ func (p txPosition) before(other txPosition) bool {
 	return p.txIndex < other.txIndex
 }
 
-// requireOnchainFSMOrdering verifies the on-chain ordering of the FSM stages.
-//
-// For each stage in fsmStageOrder it looks up every event's tx_hash from
-// onchain_events, fetches the transaction receipt, and computes the maximum
-// (blockNumber, transactionIndex) of that stage. It then asserts that those
-// per-stage maxima are monotonically non-decreasing across the FSM order, i.e.
-// the last receiving tx is not mined after the first putaway tx, and so on.
-//
-// It also asserts that every referenced event is COMMITTED with a non-empty
-// tx_hash, which is what makes the receipt lookups meaningful.
+// requireOnchainFSMOrdering verifies that per-stage tx position maxima are
+// non-decreasing across the FSM order: max(receiving) <= max(putaway) <=
+// max(picking) <= max(shipping). This catches gross ordering violations (e.g.
+// all shipping txs mined before any receiving tx) but allows per-item
+// interleaving within a stage — per-item ordering is enforced by the contract's
+// _requireNewEvent guard, not by this assertion.
 func requireOnchainFSMOrdering(t *testing.T, ctx context.Context, env *env, stageEventIDs map[string][]uuid.UUID) {
 	t.Helper()
 

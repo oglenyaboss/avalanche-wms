@@ -166,6 +166,8 @@ func newOutboundFixture(t *testing.T, ctx context.Context, env *env) e2eFixture 
 			sql  string
 			args []any
 		}{
+			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id IN ` + prodSel + `)`, []any{cpCode}},
+			{`DELETE FROM public.outbox_events WHERE aggregate_id IN ` + prodSel, []any{cpCode}},
 			{`DELETE FROM wms_ops.putaways WHERE product_id IN ` + prodSel, []any{cpCode}},
 			{`DELETE FROM wms_ops.shippings WHERE dispatch_id IN (SELECT dispatch_id FROM wms_inventory.outbound_dispatches WHERE dispatch_code=$1)`, []any{fx.DispatchCode}},
 			{`DELETE FROM wms_ops.assembly_tasks WHERE order_id IN (SELECT order_id FROM wms_inventory.orders WHERE external_order_no=$1)`, []any{fx.OrderNo}},
@@ -197,20 +199,6 @@ func mustExec(t *testing.T, ctx context.Context, env *env, sql string, args ...a
 	require.NoError(t, err, "exec fixture statement: %s", sql)
 }
 
-// resolveDestinationID returns the destination_id for a destination code at the
-// seeded warehouse.
-func resolveDestinationID(t *testing.T, ctx context.Context, env *env, code string) uuid.UUID {
-	t.Helper()
-	var id uuid.UUID
-	err := env.db.QueryRow(ctx, `
-		SELECT d.destination_id
-		FROM wms_inventory.destinations d
-		JOIN wms_inventory.warehouses w ON w.warehouse_id = d.warehouse_id
-		WHERE d.code = $1 AND w.name = $2`, code, warehouseName).Scan(&id)
-	require.NoErrorf(t, err, "resolve destination %s", code)
-	return id
-}
-
 // resolveBinID returns the bin_id for a bin code at the seeded warehouse.
 func resolveBinID(t *testing.T, ctx context.Context, env *env, code string) uuid.UUID {
 	t.Helper()
@@ -221,16 +209,6 @@ func resolveBinID(t *testing.T, ctx context.Context, env *env, code string) uuid
 		JOIN wms_inventory.warehouses w ON w.warehouse_id = b.warehouse_id
 		WHERE b.code = $1 AND w.name = $2`, code, warehouseName).Scan(&id)
 	require.NoErrorf(t, err, "resolve bin %s", code)
-	return id
-}
-
-// resolveOrderID returns the order_id for an external order number.
-func resolveOrderID(t *testing.T, ctx context.Context, env *env, externalOrderNo string) uuid.UUID {
-	t.Helper()
-	var id uuid.UUID
-	err := env.db.QueryRow(ctx, `
-		SELECT order_id FROM wms_inventory.orders WHERE external_order_no = $1`, externalOrderNo).Scan(&id)
-	require.NoErrorf(t, err, "resolve order %s", externalOrderNo)
 	return id
 }
 

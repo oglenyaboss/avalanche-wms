@@ -66,24 +66,6 @@ func requireTaskStatus(t *testing.T, ctx context.Context, env *env, productID uu
 	require.Equal(t, status, got)
 }
 
-// requireOutboxCount asserts a cumulative lower bound on outbox events for a type.
-func requireOutboxCount(t *testing.T, ctx context.Context, env *env, aggregateType string, minCount int) {
-	t.Helper()
-	require.GreaterOrEqual(t, outboxCount(t, ctx, env, aggregateType), minCount)
-}
-
-// outboxCount returns the number of outbox events for an aggregate type.
-func outboxCount(t *testing.T, ctx context.Context, env *env, aggregateType string) int {
-	t.Helper()
-	var count int
-	err := env.db.QueryRow(ctx, `
-		SELECT count(*)
-		FROM public.outbox_events
-		WHERE aggregate_type = $1`, aggregateType).Scan(&count)
-	require.NoError(t, err)
-	return count
-}
-
 // outboxCountForAggregate returns the number of outbox events for a specific
 // aggregate id and type (used for per-product delta assertions).
 func outboxCountForAggregate(t *testing.T, ctx context.Context, env *env, aggregateID uuid.UUID, aggregateType string) int {
