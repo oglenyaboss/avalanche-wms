@@ -319,15 +319,16 @@ func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
 	if err == nil {
 		t.Fatal("DLQ publish fail should propagate (transient, block offset commit)")
 	}
-	if len(st.failed) != 0 {
-		t.Errorf("MarkFailed should NOT run when DLQ fails (reordered), got %d", len(st.failed))
+	// MarkFailed runs before DLQ publish (new order), so rows are marked.
+	if len(st.failed) != 2 {
+		t.Errorf("MarkFailed should run before DLQ (new order), expected 2, got %d", len(st.failed))
 	}
 	if len(st.committed) != 0 {
 		t.Errorf("no commits expected on DLQ fail, got %d", len(st.committed))
 	}
 }
 
-func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) {
+func TestFlusher_MarkFailedFails_ReturnsError_DLQNotPublished(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted")
 	st.failedErr = errors.New("db connection refused")
@@ -337,8 +338,9 @@ func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) 
 	if err == nil {
 		t.Fatal("MarkFailed fail should propagate (transient, block offset commit)")
 	}
-	if len(dq.messages) != 1 {
-		t.Errorf("DLQ should publish before MarkFailed (reordered), got %d", len(dq.messages))
+	// MarkFailed runs before DLQ publish (new order), so DLQ is never reached.
+	if len(dq.messages) != 0 {
+		t.Errorf("DLQ should NOT publish when MarkFailed fails (new order), got %d", len(dq.messages))
 	}
 	if len(st.failed) != 0 {
 		t.Errorf("MarkFailed failed -> no rows marked, got %d", len(st.failed))

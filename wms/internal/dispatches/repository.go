@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"wms/internal/domain"
@@ -56,8 +55,11 @@ func (r *Repository) WithTx(ctx context.Context, fn func(dispatchesRepository) e
 }
 
 func (r *Repository) GetActualDispatchCode(ctx context.Context) (int, error) {
+	// FOR UPDATE locks the counted rows so a concurrent tx sees a consistent count.
+	// Without this lock, two concurrent INSERTs can both read the same count and
+	// generate the same dispatch_code sequence number.
 	var count int
-	err := r.q.QueryRow(ctx, `select count(*) from wms_inventory.outbound_dispatches where created_at >= NOW()::DATE`).Scan(&count)
+	err := r.q.QueryRow(ctx, `SELECT COUNT(*) FROM wms_inventory.outbound_dispatches WHERE created_at >= NOW()::DATE FOR UPDATE`).Scan(&count)
 	if err != nil {
 		return -1, err
 	}
@@ -69,10 +71,7 @@ func (r *Repository) CreateDispatchCode(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	seq := strconv.Itoa(count + 1)
-	for len(seq) < 3 {
-		seq = "0" + seq
-	}
+	seq := fmt.Sprintf("%03d", count+1)
 	return "DSP-" + time.Now().Format("2006-0102") + "-" + seq, nil
 }
 

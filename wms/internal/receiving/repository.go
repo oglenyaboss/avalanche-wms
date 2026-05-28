@@ -293,9 +293,21 @@ func (r *Repository) MarkExpectedAsNotReceived(
 		SET status = $2
 		WHERE shipment_id = $1 AND status = $3`
 
-	if _, err := r.q.Exec(ctx, query, shipmentID, notReceivedStatus, cargoplaceStatusExpected); err != nil {
+	tag, err := r.q.Exec(ctx, query, shipmentID, notReceivedStatus, cargoplaceStatusExpected)
+	if err != nil {
 		return fmt.Errorf("receiving.Repository.MarkExpectedAsNotReceived exec: %w", err)
 	}
+
+	if tag.RowsAffected() > 0 {
+		if err := r.InsertReceivingGateLog(ctx, &GateLogParams{
+			ShipmentID: &shipmentID,
+			Action:     "MARK_NOT_RECEIVED",
+			OccurredAt: time.Now().UTC(),
+		}); err != nil {
+			return fmt.Errorf("receiving.Repository.MarkExpectedAsNotReceived insert log: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -615,11 +627,14 @@ func (r *Repository) ScanBufferWithLog(
 		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog move products: %w", err)
 	}
 
-	if err := r.InsertReceivingTableLog(ctx, logParams); err != nil {
-		return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog insert log: %w", err)
+	moved := int(tag.RowsAffected())
+	if moved > 0 {
+		if err := r.InsertReceivingTableLog(ctx, logParams); err != nil {
+			return 0, fmt.Errorf("receiving.Repository.ScanBufferWithLog insert log: %w", err)
+		}
 	}
 
-	return int(tag.RowsAffected()), nil
+	return moved, nil
 }
 
 func (r *Repository) CountProductsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error) {

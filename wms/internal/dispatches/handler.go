@@ -96,7 +96,7 @@ func (h *Handler) NewDispatch(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, "Invalid request body: you need to pass a vehicle_number", "INVALID_REQUEST", 400)
 		return
 	}
-	if inputData.ScheduledAt.Before(time.Now()) {
+	if inputData.ScheduledAt.Before(time.Now().Add(-1 * time.Minute)) {
 		respondWithError(w, "Invalid request body: scheduled_at should not be past time", "INVALID_REQUEST", 400)
 		return
 	}
