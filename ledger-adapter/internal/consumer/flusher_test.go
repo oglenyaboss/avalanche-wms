@@ -345,6 +345,15 @@ func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) 
 	}
 }
 
+// TestFlusher_StrandedPending_GetsRetried gives FALSE CONFIDENCE about crash recovery
+// (bug S2). It asserts a stranded PENDING row is resubmitted and reaches COMMITTED, and
+// only passes because the stub chain (stubChain.BatchCall) has no `processedEventIds`
+// equivalent — it returns success for the same eventId every call. The REAL contract's
+// _requireNewEvent reverts "Duplicate eventId" on a resubmit, so in production this same
+// path marks the already-succeeded event FAILED. This test proves "the retry code path
+// runs", NOT "resubmission is safe". The true behavior is reproduced by the e2e
+// scenario tests/e2e/scenarios/09-s2-crash-recovery.sh. Do not treat a green here as S2
+// coverage; a faithful fix must make resubmission of a non-terminal row idempotent.
 func TestFlusher_StrandedPending_GetsRetried(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
 	msgs := makeMessages(1, "receiving")

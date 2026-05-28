@@ -105,7 +105,8 @@ FROM (
     ('Кроссовки Nike Air Max 90', 'Повседневные кроссовки, мужская линейка', 9.5::numeric),
     ('Футболка Adidas Originals', 'Базовая хлопковая футболка', 1.2::numeric),
     ('Рюкзак Puma Core', 'Городской рюкзак 22 литра', 7.0::numeric),
-    ('Куртка The North Face', 'Демисезонная куртка', 12.0::numeric)
+    ('Куртка The North Face', 'Демисезонная куртка', 12.0::numeric),
+    ('E2E Seed Outbound SKU', 'Dedicated SKU for seeded outbound e2e flow', 1.0::numeric)
 ) AS v(name, description, volume)
 ON CONFLICT DO NOTHING;
 
@@ -118,7 +119,8 @@ FROM (
     ('Кроссовки Nike Air Max 90', '4600000000028'),
     ('Футболка Adidas Originals', '4600000000035'),
     ('Рюкзак Puma Core', '4600000000042'),
-    ('Куртка The North Face', '4600000000059')
+    ('Куртка The North Face', '4600000000059'),
+    ('E2E Seed Outbound SKU', '4600000099999')
 ) AS v(sku_name, barcode)
 JOIN wms_inventory.skus s ON s.name = v.sku_name
 ON CONFLICT (barcode) DO NOTHING;
@@ -247,7 +249,8 @@ SELECT
 FROM (
   VALUES
     ('CP-TABLE-001', 'Кроссовки Nike Air Max 90', 2),
-    ('CP-TABLE-001', 'Футболка Adidas Originals', 1)
+    ('CP-TABLE-001', 'Футболка Adidas Originals', 1),
+    ('CP-TABLE-001', 'E2E Seed Outbound SKU', 1)
 ) AS v(cargoplace_code, sku_name, expected_qty)
 JOIN wms_inventory.inbound_shipments sh ON sh.ttn_code = 'ТТН-2026-TABLE-001'
 JOIN wms_inventory.cargoplaces c

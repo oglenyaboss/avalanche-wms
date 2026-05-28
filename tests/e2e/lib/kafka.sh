@@ -10,7 +10,7 @@ publish_event() {
   local product_id=$3     # UUID
   local payload="${4:-{}}"
 
-  docker run --rm --network blockchain_project_app_network \
+  docker run --rm --network blockchain_project_e2e_app_network \
     -i edenhill/kcat:1.7.1 \
     -b kafka:9092 \
     -t "$EVENTS_TOPIC" \
