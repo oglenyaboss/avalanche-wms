@@ -55,11 +55,8 @@ func (r *Repository) WithTx(ctx context.Context, fn func(dispatchesRepository) e
 }
 
 func (r *Repository) GetActualDispatchCode(ctx context.Context) (int, error) {
-	// FOR UPDATE locks the counted rows so a concurrent tx sees a consistent count.
-	// Without this lock, two concurrent INSERTs can both read the same count and
-	// generate the same dispatch_code sequence number.
 	var count int
-	err := r.q.QueryRow(ctx, `SELECT COUNT(*) FROM wms_inventory.outbound_dispatches WHERE created_at >= NOW()::DATE FOR UPDATE`).Scan(&count)
+	err := r.q.QueryRow(ctx, `SELECT COUNT(*) FROM wms_inventory.outbound_dispatches WHERE created_at >= NOW()::DATE`).Scan(&count)
 	if err != nil {
 		return -1, err
 	}

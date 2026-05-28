@@ -141,17 +141,18 @@ func (f *Flusher) flushSubBatch(ctx context.Context, aggregateType string, msgs 
 }
 
 func (f *Flusher) recordFailure(ctx context.Context, pending []*Message, ids []uuid.UUID, txHash, reason string) error {
-	// MarkFailed first, then DLQ. If MarkFailed succeeds but DLQ fails, on retry
-	// filterAndMarkPending will see FAILED status and skip — no double-publish.
-	// The previous order (DLQ first) caused double-publish when MarkFailed failed
-	// because the event was re-published to DLQ on every retry.
-	if err := f.store.MarkFailed(ctx, ids, txHash, reason); err != nil {
-		f.log.Error("mark failed", "reason", reason, "err", err)
-		return fmt.Errorf("mark failed: %w", err)
-	}
+	// DLQ first, then MarkFailed. Trade-off: if MarkFailed fails after a successful
+	// DLQ publish, the retry re-publishes to DLQ (noisy double-publish). The reverse
+	// order (MarkFailed first) silently loses the DLQ entry when DLQ publish fails,
+	// because filterAndMarkPending skips FAILED events — unrecoverable without manual
+	// intervention. Noisy-but-recoverable beats silent-loss.
 	if err := f.dlq.PublishAll(ctx, pending, reason); err != nil {
 		f.log.Error("dlq publish", "reason", reason, "err", err)
 		return fmt.Errorf("dlq publish: %w", err)
+	}
+	if err := f.store.MarkFailed(ctx, ids, txHash, reason); err != nil {
+		f.log.Error("mark failed", "reason", reason, "err", err)
+		return fmt.Errorf("mark failed: %w", err)
 	}
 	return nil
 }

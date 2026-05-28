@@ -287,6 +287,7 @@ func (r *Repository) MarkExpectedAsNotReceived(
 	ctx context.Context,
 	shipmentID uuid.UUID,
 	notReceivedStatus string,
+	operatorID uuid.UUID,
 ) error {
 	const query = `
 		UPDATE wms_inventory.cargoplaces
@@ -301,6 +302,7 @@ func (r *Repository) MarkExpectedAsNotReceived(
 	if tag.RowsAffected() > 0 {
 		if err := r.InsertReceivingGateLog(ctx, &GateLogParams{
 			ShipmentID: &shipmentID,
+			OperatorID: operatorID,
 			Action:     "MARK_NOT_RECEIVED",
 			OccurredAt: time.Now().UTC(),
 		}); err != nil {

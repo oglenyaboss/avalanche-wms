@@ -62,7 +62,7 @@ type receivingRepository interface {
 	UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, newStatus, expectedStatus string) error
 	UpdateCargoplaceReceivedAtGate(ctx context.Context, cargoplaceID uuid.UUID, newStatus, expectedStatus string, receivedAt time.Time) error
 	UpdateCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID, newStatus, expectedStatus string) error
-	MarkExpectedAsNotReceived(ctx context.Context, shipmentID uuid.UUID, notReceivedStatus string) error
+	MarkExpectedAsNotReceived(ctx context.Context, shipmentID uuid.UUID, notReceivedStatus string, operatorID uuid.UUID) error
 	CountCargoplaces(ctx context.Context, shipmentID uuid.UUID) (int, error)
 	CountCargoplacesByStatus(ctx context.Context, shipmentID uuid.UUID, status string) (int, error)
 	ListExpectedSKUsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) ([]ExpectedSKU, error)
@@ -284,7 +284,7 @@ func (s *Service) AcceptShipment(
 
 	var total, received, notReceived int
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
-		if err := txRepo.MarkExpectedAsNotReceived(ctx, shipmentID, cargoplaceStatusNotReceived); err != nil {
+		if err := txRepo.MarkExpectedAsNotReceived(ctx, shipmentID, cargoplaceStatusNotReceived, operatorID); err != nil {
 			return fmt.Errorf("receiving.Service.AcceptShipment mark not received: %w", err)
 		}
 		if err := txRepo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed, shipmentStatusGateInProgress); err != nil {

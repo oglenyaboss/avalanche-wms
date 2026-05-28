@@ -262,6 +262,7 @@ func (m *mockReceivingRepo) MarkExpectedAsNotReceived(
 	_ context.Context,
 	shipmentID uuid.UUID,
 	notReceivedStatus string,
+	_ uuid.UUID,
 ) error {
 	m.markNotReceivedShipmentID = shipmentID
 	m.markNotReceivedStatus = notReceivedStatus
