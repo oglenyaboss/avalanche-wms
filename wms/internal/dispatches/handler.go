@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"wms/internal/auth"
 	"wms/internal/domain"
 
 	"github.com/google/uuid"
@@ -35,6 +36,10 @@ type DispatchFilter struct {
 }
 
 func (h *Handler) GetDispatches(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireOperator(w, r); !ok {
+		return
+	}
+
 	vars := r.URL.Query()
 	filter := DispatchFilter{}
 
@@ -82,6 +87,10 @@ type NewDispatchQuery struct {
 }
 
 func (h *Handler) NewDispatch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireOperator(w, r); !ok {
+		return
+	}
+
 	var inputData NewDispatchQuery
 	err := decodeJSON(r, &inputData)
 	if err != nil {
@@ -117,6 +126,10 @@ func (h *Handler) NewDispatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetDispatchByID(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireOperator(w, r); !ok {
+		return
+	}
+
 	vars := mux.Vars(r)
 	dispatchID, err := uuid.Parse(vars["dispatch_id"])
 	if err != nil {
@@ -126,18 +139,31 @@ func (h *Handler) GetDispatchByID(w http.ResponseWriter, r *http.Request) {
 
 	dispatch, err := h.svc.GetDispatchByID(r.Context(), dispatchID)
 	if err != nil {
+		if errors.Is(err, ErrDispatchNotFound) {
+			respondWithError(w, "DISPATCH_NOT_FOUND", "NOT_FOUND", 404)
+			return
+		}
 		respondWithError(w, fmt.Errorf("failed to get dispatch by id %s: %w", dispatchID, err).Error(), "INTERNAL_ERROR", 503)
-		return
-	}
-
-	if dispatch == (domain.OutboundDispatch{}) {
-		respondWithError(w, "DISPATCH_NOT_FOUND", "NOT_FOUND", 404)
 		return
 	}
 
 	respondWithSuccess(w, map[string]interface{}{
 		"dispatch": dispatch,
 	})
+}
+
+func requireOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	operatorID := auth.UserIDFromCtx(r.Context())
+	if operatorID == uuid.Nil {
+		respondWithError(w, "Требуется авторизация", "UNAUTHORIZED", 401)
+		return uuid.Nil, false
+	}
+	role := auth.UserRoleFromCtx(r.Context())
+	if role != domain.UserRoleOperator {
+		respondWithError(w, "Только оператор может выполнять это действие", "FORBIDDEN", 403)
+		return uuid.Nil, false
+	}
+	return operatorID, true
 }
 
 func decodeJSON(r *http.Request, dest any) error {
