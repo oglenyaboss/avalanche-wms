@@ -54,7 +54,18 @@ func (r *Repository) WithTx(ctx context.Context, fn func(dispatchesRepository) e
 	return nil
 }
 
+// dispatchCodeLockKey serializes daily dispatch-code numbering (Shipping-6).
+// Without it, concurrent CreateDispatchCode calls read the same COUNT(*) and
+// collide on the UNIQUE(dispatch_code) constraint, so the losers fail with 503.
+const dispatchCodeLockKey int64 = 0x44535043 // "DSPC"
+
 func (r *Repository) GetActualDispatchCode(ctx context.Context) (int, error) {
+	// Transaction-scoped advisory lock: held until the surrounding WithTx commits,
+	// so the next creator counts only after the previous dispatch row has landed.
+	// CreateDispatchCode is always called inside dispatches.WithTx, so r.q is the tx.
+	if _, err := r.q.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, dispatchCodeLockKey); err != nil {
+		return -1, fmt.Errorf("dispatches.Repository.GetActualDispatchCode lock: %w", err)
+	}
 	var count int
 	err := r.q.QueryRow(ctx, `SELECT COUNT(*) FROM wms_inventory.outbound_dispatches WHERE created_at >= NOW()::DATE`).Scan(&count)
 	if err != nil {
