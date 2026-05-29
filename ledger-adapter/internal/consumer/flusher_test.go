@@ -328,7 +328,7 @@ func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
 	}
 }
 
-func TestFlusher_MarkFailedFails_ReturnsError_DLQNotPublished(t *testing.T) {
+func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted")
 	st.failedErr = errors.New("db connection refused")
@@ -338,9 +338,10 @@ func TestFlusher_MarkFailedFails_ReturnsError_DLQNotPublished(t *testing.T) {
 	if err == nil {
 		t.Fatal("MarkFailed fail should propagate (transient, block offset commit)")
 	}
-	// DLQ runs first and succeeds, then MarkFailed fails.
+	// DLQ-first ordering: the DLQ message is already published before MarkFailed
+	// is attempted, so when MarkFailed fails the DLQ row still exists (count == 1).
 	if len(dq.messages) != 1 {
-		t.Errorf("DLQ should publish before MarkFailed, expected 1, got %d", len(dq.messages))
+		t.Errorf("DLQ already published before MarkFailed, expected 1, got %d", len(dq.messages))
 	}
 	if len(st.failed) != 0 {
 		t.Errorf("MarkFailed failed -> no rows marked, got %d", len(st.failed))
