@@ -106,11 +106,12 @@ type scanDriverData struct {
 }
 
 type shipData struct {
-	ProductsShipped     int  `json:"products_shipped"`
-	OutboxEventsCreated int  `json:"outbox_events_created"`
-	OrdersCompleted     int  `json:"orders_completed"`
-	DispatchDeparted    bool `json:"dispatch_departed"`
-	BufferRemaining     int  `json:"buffer_remaining"`
+	ProductsShipped        int  `json:"products_shipped"`
+	OutboxEventsCreated    int  `json:"outbox_events_created"`
+	OrdersCompleted        int  `json:"orders_completed"`
+	OrdersPartiallyShipped int  `json:"orders_partially_shipped"`
+	DispatchDeparted       bool `json:"dispatch_departed"`
+	BufferRemaining        int  `json:"buffer_remaining"`
 }
 
 // productIDsFromTasks extracts product ids from a task list response.

@@ -35,7 +35,7 @@ type shippingRepository interface {
 	BatchUpdateProductsShipped(ctx context.Context, productIDs []uuid.UUID) error
 	BatchInsertShippings(ctx context.Context, events []shippingEvent, dispatchID, operatorID uuid.UUID) error
 	BatchInsertShippingOutbox(ctx context.Context, events []shippingEvent, dispatchID uuid.UUID) (int, error)
-	UpdateOrdersShippedConditional(ctx context.Context, orderIDs []uuid.UUID) (int, error)
+	UpdateOrdersShippedConditional(ctx context.Context, orderIDs []uuid.UUID) (completed, partial int, err error)
 	CountReadyToShipProductsInBuffer(ctx context.Context, binID uuid.UUID) (int, error)
 	UpdateDispatchDeparted(ctx context.Context, dispatchID uuid.UUID) error
 }
@@ -181,12 +181,14 @@ func (s *Service) Ship(ctx context.Context, req ShipRequest) (*ShipResponse, err
 			return fmt.Errorf("shipping.Service.Ship insert outbox: %w", err)
 		}
 
-		// 7. Переводим заказ в SHIPPED, если все его товары уже отгружены.
+		// 7. Двигаем статус заказа: SHIPPED, если все товары отгружены; иначе
+		//    PARTIALLY_SHIPPED, чтобы частично отгруженный заказ не выглядел как ASSEMBLED
+		//    и не застревал, если отгрузка пошла раньше перехода в ASSEMBLED (issue #48).
 		orderIDs := make([]uuid.UUID, 0, len(orderSet))
 		for orderID := range orderSet {
 			orderIDs = append(orderIDs, orderID)
 		}
-		ordersCompleted, err := repo.UpdateOrdersShippedConditional(ctx, orderIDs)
+		ordersCompleted, ordersPartiallyShipped, err := repo.UpdateOrdersShippedConditional(ctx, orderIDs)
 		if err != nil {
 			return fmt.Errorf("shipping.Service.Ship update orders: %w", err)
 		}
@@ -206,11 +208,12 @@ func (s *Service) Ship(ctx context.Context, req ShipRequest) (*ShipResponse, err
 		}
 
 		resp = ShipResponse{
-			ProductsShipped:     len(products),
-			OutboxEventsCreated: outboxEventsCreated,
-			OrdersCompleted:     ordersCompleted,
-			DispatchDeparted:    dispatchDeparted,
-			BufferRemaining:     remaining,
+			ProductsShipped:        len(products),
+			OutboxEventsCreated:    outboxEventsCreated,
+			OrdersCompleted:        ordersCompleted,
+			OrdersPartiallyShipped: ordersPartiallyShipped,
+			DispatchDeparted:       dispatchDeparted,
+			BufferRemaining:        remaining,
 		}
 		return nil
 	})

@@ -259,26 +259,80 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 		"COMMITTED row has no tx_hash; reconcile must reuse the mined tx")
 }
 
-// TestShippingShipBeforeAssembled_pendingFix documents a HIGH bug: Ship gates on
-// product status (READY_TO_SHIP) but never on order status — shipping/service.go:147
-// selects products by status only, and UpdateOrdersShippedConditional only flips orders
-// already ASSEMBLED. If only SOME of an order's products are READY_TO_SHIP while the
-// order is still ALLOCATED, shipping them succeeds but the order can never reach SHIPPED.
+// TestShippingShipBeforeAssembled_pendingFix is the live regression for Shipping-2 (#48):
+// an order whose items are shipped before it ever reaches ASSEMBLED must NOT be stranded
+// in ALLOCATED. Before the fix, UpdateOrdersShippedConditional only advanced ASSEMBLED
+// orders, so shipping a subset of an ALLOCATED order left it ALLOCATED forever. After the
+// fix, the order moves to PARTIALLY_SHIPPED — a non-terminal state from which it still
+// completes to SHIPPED (PARTIALLY_SHIPPED -> SHIPPED is covered by TestPartialShipment_MofN).
+//
+// Pure-HTTP / DB-contract test: newMultiProductFixture inserts synthetic STORED products
+// with no chain history, so their picking/shipping events revert on-chain and never COMMIT.
+// The WMS commits its DB transaction before the chain is touched and the ship path is not
+// chain-gated, so the HTTP flow succeeds and every assertion is DB-only.
 func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
-	t.Skip("documents Shipping BUG-2 (order stuck ALLOCATED after partial ship); pending product fix")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
 
-	// Reproduction (pure HTTP — implement with newMultiProductFixture to flip live):
-	//  1. newMultiProductFixture(SHOP-7, storedCount=2, orderQty=2); allocate (order ALLOCATED, 2 tasks).
-	//  2. Pick only ONE product P1 (cart=[P1]); leave P2 ALLOCATED/PENDING.
-	//  3. POST /assembly/scan-shipping-buffer -> P1 READY_TO_SHIP, order STAYS ALLOCATED
-	//     (UpdateOrdersToAssembled needs ALL products READY_TO_SHIP).
-	//  4. scan-driver to AT_GATE; POST /shipping/ship {product_ids:[P1]} -> 200, P1 SHIPPED,
-	//     orders_completed=0.
-	//  5. Bug: order is stuck ALLOCATED — UpdateOrdersShippedConditional requires
-	//     status='ASSEMBLED', so it can never become SHIPPED even after P2 ships.
-	// Invariant that SHOULD hold: Ship must reject products whose order is not ASSEMBLED
-	// (or order completion must not require the ASSEMBLED precondition), so an order is
-	// never stranded once its items have shipped.
+	env := testEnv
+	require.NotNil(t, env)
+
+	token := operatorToken(t, env)
+	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 2, 2)
+
+	// Allocate: NEW -> ALLOCATED, two PENDING tasks.
+	var allocated allocateData
+	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+		"destination_id": fx.DestinationID.String(),
+	}, &allocated)
+	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
+
+	orderProductIDs := productIDsForOrder(t, ctx, env, fx.OrderID)
+	require.Len(t, orderProductIDs, 2)
+	p1, err := uuid.Parse(orderProductIDs[0])
+	require.NoError(t, err)
+	p2, err := uuid.Parse(orderProductIDs[1])
+	require.NoError(t, err)
+
+	// Pick ONLY P1; P2 stays ALLOCATED with a PENDING task.
+	var picked pickData
+	postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": p1.String()}, &picked)
+
+	// Scan the shipping buffer: P1 -> READY_TO_SHIP. The order does NOT reach ASSEMBLED
+	// because P2 is still ALLOCATED (UpdateOrdersToAssembled needs every product ready).
+	var placed scanShippingBufferData
+	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
+		"buffer_bin_id": fx.ShippingBinID.String(),
+	}, &placed)
+	require.Equal(t, 1, placed.ProductsPlaced)
+	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
+	requireProductStatus(t, ctx, env, p1, "READY_TO_SHIP")
+	requireProductStatus(t, ctx, env, p2, "ALLOCATED")
+
+	// Bring the dispatch to the gate and ship P1 only.
+	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
+		"buffer_bin_id": fx.ShippingBinID.String(),
+	}, nil)
+	var driver scanDriverData
+	postJSON(t, env, token, "/shipping/scan-driver", map[string]string{
+		"dispatch_code": fx.DispatchCode,
+	}, &driver)
+	require.Equal(t, "AT_GATE", driver.Status)
+
+	var shipped shipData
+	postJSON(t, env, token, "/shipping/ship", map[string]any{
+		"buffer_bin_id": fx.ShippingBinID.String(),
+		"dispatch_id":   fx.DispatchID.String(),
+		"product_ids":   []string{p1.String()},
+	}, &shipped)
+	require.Equal(t, 1, shipped.ProductsShipped)
+	require.Equal(t, 0, shipped.OrdersCompleted, "order is not complete — P2 never shipped")
+	require.Equal(t, 1, shipped.OrdersPartiallyShipped, "order moves to PARTIALLY_SHIPPED, not stranded ALLOCATED")
+
+	requireProductStatus(t, ctx, env, p1, "SHIPPED")
+	requireProductStatus(t, ctx, env, p2, "ALLOCATED")
+	// The fix: before #48 this order was stuck ALLOCATED forever; now it is PARTIALLY_SHIPPED.
+	requireOrderStatus(t, ctx, env, fx.OrderID, "PARTIALLY_SHIPPED")
 }
 
 // TestReceivingOpenBoxReachesChain documents a HIGH WMS<->chain divergence
