@@ -17,23 +17,57 @@ import (
 // the intended invariant is described, so the suite stays green while the gap is
 // tracked. Remove the Skip and implement the body once the product is fixed.
 
-// TestS1_WMSChainDivergence_pendingFix documents S1: WMS never reads
-// onchain_events.status, so an on-chain FAILED transition does not roll WMS back.
+// TestS1_WMSChainDivergence_pendingFix is the live regression for the S1 putaway gate
+// (#45): once a product's receiving event is FAILED on-chain, the WMS must refuse to
+// advance that product to putaway instead of silently diverging from the ledger.
+//
+// Scope: this MR adds the putaway and pick gates, which stop the divergence cascade at
+// its source — a product blocked at putaway never reaches assembly or shipping. The ship
+// gate and read-path chain_synced enrichment are tracked as #45 follow-ups.
 func TestS1_WMSChainDivergence_pendingFix(t *testing.T) {
-	t.Skip("documents S1; pending product fix")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
 
-	// Intended assertions (NOT yet implementable without fault injection):
-	//
-	// 1. Drive a product through a stage (e.g. receiving) so an outbox event is
-	//    emitted and the adapter submits it on-chain.
-	// 2. Force the on-chain transition to FAIL (e.g. inject an invalid FSM
-	//    transition or a revert), so onchain_events.status becomes FAILED.
-	// 3. Invariant that SHOULD hold but currently does NOT:
-	//      - When onchain_events.status = 'FAILED' for a product's stage event,
-	//        the product's WMS status MUST NOT advance past that stage.
-	//    Today WMS advances regardless because it never consults
-	//    onchain_events.status, so WMS and chain diverge. Assert the product
-	//    status is rolled back / held, and surface the divergence.
+	env := testEnv
+	require.NotNil(t, env)
+
+	token := operatorToken(t, env)
+	fixture := newOutboundFixture(t, ctx, env)
+
+	// 1. Drive the product through the full receiving flow → RECEIVED in BUFFER-01,
+	//    emitting a real receiving outbox event.
+	productID := driveReceivingToBuffer(t, env, token, fixture)
+	requireProductStatus(t, ctx, env, productID, "RECEIVED")
+
+	// 2. Wait for the receiving event to COMMIT on-chain, THEN force it FAILED
+	//    (simulating a chain revert / DLQ). Forcing before the row exists would be a
+	//    no-op, so the wait is load-bearing.
+	receivingEventID := eventIDForAggregate(t, ctx, env, productID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, receivingEventID, "receiving")
+	setOnchainStatus(t, ctx, env, receivingEventID, "FAILED")
+
+	// 3. The operator can still scan into the putaway cart, but placement must be gated:
+	//    scan-storage-bin → 409 CHAIN_EVENT_REJECTED.
+	postJSON[map[string]any](t, env, token, "/putaway/scan-buffer", map[string]string{
+		"buffer_bin_id": fixture.ReceivingBinID.String(),
+	}, nil)
+	postJSON[map[string]any](t, env, token, "/putaway/scan-product", map[string]string{
+		"product_id":    productID.String(),
+		"buffer_bin_id": fixture.ReceivingBinID.String(),
+	}, nil)
+
+	status, code, _ := postExpectError(t, env, token, "/putaway/scan-storage-bin", map[string]any{
+		"product_ids":    []string{productID.String()},
+		"storage_bin_id": fixture.StorageBinID.String(),
+	})
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "CHAIN_EVENT_REJECTED", code)
+
+	// 4. The product must NOT advance past RECEIVED and no putaway outbox event may be
+	//    emitted — WMS and chain do not diverge.
+	requireProductStatus(t, ctx, env, productID, "RECEIVED")
+	require.Equal(t, 0, outboxCountForAggregate(t, ctx, env, productID, "putaway"),
+		"gated putaway must not emit a putaway outbox event")
 }
 
 // TestS2_AdapterCrashRecovery_pendingFix exercises the S2 fix (#44): a redelivered

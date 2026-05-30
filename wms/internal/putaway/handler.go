@@ -12,6 +12,7 @@ import (
 
 	"wms/internal/auth"
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 type Handler struct {
@@ -251,6 +252,8 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "PRODUCT_NOT_IN_BUFFER", "Товар не находится в указанной буферной ячейке"
 	case errors.Is(err, ErrProductNotReceived):
 		return http.StatusConflict, "PRODUCT_NOT_RECEIVED", "Товар не в статусе RECEIVED"
+	case errors.Is(err, ledger.ErrChainEventRejected):
+		return http.StatusConflict, "CHAIN_EVENT_REJECTED", "Размещение отклонено: приёмка товара не подтверждена в блокчейне (FAILED)"
 	case errors.Is(err, ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
 	default:

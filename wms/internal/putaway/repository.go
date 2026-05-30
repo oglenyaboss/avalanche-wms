@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 type dbTX interface {
@@ -29,6 +30,12 @@ type Repository struct {
 
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db, q: db}
+}
+
+// CheckChainStatus rejects placement when a product's receiving event is FAILED
+// on-chain (issue #45). Call it before the placement transaction (it runs on r.q).
+func (r *Repository) CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error {
+	return ledger.CheckChainStatus(ctx, r.q, productIDs, aggregateType)
 }
 
 func (r *Repository) WithTx(ctx context.Context, fn func(putawayRepository) error) error {

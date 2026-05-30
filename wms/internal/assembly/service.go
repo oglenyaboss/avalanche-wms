@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 type Service struct {
@@ -40,6 +41,7 @@ type assemblyRepository interface {
 	UpdateProductsToReadyToShip(ctx context.Context, productIDs []uuid.UUID, binID uuid.UUID) (int, error)
 	UpdateOrdersToAssembled(ctx context.Context, orderIDs []uuid.UUID) (int, error)
 	GetOrderIDsByProductIDs(ctx context.Context, productIDs []uuid.UUID) ([]uuid.UUID, error)
+	CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error
 }
 
 func NewService(repo assemblyRepository) *Service {
@@ -225,6 +227,13 @@ func (s *Service) GetTasks(ctx context.Context, destinationID, operatorID uuid.U
 func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*PickResponse, error) {
 	if operatorID == uuid.Nil || productID == uuid.Nil {
 		return nil, fmt.Errorf("assembly.Service.Pick: %w", ErrInvalidInput)
+	}
+
+	// #45: gate on the previous FSM stage. Reject the pick if the product's putaway
+	// event is FAILED on-chain — the WMS must not advance a product whose prior stage
+	// diverged from the ledger. Runs before the transaction (read-only pre-check).
+	if err := s.repo.CheckChainStatus(ctx, []uuid.UUID{productID}, ledger.AggregatePutaway); err != nil {
+		return nil, fmt.Errorf("assembly.Service.Pick: %w", err)
 	}
 
 	var task *Task

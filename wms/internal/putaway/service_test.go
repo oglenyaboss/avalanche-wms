@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 type mockPutawayRepo struct {
@@ -51,6 +52,9 @@ type mockPutawayRepo struct {
 	// WithTx tracking
 	withTxCalls int
 	inTx        bool
+
+	// CheckChainStatus (#45 chain-status gate)
+	checkChainErr error
 }
 
 func (m *mockPutawayRepo) WithTx(_ context.Context, fn func(putawayRepository) error) error {
@@ -58,6 +62,26 @@ func (m *mockPutawayRepo) WithTx(_ context.Context, fn func(putawayRepository) e
 	m.inTx = true
 	defer func() { m.inTx = false }()
 	return fn(m)
+}
+
+func (m *mockPutawayRepo) CheckChainStatus(_ context.Context, _ []uuid.UUID, _ string) error {
+	return m.checkChainErr
+}
+
+// TestPlaceProductsToStorageBin_ChainEventRejected verifies the #45 gate: when a
+// product's receiving event is FAILED on-chain, placement is rejected with
+// ErrChainEventRejected BEFORE the transaction opens (no state is mutated).
+func TestPlaceProductsToStorageBin_ChainEventRejected(t *testing.T) {
+	mockRepo := &mockPutawayRepo{checkChainErr: ledger.ErrChainEventRejected}
+	svc := NewService(mockRepo)
+
+	_, err := svc.PlaceProductsToStorageBin(context.Background(), uuid.New(), []uuid.UUID{uuid.New()}, uuid.New())
+	if !errors.Is(err, ledger.ErrChainEventRejected) {
+		t.Fatalf("expected ErrChainEventRejected, got %v", err)
+	}
+	if mockRepo.withTxCalls != 0 {
+		t.Fatalf("gate must reject before the transaction; withTxCalls=%d", mockRepo.withTxCalls)
+	}
 }
 
 func (m *mockPutawayRepo) GetBufferBinByID(_ context.Context, _ uuid.UUID) (*domain.Bin, error) {

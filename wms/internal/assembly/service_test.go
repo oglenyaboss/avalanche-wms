@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 // mockAssemblyRepo - мок-репозиторий для тестирования сервиса
@@ -85,6 +86,9 @@ type mockAssemblyRepo struct {
 	orderIDsErr            error
 	ordersUpdated          int
 	ordersUpdatedErr       error
+
+	// CheckChainStatus (#45 chain-status gate)
+	checkChainErr error
 }
 
 func (m *mockAssemblyRepo) WithTx(_ context.Context, fn func(assemblyRepository) error) error {
@@ -95,6 +99,26 @@ func (m *mockAssemblyRepo) WithTx(_ context.Context, fn func(assemblyRepository)
 		return m.withTxFn(fn)
 	}
 	return fn(m)
+}
+
+func (m *mockAssemblyRepo) CheckChainStatus(_ context.Context, _ []uuid.UUID, _ string) error {
+	return m.checkChainErr
+}
+
+// TestPick_ChainEventRejected verifies the #45 gate: when a product's putaway event is
+// FAILED on-chain, Pick is rejected with ErrChainEventRejected BEFORE the transaction
+// opens (no task is marked done, no product is assembled).
+func TestPick_ChainEventRejected(t *testing.T) {
+	mockRepo := &mockAssemblyRepo{checkChainErr: ledger.ErrChainEventRejected}
+	svc := NewService(mockRepo)
+
+	_, err := svc.Pick(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, ledger.ErrChainEventRejected) {
+		t.Fatalf("expected ErrChainEventRejected, got %v", err)
+	}
+	if mockRepo.withTxCalls != 0 {
+		t.Fatalf("gate must reject before the transaction; withTxCalls=%d", mockRepo.withTxCalls)
+	}
 }
 
 func (m *mockAssemblyRepo) GetOrdersByDestinationForUpdate(_ context.Context, _ uuid.UUID) ([]domain.Order, error) {

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 type Service struct {
@@ -32,6 +33,7 @@ type putawayRepository interface {
 	UpdateProductStorage(ctx context.Context, productID, binID uuid.UUID) error
 	InsertPutaway(ctx context.Context, params *InsertPutawayParams) error
 	InsertOutboxEvents(ctx context.Context, params *OutboxEventsParams) error
+	CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error
 }
 
 func NewService(repo putawayRepository) *Service {
@@ -135,6 +137,13 @@ func (s *Service) AddToPutawayCart(ctx context.Context, operatorID, productID, b
 func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid.UUID, productsIDs []uuid.UUID, storageBinID uuid.UUID) (*ScanStorageBinResponse, error) {
 	if operatorID == uuid.Nil || storageBinID == uuid.Nil || len(productsIDs) == 0 {
 		return nil, fmt.Errorf("putaway.Service.PlaceProductsToStorageBin: %w", ErrInvalidInput)
+	}
+
+	// #45: gate on the previous FSM stage. Reject placement if any product's receiving
+	// event is FAILED on-chain — the WMS must not advance a product whose prior stage
+	// diverged from the ledger. Runs before the transaction (read-only pre-check).
+	if err := s.repo.CheckChainStatus(ctx, productsIDs, ledger.AggregateReceiving); err != nil {
+		return nil, fmt.Errorf("putaway.Service.PlaceProductsToStorageBin: %w", err)
 	}
 
 	var storageBin *domain.Bin

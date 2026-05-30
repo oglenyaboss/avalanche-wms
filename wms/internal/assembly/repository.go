@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 type Repository struct {
@@ -30,6 +31,12 @@ type dbTX interface {
 
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db, q: db}
+}
+
+// CheckChainStatus rejects a pick when the product's putaway event is FAILED
+// on-chain (issue #45). Call it before the pick transaction (it runs on r.q).
+func (r *Repository) CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error {
+	return ledger.CheckChainStatus(ctx, r.q, productIDs, aggregateType)
 }
 
 func (r *Repository) WithTx(ctx context.Context, fn func(assemblyRepository) error) error {
