@@ -220,23 +220,55 @@ func TestS3_BatchPoisoning_pendingFix(t *testing.T) {
 // implementing the body once the product is fixed; see tests/e2e/BUGHUNT.md for the
 // full backlog (severity, file:line, and the deferred lower-severity findings).
 
-// TestAssemblyCartLostOnRestart_pendingFix documents a CRITICAL data-integrity bug:
-// the assembly pick cart lives only in WMS process memory (assembly/service.go:18,
-// 266-270) and no endpoint rebuilds it from the DB. If WMS restarts (or a request
-// lands on another instance) between Pick and ScanShippingBuffer, the picked items
-// are stranded ASSEMBLED with their order ALLOCATED forever — ScanShippingBuffer
-// reads only s.carts (service.go:286) and there is no recovery path.
+// TestAssemblyCartLostOnRestart_pendingFix is the live regression for Assembly BUG-1 (#46):
+// before the fix the pick cart lived only in WMS process memory, so a WMS restart between
+// Pick and ScanShippingBuffer stranded the picked product ASSEMBLED with its order ALLOCATED
+// forever. Now ScanShippingBuffer derives the cart from DB state (the operator's ASSEMBLED
+// products with a DONE task), so the product survives a restart and is placed normally.
 func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
-	t.Skip("documents Assembly BUG-1 (cart not persisted); pending product fix")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
 
-	// Reproduction (needs a wms_app restart, so not pure HTTP):
-	//  1. Allocate an order; POST /assembly/pick for product P (P -> ASSEMBLED, cart=[P]).
-	//  2. Restart WMS:  docker compose -p blockchain_project_e2e restart wms_app
-	//  3. POST /assembly/scan-shipping-buffer {buffer_bin_id} -> 409 CART_EMPTY (cart lost).
-	//  4. P is stuck: products.status='ASSEMBLED', orders.status='ALLOCATED', unrecoverable.
-	// Invariant that SHOULD hold: a restart must not strand picked items — either the
-	// cart is persisted (Redis/DB; see the TODO at service.go:376) or ScanShippingBuffer
-	// rebuilds it from status='ASSEMBLED' products for the destination.
+	env := testEnv
+	require.NotNil(t, env)
+
+	token := operatorToken(t, env)
+	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 1, 1)
+
+	// Allocate and pick the single product (-> ASSEMBLED, task DONE by this operator).
+	var allocated allocateData
+	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+		"destination_id": fx.DestinationID.String(),
+	}, &allocated)
+	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
+
+	orderProductIDs := productIDsForOrder(t, ctx, env, fx.OrderID)
+	require.Len(t, orderProductIDs, 1)
+	productID, err := uuid.Parse(orderProductIDs[0])
+	require.NoError(t, err)
+
+	var picked pickData
+	postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": productID.String()}, &picked)
+	requireProductStatus(t, ctx, env, productID, "ASSEMBLED")
+
+	// Restart the WMS: any in-memory cart is dropped here.
+	restartWMS(t, ctx, env)
+
+	// Reuse the SAME operator token: the derived cart is scoped to assembly_tasks.operator_id,
+	// so it must match the operator that picked. The JWT is stateless and survives the restart
+	// (stable JWT_SECRET; the user persists in the un-restarted DB), and operatorToken would
+	// otherwise mint a brand-new operator.
+
+	// The fix: scan-shipping-buffer reconstructs the cart from DB, so the picked product is
+	// placed (products_placed=1) instead of being stranded with 409 CART_EMPTY.
+	var placed scanShippingBufferData
+	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
+		"buffer_bin_id": fx.ShippingBinID.String(),
+	}, &placed)
+	require.Equal(t, 1, placed.ProductsPlaced, "picked product must survive a WMS restart (cart derived from DB)")
+
+	requireProductStatus(t, ctx, env, productID, "READY_TO_SHIP")
+	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 }
 
 // TestAdapterN1_ReceiptTimeoutDivergence_pendingFix documents a CRITICAL bug found in

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,11 +14,6 @@ import (
 
 type Service struct {
 	repo putawayRepository
-	// carts хранит выбранные операторами товары для счётчика cart_size в ответе ScanProduct.
-	// Источник истины — фронт, который хранит product_ids[] в стейте и отправляет их в ScanStorageBin.
-	// TODO(masштаб): при переходе на >1 инстанс вынести в Redis или убрать в пользу статуса PICKING в БД.
-	carts map[string][]uuid.UUID
-	mu    sync.RWMutex
 }
 
 type putawayRepository interface {
@@ -34,13 +28,11 @@ type putawayRepository interface {
 	InsertPutaway(ctx context.Context, params *InsertPutawayParams) error
 	InsertOutboxEvents(ctx context.Context, params *OutboxEventsParams) error
 	CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error
+	CountReceivedInBuffer(ctx context.Context, bufferBinID uuid.UUID) (int, error)
 }
 
 func NewService(repo putawayRepository) *Service {
-	return &Service{
-		repo:  repo,
-		carts: make(map[string][]uuid.UUID),
-	}
+	return &Service{repo: repo}
 }
 
 func (s *Service) GetBufferProducts(ctx context.Context, operatorID, bufferBinID uuid.UUID) (*ScanBufferResponse, error) {
@@ -109,22 +101,14 @@ func (s *Service) AddToPutawayCart(ctx context.Context, operatorID, productID, b
 		return nil, err
 	}
 
-	key := operatorID.String()
-	s.mu.Lock()
-
-	alreadyInCart := false
-	for _, id := range s.carts[key] {
-		if id == productID {
-			alreadyInCart = true
-			break
-		}
+	// #46: cart size is DERIVED from DB (count of RECEIVED products in this buffer bin),
+	// not an in-memory map, so it survives a WMS restart and horizontal scaling. It reflects
+	// everything staged in the bin, not just this operator's scans — the frontend holds the
+	// authoritative product_ids[] it sends to ScanStorageBin.
+	cartSize, err := s.repo.CountReceivedInBuffer(ctx, bufferBinID)
+	if err != nil {
+		return nil, fmt.Errorf("putaway.Service.AddToPutawayCart cart size: %w", err)
 	}
-
-	if !alreadyInCart {
-		s.carts[key] = append(s.carts[key], productID)
-	}
-	cartSize := len(s.carts[key])
-	s.mu.Unlock()
 
 	return &ScanProductResponse{
 		ProductID: product.ProductID.String(),
@@ -216,38 +200,10 @@ func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid
 		return nil, err
 	}
 
-	key := operatorID.String()
-	s.mu.Lock()
-	if currentCart, ok := s.carts[key]; ok {
-		placedSet := make(map[uuid.UUID]struct{}, len(productsIDs))
-		for _, id := range productsIDs {
-			placedSet[id] = struct{}{}
-		}
-		remaining := make([]uuid.UUID, 0, len(currentCart))
-		for _, id := range currentCart {
-			if _, placed := placedSet[id]; !placed {
-				remaining = append(remaining, id)
-			}
-		}
-		if len(remaining) == 0 {
-			delete(s.carts, key)
-		} else {
-			s.carts[key] = remaining
-		}
-	}
-	s.mu.Unlock()
-
 	return &ScanStorageBinResponse{
 		StorageBinID:        storageBin.BinID.String(),
 		StorageBinCode:      storageBin.Code,
 		ProductsPlaced:      placedCount,
 		OutboxEventsCreated: placedCount,
 	}, nil
-}
-
-func (s *Service) GetCartSize(operatorID uuid.UUID) int {
-	key := operatorID.String()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.carts[key])
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,9 +14,7 @@ import (
 )
 
 type Service struct {
-	repo  assemblyRepository
-	carts map[string][]uuid.UUID
-	mu    sync.RWMutex
+	repo assemblyRepository
 }
 
 type assemblyRepository interface {
@@ -37,18 +34,14 @@ type assemblyRepository interface {
 	InsertPickOutboxEvent(ctx context.Context, productID, eventID uuid.UUID) error
 	GetTasks(ctx context.Context, destinationID, operatorID uuid.UUID, status string) ([]TaskItem, error)
 	GetShippingBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error)
-	ValidateCartDestination(ctx context.Context, productIDs []uuid.UUID, expectedDestinationID uuid.UUID) error
-	UpdateProductsToReadyToShip(ctx context.Context, productIDs []uuid.UUID, binID uuid.UUID) (int, error)
 	UpdateOrdersToAssembled(ctx context.Context, orderIDs []uuid.UUID) (int, error)
-	GetOrderIDsByProductIDs(ctx context.Context, productIDs []uuid.UUID) ([]uuid.UUID, error)
+	MoveOperatorAssembledToBuffer(ctx context.Context, operatorID, bufferBinID, destinationID uuid.UUID) (productIDs, orderIDs []uuid.UUID, err error)
+	CountAssembledByOperator(ctx context.Context, operatorID uuid.UUID) (int, error)
 	CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error
 }
 
 func NewService(repo assemblyRepository) *Service {
-	return &Service{
-		repo:  repo,
-		carts: make(map[string][]uuid.UUID),
-	}
+	return &Service{repo: repo}
 }
 
 // Allocate - выполняет аллокацию для магазина
@@ -272,11 +265,12 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 		return nil, err
 	}
 
-	key := operatorID.String()
-	s.mu.Lock()
-	s.carts[key] = append(s.carts[key], productID)
-	cartSize := len(s.carts[key])
-	s.mu.Unlock()
+	// #46: cart size is DERIVED from DB (the operator's ASSEMBLED products with a DONE
+	// task), not an in-memory map, so it survives a WMS restart and horizontal scaling.
+	cartSize, err := s.repo.CountAssembledByOperator(ctx, operatorID)
+	if err != nil {
+		return nil, fmt.Errorf("assembly.Service.Pick cart size: %w", err)
+	}
 
 	return &PickResponse{
 		ProductID: productID.String(),
@@ -284,20 +278,13 @@ func (s *Service) Pick(ctx context.Context, operatorID, productID uuid.UUID) (*P
 	}, nil
 }
 
-// ScanShippingBuffer размещает товары из корзины оператора в буфер отгрузки магазина
+// ScanShippingBuffer moves the operator's picked products into the destination's shipping
+// buffer bin. Issue #46: the products to move are DERIVED from DB state inside a single
+// atomic UPDATE (MoveOperatorAssembledToBuffer), not from an in-memory cart, so a WMS
+// restart between Pick and ScanShippingBuffer can no longer strand ASSEMBLED products.
 func (s *Service) ScanShippingBuffer(ctx context.Context, operatorID, bufferBinID uuid.UUID) (*ScanShippingBufferResponse, error) {
 	if operatorID == uuid.Nil || bufferBinID == uuid.Nil {
 		return nil, fmt.Errorf("assembly.Service.ScanShippingBuffer: %w", ErrInvalidInput)
-	}
-
-	key := operatorID.String()
-	s.mu.RLock()
-	cart := make([]uuid.UUID, len(s.carts[key]))
-	copy(cart, s.carts[key])
-	s.mu.RUnlock()
-
-	if len(cart) == 0 {
-		return nil, ErrCartEmpty
 	}
 
 	var bufferBin *domain.Bin
@@ -315,23 +302,16 @@ func (s *Service) ScanShippingBuffer(ctx context.Context, operatorID, bufferBinI
 			return fmt.Errorf("assembly.Service.ScanShippingBuffer: %w", ErrDestinationNotFound)
 		}
 
-		if err := txRepo.ValidateCartDestination(ctx, cart, *bufferBin.DestinationID); err != nil {
-			return fmt.Errorf("assembly.Service.ScanShippingBuffer validate destination: %w", err)
-		}
-
-		placed, err := txRepo.UpdateProductsToReadyToShip(ctx, cart, bufferBinID)
+		productIDs, orderIDs, err := txRepo.MoveOperatorAssembledToBuffer(ctx, operatorID, bufferBinID, *bufferBin.DestinationID)
 		if err != nil {
-			return fmt.Errorf("assembly.Service.ScanShippingBuffer update products: %w", err)
+			return fmt.Errorf("assembly.Service.ScanShippingBuffer move products: %w", err)
 		}
-		if placed != len(cart) {
-			return fmt.Errorf("assembly.Service.ScanShippingBuffer placed %d of %d: %w", placed, len(cart), ErrPartialPlacement)
+		// No products for this operator+destination: nothing staged, or already moved
+		// (e.g. a duplicate scan). Surfaces as 409 CART_EMPTY.
+		if len(productIDs) == 0 {
+			return ErrCartEmpty
 		}
-		productsPlaced = placed
-
-		orderIDs, err := txRepo.GetOrderIDsByProductIDs(ctx, cart)
-		if err != nil {
-			return fmt.Errorf("assembly.Service.ScanShippingBuffer get order IDs: %w", err)
-		}
+		productsPlaced = len(productIDs)
 
 		assembled, err := txRepo.UpdateOrdersToAssembled(ctx, orderIDs)
 		if err != nil {
@@ -346,46 +326,9 @@ func (s *Service) ScanShippingBuffer(ctx context.Context, operatorID, bufferBinI
 		return nil, err
 	}
 
-	// FIX: удаляем только элементы из снапшота, а не весь cart,
-	// чтобы не потерять продукты, добавленные конкурентным Pick
-	s.mu.Lock()
-	snapshotSet := make(map[uuid.UUID]struct{}, len(cart))
-	for _, id := range cart {
-		snapshotSet[id] = struct{}{}
-	}
-	remaining := make([]uuid.UUID, 0, len(s.carts[key]))
-	for _, id := range s.carts[key] {
-		if _, inSnapshot := snapshotSet[id]; !inSnapshot {
-			remaining = append(remaining, id)
-		}
-	}
-	if len(remaining) == 0 {
-		delete(s.carts, key)
-	} else {
-		s.carts[key] = remaining
-	}
-	s.mu.Unlock()
-
 	return &ScanShippingBufferResponse{
 		BufferBinID:     bufferBin.BinID.String(),
 		ProductsPlaced:  productsPlaced,
 		OrdersAssembled: ordersAssembled,
 	}, nil
-}
-
-// GetCartSize возвращает размер корзины оператора
-func (s *Service) GetCartSize(operatorID uuid.UUID) int {
-	key := operatorID.String()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.carts[key])
-}
-
-// CleanupCart очищает корзину оператора
-// TODO: Планируется вынести cart в Redis или БД
-func (s *Service) CleanupCart(operatorID uuid.UUID) {
-	key := operatorID.String()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.carts, key)
 }

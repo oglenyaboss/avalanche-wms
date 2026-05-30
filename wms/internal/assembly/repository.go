@@ -438,45 +438,50 @@ func (r *Repository) GetShippingBufferBinByID(ctx context.Context, bufferBinID u
 	return &bin, nil
 }
 
-// ValidateCartDestination проверяет, что все товары в корзине принадлежат одному destination
-func (r *Repository) ValidateCartDestination(ctx context.Context, productIDs []uuid.UUID, expectedDestinationID uuid.UUID) error {
-	if len(productIDs) == 0 {
-		return nil
-	}
-
+// MoveOperatorAssembledToBuffer atomically moves every product the operator has picked
+// (product ASSEMBLED + its assembly_task DONE) for the buffer bin's destination into the
+// shipping buffer bin, returning the affected product ids and the distinct order ids.
+//
+// Issue #46: the set to move is DERIVED from DB state (assembly_tasks JOIN products), not
+// an in-memory cart, so a WMS restart cannot strand picked products. The derived SELECT is
+// folded into the UPDATE so the decision and the move are one atomic statement (no
+// read-then-write race). The destination predicate replaces the old ValidateCartDestination
+// check: products picked for other destinations are simply not moved (so one operator can
+// stage several destinations independently), and an empty result means "nothing to place".
+func (r *Repository) MoveOperatorAssembledToBuffer(ctx context.Context, operatorID, bufferBinID, destinationID uuid.UUID) (productIDs, orderIDs []uuid.UUID, err error) {
 	const query = `
-		SELECT COUNT(*)
-		FROM wms_inventory.products p
-		JOIN wms_inventory.orders o ON p.order_id = o.order_id
-		WHERE p.product_id = ANY($1::uuid[]) AND o.destination_id != $2`
+		UPDATE wms_inventory.products p
+		SET status = 'READY_TO_SHIP', bin_id = $2, updated_at = NOW()
+		FROM wms_ops.assembly_tasks t
+		WHERE t.product_id = p.product_id
+		  AND t.operator_id = $1
+		  AND t.status = 'DONE'
+		  AND t.destination_id = $3
+		  AND p.status = 'ASSEMBLED'
+		RETURNING p.product_id, p.order_id`
 
-	var count int
-	err := r.q.QueryRow(ctx, query, productIDs, expectedDestinationID).Scan(&count)
+	rows, err := r.q.Query(ctx, query, operatorID, bufferBinID, destinationID)
 	if err != nil {
-		return fmt.Errorf("assembly.Repository.ValidateCartDestination query: %w", err)
+		return nil, nil, fmt.Errorf("assembly.Repository.MoveOperatorAssembledToBuffer query: %w", err)
 	}
-	if count > 0 {
-		return ErrDestinationMismatch
-	}
-	return nil
-}
+	defer rows.Close()
 
-// UpdateProductsToReadyToShip обновляет товары в буфере отгрузки
-func (r *Repository) UpdateProductsToReadyToShip(ctx context.Context, productIDs []uuid.UUID, binID uuid.UUID) (int, error) {
-	if len(productIDs) == 0 {
-		return 0, nil
+	seenOrder := make(map[uuid.UUID]struct{})
+	for rows.Next() {
+		var productID, orderID uuid.UUID
+		if err := rows.Scan(&productID, &orderID); err != nil {
+			return nil, nil, fmt.Errorf("assembly.Repository.MoveOperatorAssembledToBuffer scan: %w", err)
+		}
+		productIDs = append(productIDs, productID)
+		if _, ok := seenOrder[orderID]; !ok {
+			seenOrder[orderID] = struct{}{}
+			orderIDs = append(orderIDs, orderID)
+		}
 	}
-
-	const query = `
-		UPDATE wms_inventory.products
-		SET bin_id = $2, status = 'READY_TO_SHIP', updated_at = NOW()
-		WHERE product_id = ANY($1::uuid[]) AND status = 'ASSEMBLED'`
-
-	tag, err := r.q.Exec(ctx, query, productIDs, binID)
-	if err != nil {
-		return 0, fmt.Errorf("assembly.Repository.UpdateProductsToReadyToShip exec: %w", err)
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("assembly.Repository.MoveOperatorAssembledToBuffer rows: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	return productIDs, orderIDs, nil
 }
 
 // UpdateOrdersToAssembled обновляет статусы заказов, у которых все товары в READY_TO_SHIP
@@ -502,30 +507,20 @@ func (r *Repository) UpdateOrdersToAssembled(ctx context.Context, orderIDs []uui
 	return int(tag.RowsAffected()), nil
 }
 
-// GetOrderIDsByProductIDs возвращает уникальные ID заказов для списка товаров
-func (r *Repository) GetOrderIDsByProductIDs(ctx context.Context, productIDs []uuid.UUID) ([]uuid.UUID, error) {
-	if len(productIDs) == 0 {
-		return []uuid.UUID{}, nil
-	}
-
+// CountAssembledByOperator counts the products the operator has picked but not yet moved
+// to a shipping buffer (product ASSEMBLED + its assembly_task DONE). DB-derived replacement
+// for the old in-memory cart counter (issue #46): the pick-cart size, reconstructed from
+// DB state so it survives a WMS restart.
+func (r *Repository) CountAssembledByOperator(ctx context.Context, operatorID uuid.UUID) (int, error) {
 	const query = `
-		SELECT DISTINCT order_id
-		FROM wms_inventory.products
-		WHERE product_id = ANY($1::uuid[]) AND order_id IS NOT NULL`
+		SELECT count(*)
+		FROM wms_inventory.products p
+		JOIN wms_ops.assembly_tasks t ON t.product_id = p.product_id
+		WHERE t.operator_id = $1 AND p.status = 'ASSEMBLED' AND t.status = 'DONE'`
 
-	rows, err := r.q.Query(ctx, query, productIDs)
-	if err != nil {
-		return nil, fmt.Errorf("assembly.Repository.GetOrderIDsByProductIDs query: %w", err)
+	var count int
+	if err := r.q.QueryRow(ctx, query, operatorID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("assembly.Repository.CountAssembledByOperator scan: %w", err)
 	}
-	defer rows.Close()
-
-	orderIDs := make([]uuid.UUID, 0)
-	for rows.Next() {
-		var orderID uuid.UUID
-		if err := rows.Scan(&orderID); err != nil {
-			return nil, fmt.Errorf("assembly.Repository.GetOrderIDsByProductIDs scan: %w", err)
-		}
-		orderIDs = append(orderIDs, orderID)
-	}
-	return orderIDs, nil
+	return count, nil
 }

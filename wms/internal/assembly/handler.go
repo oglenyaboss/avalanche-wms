@@ -254,10 +254,6 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusBadRequest, "BIN_NOT_SHIPPING_BUFFER", "Ячейка не является буфером отгрузки"
 	case errors.Is(err, ErrCartEmpty):
 		return http.StatusConflict, "CART_EMPTY", "Корзина оператора пуста"
-	case errors.Is(err, ErrDestinationMismatch):
-		return http.StatusConflict, "DESTINATION_MISMATCH", "Товары в корзине принадлежат другому магазину"
-	case errors.Is(err, ErrPartialPlacement):
-		return http.StatusConflict, "PARTIAL_PLACEMENT", "Не все товары из корзины были размещены"
 	default:
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"
 	}

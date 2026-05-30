@@ -38,6 +38,22 @@ func (r *Repository) CheckChainStatus(ctx context.Context, productIDs []uuid.UUI
 	return ledger.CheckChainStatus(ctx, r.q, productIDs, aggregateType)
 }
 
+// CountReceivedInBuffer counts products currently RECEIVED in the given buffer bin.
+// DB-derived replacement for the in-memory putaway cart counter (issue #46): the cart_size
+// shown after a scan, reconstructed from DB state so it survives a WMS restart.
+func (r *Repository) CountReceivedInBuffer(ctx context.Context, bufferBinID uuid.UUID) (int, error) {
+	const query = `
+		SELECT count(*)
+		FROM wms_inventory.products
+		WHERE bin_id = $1 AND status = 'RECEIVED'`
+
+	var count int
+	if err := r.q.QueryRow(ctx, query, bufferBinID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("putaway.Repository.CountReceivedInBuffer scan: %w", err)
+	}
+	return count, nil
+}
+
 func (r *Repository) WithTx(ctx context.Context, fn func(putawayRepository) error) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {

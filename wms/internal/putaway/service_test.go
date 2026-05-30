@@ -55,6 +55,9 @@ type mockPutawayRepo struct {
 
 	// CheckChainStatus (#45 chain-status gate)
 	checkChainErr error
+
+	// CountReceivedInBuffer (#46 DB-derived cart size)
+	receivedInBuffer int
 }
 
 func (m *mockPutawayRepo) WithTx(_ context.Context, fn func(putawayRepository) error) error {
@@ -66,6 +69,10 @@ func (m *mockPutawayRepo) WithTx(_ context.Context, fn func(putawayRepository) e
 
 func (m *mockPutawayRepo) CheckChainStatus(_ context.Context, _ []uuid.UUID, _ string) error {
 	return m.checkChainErr
+}
+
+func (m *mockPutawayRepo) CountReceivedInBuffer(_ context.Context, _ uuid.UUID) (int, error) {
+	return m.receivedInBuffer, nil
 }
 
 // TestPlaceProductsToStorageBin_ChainEventRejected verifies the #45 gate: when a
@@ -270,6 +277,8 @@ func TestAddToPutawayCartSuccess(t *testing.T) {
 			SKUID: uuid.New(),
 			Name:  "Ноутбук Lenovo X1",
 		},
+		// Derived cart size: one RECEIVED product staged in this buffer bin (#46).
+		receivedInBuffer: 1,
 	}
 
 	svc := NewService(mockRepo)
@@ -309,6 +318,9 @@ func TestAddToPutawayCartDuplicateProduct(t *testing.T) {
 			SKUID: uuid.New(),
 			Name:  "Ноутбук Lenovo X1",
 		},
+		// Re-scanning the same product does not grow the count: the derived size is the
+		// number of RECEIVED products in the bin, unchanged by a duplicate scan (#46).
+		receivedInBuffer: 1,
 	}
 
 	svc := NewService(mockRepo)
@@ -464,11 +476,6 @@ func TestPlaceProductsToStorageBinSuccess(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	// Проверяем размер корзины
-	if size := svc.GetCartSize(operatorID); size != 2 {
-		t.Fatalf("expected cart size 2, got %d", size)
-	}
-
 	result, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -510,10 +517,6 @@ func TestPlaceProductsToStorageBinSuccess(t *testing.T) {
 		t.Fatalf("expected 1 outbox call, got %d", mockRepo.outboxCalls)
 	}
 
-	// Проверяем, что корзина очистилась
-	if size := svc.GetCartSize(operatorID); size != 0 {
-		t.Fatalf("expected cart to be cleared, got size %d", size)
-	}
 }
 
 func TestPlaceProductsEventIDSharing(t *testing.T) {
@@ -589,19 +592,12 @@ func TestPlaceProductsToStorageBinClearsCart(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if size := svc.GetCartSize(operatorID); size != 1 {
-		t.Fatalf("expected cart size 1, got %d", size)
-	}
-
 	// Размещаем товар
 	_, err = svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if size := svc.GetCartSize(operatorID); size != 0 {
-		t.Fatalf("expected cart to be cleared, got size %d", size)
-	}
 }
 
 // TestPlaceProductsToStorageBinStorageNotFound - ячейка хранения не найдена
@@ -766,10 +762,6 @@ func TestPlaceProductsToStorageBinMultipleProductsTransaction(t *testing.T) {
 		t.Fatalf("expected outbox not to be called on error, got %d calls", mockRepo.outboxCalls)
 	}
 
-	// Проверяем, что корзина НЕ очистилась при ошибке
-	if size := svc.GetCartSize(operatorID); size != 2 {
-		t.Fatalf("expected cart size 2 after failed transaction, got %d", size)
-	}
 }
 
 // TestPlaceProductsToStorageBinShippingBufferRejected - попытка разместить товар в SHIPPING_BUFFER

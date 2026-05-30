@@ -12,6 +12,4 @@ var (
 	ErrInvalidInput         = errors.New("INVALID_INPUT")
 	ErrBinNotShippingBuffer = errors.New("BIN_NOT_SHIPPING_BUFFER")
 	ErrCartEmpty            = errors.New("CART_EMPTY")
-	ErrDestinationMismatch  = errors.New("DESTINATION_MISMATCH")
-	ErrPartialPlacement     = errors.New("PARTIAL_PLACEMENT")
 )
