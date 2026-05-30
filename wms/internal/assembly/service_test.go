@@ -82,11 +82,15 @@ type mockAssemblyRepo struct {
 	movedProductIDs      []uuid.UUID
 	movedOrderIDs        []uuid.UUID
 	moveErr              error
+	moveOperatorID       uuid.UUID
+	moveBufferBinID      uuid.UUID
+	moveDestinationID    uuid.UUID
 	ordersUpdated        int
 	ordersUpdatedErr     error
 
 	// CheckChainStatus (#45 chain-status gate)
 	checkChainErr error
+	checkChainAgg string // captures the aggregateType the service passed to the gate
 }
 
 func (m *mockAssemblyRepo) WithTx(_ context.Context, fn func(assemblyRepository) error) error {
@@ -99,7 +103,10 @@ func (m *mockAssemblyRepo) WithTx(_ context.Context, fn func(assemblyRepository)
 	return fn(m)
 }
 
-func (m *mockAssemblyRepo) CheckChainStatus(_ context.Context, _ []uuid.UUID, _ string) error {
+func (m *mockAssemblyRepo) CheckChainStatus(_ context.Context, _ []uuid.UUID, aggregateType string) error {
+	m.withTxMu.Lock()
+	m.checkChainAgg = aggregateType
+	m.withTxMu.Unlock()
 	return m.checkChainErr
 }
 
@@ -116,6 +123,9 @@ func TestPick_ChainEventRejected(t *testing.T) {
 	}
 	if mockRepo.withTxCalls != 0 {
 		t.Fatalf("gate must reject before the transaction; withTxCalls=%d", mockRepo.withTxCalls)
+	}
+	if mockRepo.checkChainAgg != ledger.AggregatePutaway {
+		t.Fatalf("Pick must gate on the putaway stage; CheckChainStatus aggregateType=%q, want %q", mockRepo.checkChainAgg, ledger.AggregatePutaway)
 	}
 }
 
@@ -256,7 +266,12 @@ func (m *mockAssemblyRepo) GetShippingBufferBinByID(_ context.Context, _ uuid.UU
 	return m.shippingBufferBin, nil
 }
 
-func (m *mockAssemblyRepo) MoveOperatorAssembledToBuffer(_ context.Context, _, _, _ uuid.UUID) ([]uuid.UUID, []uuid.UUID, error) {
+func (m *mockAssemblyRepo) MoveOperatorAssembledToBuffer(_ context.Context, operatorID, bufferBinID, destinationID uuid.UUID) ([]uuid.UUID, []uuid.UUID, error) {
+	m.withTxMu.Lock()
+	m.moveOperatorID = operatorID
+	m.moveBufferBinID = bufferBinID
+	m.moveDestinationID = destinationID
+	m.withTxMu.Unlock()
 	if m.moveErr != nil {
 		return nil, nil, m.moveErr
 	}
@@ -753,6 +768,10 @@ func TestScanShippingBuffer_HappyPath(t *testing.T) {
 	}
 	if mockRepo.withTxCalls != 1 {
 		t.Errorf("expected WithTx called, got %d", mockRepo.withTxCalls)
+	}
+	if mockRepo.moveOperatorID != operatorID || mockRepo.moveBufferBinID != bufferBinID || mockRepo.moveDestinationID != destinationID {
+		t.Errorf("MoveOperatorAssembledToBuffer scoping: got (op=%s buf=%s dest=%s), want (op=%s buf=%s dest=%s)",
+			mockRepo.moveOperatorID, mockRepo.moveBufferBinID, mockRepo.moveDestinationID, operatorID, bufferBinID, destinationID)
 	}
 }
 

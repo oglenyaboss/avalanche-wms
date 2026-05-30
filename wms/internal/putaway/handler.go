@@ -15,6 +15,10 @@ import (
 	"wms/internal/ledger"
 )
 
+// maxProductIDsPerRequest bounds the product_ids[] array a single request may carry, so
+// one authenticated call cannot pin a long-lived transaction over an unbounded lock set.
+const maxProductIDsPerRequest = 200
+
 type Handler struct {
 	svc *Service
 }
@@ -161,6 +165,10 @@ func (h *Handler) ScanStorageBin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "product_ids не может быть пустым")
 		return
 	}
+	if len(req.ProductIDs) > maxProductIDsPerRequest {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("product_ids не может содержать более %d элементов", maxProductIDsPerRequest))
+		return
+	}
 
 	productIDs := make([]uuid.UUID, 0, len(req.ProductIDs))
 	for _, idStr := range req.ProductIDs {
@@ -257,6 +265,7 @@ func mapServiceError(err error) (status int, code, message string) {
 	case errors.Is(err, ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
 	default:
+		log.Printf("putaway: unmapped service error -> 500: %v", err)
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"
 	}
 }

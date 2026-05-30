@@ -55,6 +55,7 @@ type mockPutawayRepo struct {
 
 	// CheckChainStatus (#45 chain-status gate)
 	checkChainErr error
+	checkChainAgg string // captures the aggregateType the service passed to the gate
 
 	// CountReceivedInBuffer (#46 DB-derived cart size)
 	receivedInBuffer int
@@ -67,7 +68,8 @@ func (m *mockPutawayRepo) WithTx(_ context.Context, fn func(putawayRepository) e
 	return fn(m)
 }
 
-func (m *mockPutawayRepo) CheckChainStatus(_ context.Context, _ []uuid.UUID, _ string) error {
+func (m *mockPutawayRepo) CheckChainStatus(_ context.Context, _ []uuid.UUID, aggregateType string) error {
+	m.checkChainAgg = aggregateType
 	return m.checkChainErr
 }
 
@@ -88,6 +90,9 @@ func TestPlaceProductsToStorageBin_ChainEventRejected(t *testing.T) {
 	}
 	if mockRepo.withTxCalls != 0 {
 		t.Fatalf("gate must reject before the transaction; withTxCalls=%d", mockRepo.withTxCalls)
+	}
+	if mockRepo.checkChainAgg != ledger.AggregateReceiving {
+		t.Fatalf("PlaceProductsToStorageBin must gate on the receiving stage; CheckChainStatus aggregateType=%q, want %q", mockRepo.checkChainAgg, ledger.AggregateReceiving)
 	}
 }
 

@@ -342,9 +342,9 @@ func (r *Repository) InsertPickOutboxEvent(ctx context.Context, productID, event
 
 	const query = `
 		INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
-		VALUES ($1, $2, 'picking', 'wms.picking.v1', $3)`
+		VALUES ($1, $2, $4::text, 'wms.picking.v1', $3)`
 
-	_, err = r.q.Exec(ctx, query, eventID, productID, payloadHash)
+	_, err = r.q.Exec(ctx, query, eventID, productID, payloadHash, ledger.AggregatePicking)
 	if err != nil {
 		return fmt.Errorf("assembly.Repository.InsertPickOutboxEvent exec: %w", err)
 	}
@@ -404,7 +404,7 @@ func payloadHashForPick(productID uuid.UUID) (string, error) {
 		EventType     string    `json:"event_type"`
 	}{
 		ProductID:     productID,
-		AggregateType: "picking",
+		AggregateType: ledger.AggregatePicking,
 		EventType:     "wms.picking.v1",
 	}
 
@@ -517,10 +517,13 @@ func (r *Repository) UpdateOrdersToAssembled(ctx context.Context, orderIDs []uui
 // CountAssembledByOperator counts the products the operator has picked but not yet moved
 // to a shipping buffer (product ASSEMBLED + its assembly_task DONE). DB-derived replacement
 // for the old in-memory cart counter (issue #46): the pick-cart size, reconstructed from
-// DB state so it survives a WMS restart.
+// DB state so it survives a WMS restart. COUNT(DISTINCT product_id): a product can
+// accumulate more than one DONE task after re-allocation (the 0009 unique index only
+// covers PENDING), which would otherwise double-count the cart vs. the products that
+// MoveOperatorAssembledToBuffer actually moves.
 func (r *Repository) CountAssembledByOperator(ctx context.Context, operatorID uuid.UUID) (int, error) {
 	const query = `
-		SELECT count(*)
+		SELECT count(DISTINCT p.product_id)
 		FROM wms_inventory.products p
 		JOIN wms_ops.assembly_tasks t ON t.product_id = p.product_id
 		WHERE t.operator_id = $1 AND p.status = 'ASSEMBLED' AND t.status = 'DONE'`

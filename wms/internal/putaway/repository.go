@@ -269,10 +269,10 @@ func (r *Repository) InsertOutboxEvents(ctx context.Context, params *OutboxEvent
 
 	const query = `
 		INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
-		SELECT event_id, aggregate_id, 'putaway', 'wms.putaway.v1', payload_hash
+		SELECT event_id, aggregate_id, $4::text, 'wms.putaway.v1', payload_hash
 		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
 
-	if _, err := r.q.Exec(ctx, query, params.EventIDs, aggregateIDs, payloadHashes); err != nil {
+	if _, err := r.q.Exec(ctx, query, params.EventIDs, aggregateIDs, payloadHashes, ledger.AggregatePutaway); err != nil {
 		return fmt.Errorf("putaway.Repository.InsertOutboxEvents exec: %w", err)
 	}
 
@@ -289,7 +289,7 @@ func payloadHashForPutaway(productID, storageBinID uuid.UUID) (string, error) {
 	}{
 		ProductID:     productID,
 		StorageBinID:  storageBinID,
-		AggregateType: "putaway",
+		AggregateType: ledger.AggregatePutaway,
 		EventType:     "wms.putaway.v1",
 	}
 

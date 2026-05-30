@@ -255,6 +255,7 @@ func mapServiceError(err error) (status int, code, message string) {
 	case errors.Is(err, ErrCartEmpty):
 		return http.StatusConflict, "CART_EMPTY", "Корзина оператора пуста"
 	default:
+		log.Printf("assembly: unmapped service error -> 500: %v", err)
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"
 	}
 }
