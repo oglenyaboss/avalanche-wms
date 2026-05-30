@@ -39,7 +39,7 @@ func TestS1_WMSChainDivergence_pendingFix(t *testing.T) {
 // TestS2_AdapterCrashRecovery_pendingFix documents S2: on restart the adapter
 // resubmits SENT/PENDING events, causing a duplicate revert and a false FAILED.
 func TestS2_AdapterCrashRecovery_pendingFix(t *testing.T) {
-	t.Skip("documents S2; pending product fix")
+	t.Skip("S2 FIXED in #44 (contract idempotency + flusher reconcile-not-resubmit); live regression: tests/e2e/scenarios/09-s2-crash-recovery.sh")
 
 	// Intended assertions (NOT yet implementable without fault injection):
 	//
@@ -58,7 +58,7 @@ func TestS2_AdapterCrashRecovery_pendingFix(t *testing.T) {
 // TestS3_BatchPoisoning_pendingFix documents S3: one bad event fails the entire
 // batch, including valid sibling events.
 func TestS3_BatchPoisoning_pendingFix(t *testing.T) {
-	t.Skip("documents S3; pending product fix")
+	t.Skip("S3 FIXED in #47 (batch poison isolation: skip + ItemTransitionFailed, no whole-batch revert); live regression: tests/e2e/scenarios/10-s3-batch-poisoning.sh")
 
 	// Intended assertions (NOT yet implementable without fault injection):
 	//
@@ -107,7 +107,7 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 // later -> chain shows the transition COMMITTED while the DB row is terminal FAILED,
 // with no reconciliation path back out of FAILED.
 func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
-	t.Skip("documents Adapter N1 (receipt-timeout false FAILED); pending product fix")
+	t.Skip("N1 FIXED in #44 (background reconcile loop pulls a mined-but-FAILED row to COMMITTED); live regression: tests/e2e/scenarios/11-receipt-timeout.sh")
 
 	// Runnable reproduction: tests/e2e/scenarios/11-receipt-timeout.sh
 	// (lower RECEIPT_POLL_TIMEOUT and slow block production so the receipt poll times
@@ -300,7 +300,7 @@ func TestDispatchesAuth_CustomerAccess(t *testing.T) {
 // eventId, and the entire batch is marked FAILED+DLQ — even though all other
 // events are valid. Compounds S2 on crash recovery.
 func TestAdapterN9_IntraBatchDuplicate_pendingFix(t *testing.T) {
-	t.Skip("documents Adapter N9 (intra-batch duplicate event_id); pending product fix")
+	t.Skip("N9 FIXED in #44 (contract skips intra-batch duplicates + flusher dedups within a flush window); covered by Foundry test_duplicateEventId_withinBatch_skipsSecond + flusher_test TestFlusher_IntraBatchDuplicate_Deduped")
 
 	// Reproduction (needs Kafka message injection):
 	//  1. Set BATCH_SIZE=2 and BATCH_TIMEOUT=10s on ledger-adapter.
