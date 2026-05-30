@@ -4,7 +4,7 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '../lib'
 
 const alertVariants = cva(
-  'grid w-full grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-xl border bg-card px-4 py-4 text-card-foreground',
+  'grid w-full grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border bg-card px-4 py-4 text-card-foreground',
   {
     variants: {
       variant: {
