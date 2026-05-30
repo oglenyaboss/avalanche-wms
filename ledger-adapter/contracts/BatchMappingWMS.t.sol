@@ -17,6 +17,13 @@ contract BatchMappingWMSTest is Test {
         uint256 timestamp
     );
 
+    event ItemTransitionFailed(
+        uint256 indexed eventId,
+        uint256 indexed itemId,
+        BatchMappingWMS.Status actualStatus,
+        BatchMappingWMS.Status expectedStatus
+    );
+
     function setUp() public {
         wms = new BatchMappingWMS();
         vm.startPrank(actor);
@@ -85,32 +92,48 @@ contract BatchMappingWMSTest is Test {
         wms.accept(1, 42);
     }
 
-    function test_revert_duplicateEventId_single() public {
+    // #44: дубликат eventId на per-item функции — no-op (early return), НЕ revert.
+    // Kafka at-least-once гарантирует повторы; revert ломал бы DB↔chain consistency.
+    function test_duplicateEventId_single_isNoop() public {
         wms.accept(1, 10);
 
-        vm.expectRevert("Duplicate eventId");
-        wms.accept(1, 20); // тот же eventId, другой item
+        wms.accept(1, 20); // тот же eventId, другой item — повтор, игнорируется
+        assertEq(uint256(wms.itemStatus(10)), uint256(BatchMappingWMS.Status.Accepted));
+        assertEq(uint256(wms.itemStatus(20)), uint256(BatchMappingWMS.Status.None));
     }
 
-    function test_revert_duplicateEventId_batch() public {
+    // #44/N9: дубликат eventId ВНУТРИ одного batch — второй элемент скипается,
+    // batch не ревертится, валидный первый элемент обрабатывается.
+    function test_duplicateEventId_withinBatch_skipsSecond() public {
         uint256[] memory eIds = new uint256[](2);
         uint256[] memory iIds = new uint256[](2);
         eIds[0] = 1; eIds[1] = 1; // дубликат внутри одного batch
         iIds[0] = 10; iIds[1] = 20;
 
-        vm.expectRevert("Duplicate eventId");
         wms.batchAccept(eIds, iIds);
+        assertEq(uint256(wms.itemStatus(10)), uint256(BatchMappingWMS.Status.Accepted));
+        assertEq(uint256(wms.itemStatus(20)), uint256(BatchMappingWMS.Status.None));
     }
 
-    function test_revert_duplicateEventId_acrossCalls() public {
+    // #44/S2: дубликат eventId между вызовами (crash-recovery redelivery) — скип, не revert.
+    function test_duplicateEventId_acrossCalls_skips() public {
         wms.accept(1, 10);
 
         uint256[] memory eIds = new uint256[](1);
         uint256[] memory iIds = new uint256[](1);
         eIds[0] = 1; iIds[0] = 20;
 
-        vm.expectRevert("Duplicate eventId");
         wms.batchAccept(eIds, iIds);
+        assertEq(uint256(wms.itemStatus(20)), uint256(BatchMappingWMS.Status.None));
+    }
+
+    // #44: повторная отправка того же eventId+item не делает двойной transition (идемпотентность).
+    function test_duplicateEventId_noDoubleTransition() public {
+        wms.accept(5, 50);
+        assertEq(uint256(wms.itemStatus(50)), uint256(BatchMappingWMS.Status.Accepted));
+
+        wms.accept(5, 50); // точный повтор — игнорируется, статус не меняется
+        assertEq(uint256(wms.itemStatus(50)), uint256(BatchMappingWMS.Status.Accepted));
     }
 
     function test_revert_invalidTransition_putAwayWithoutAccept() public {
@@ -141,7 +164,9 @@ contract BatchMappingWMSTest is Test {
     }
 
 
-    function test_revert_batchWithOneInvalidItem() public {
+    // #47/S3: один невалидный элемент batch'а НЕ ревертит всю транзакцию.
+    // Валидные siblings обрабатываются, плохой скипается с ItemTransitionFailed.
+    function test_batchWithOneInvalidItem_processesValidSiblings() public {
         // Accept items 100, 200
         uint256[] memory eA = new uint256[](2);
         uint256[] memory iA = new uint256[](2);
@@ -149,17 +174,67 @@ contract BatchMappingWMSTest is Test {
         iA[0] = 100; iA[1] = 200;
         wms.batchAccept(eA, iA);
 
-        // PutAway batch: item 100 (valid), item 300 (not accepted → revert)
+        // PutAway batch: item 100 (valid), item 300 (never accepted → poison)
         uint256[] memory eP = new uint256[](2);
         uint256[] memory iP = new uint256[](2);
         eP[0] = 3; eP[1] = 4;
         iP[0] = 100; iP[1] = 300;
 
-        vm.expectRevert("Invalid status transition");
         wms.batchPutAway(eP, iP);
 
-        // item 100 не должен был перейти — весь batch откатился
-        assertEq(uint256(wms.itemStatus(100)), uint256(BatchMappingWMS.Status.Accepted));
+        // 100 продвинулся, 300 остался None — НЕ откатил весь batch.
+        assertEq(uint256(wms.itemStatus(100)), uint256(BatchMappingWMS.Status.PutAway));
+        assertEq(uint256(wms.itemStatus(300)), uint256(BatchMappingWMS.Status.None));
+    }
+
+    // #47/S3: плохой элемент эмитит ItemTransitionFailed (actual=None, expected=Accepted),
+    // валидный — обычный ItemTransition. Видимость пропуска для chain-status gate (#45).
+    function test_batchPoisoning_emitsItemTransitionFailed() public {
+        uint256[] memory eA = new uint256[](1);
+        uint256[] memory iA = new uint256[](1);
+        eA[0] = 1; iA[0] = 100;
+        wms.batchAccept(eA, iA);
+
+        uint256[] memory eP = new uint256[](2);
+        uint256[] memory iP = new uint256[](2);
+        eP[0] = 3; eP[1] = 4;
+        iP[0] = 100; iP[1] = 300;
+
+        // Плохой элемент (event 4, item 300): None != Accepted.
+        vm.expectEmit(true, true, false, true);
+        emit ItemTransitionFailed(
+            4, 300,
+            BatchMappingWMS.Status.None,
+            BatchMappingWMS.Status.Accepted
+        );
+        wms.batchPutAway(eP, iP);
+    }
+
+    // #47: после skip'а eventId плохого элемента помечен processed (consumed, не ретраится).
+    function test_batchPoisoning_marksPoisonEventProcessed() public {
+        uint256[] memory eP = new uint256[](1);
+        uint256[] memory iP = new uint256[](1);
+        eP[0] = 7; iP[0] = 700; // 700 never accepted → poison
+
+        wms.batchPutAway(eP, iP);
+        assertTrue(wms.processedEventIds(7));
+        assertEq(uint256(wms.itemStatus(700)), uint256(BatchMappingWMS.Status.None));
+    }
+
+    // #47: один batch, два РАЗНЫХ eventId на ОДИН item. Первый продвигает item; второй —
+    // eventId новый (_markEventIfNew=true), но item уже Accepted → ItemTransitionFailed,
+    // НЕ двойной transition и НЕ revert. Оба eventId помечены processed.
+    function test_batchSameItem_twoEventIds_secondEmitsFailed() public {
+        uint256[] memory eIds = new uint256[](2);
+        uint256[] memory iIds = new uint256[](2);
+        eIds[0] = 1; eIds[1] = 2;
+        iIds[0] = 10; iIds[1] = 10;
+
+        wms.batchAccept(eIds, iIds);
+
+        assertEq(uint256(wms.itemStatus(10)), uint256(BatchMappingWMS.Status.Accepted));
+        assertTrue(wms.processedEventIds(1));
+        assertTrue(wms.processedEventIds(2));
     }
 
     function test_revert_arrayLengthMismatch() public {

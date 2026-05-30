@@ -17,18 +17,21 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"ledger-adapter/internal/chain"
+	"ledger-adapter/internal/store"
 )
 
 // --- моки interfaces -----------------------------------------------------
 
 type stubChain struct {
-	mu          sync.Mutex
-	calls       []string // aggregate_type записи
-	callErr     error
-	callErrFor  map[string]error // per-aggregate error
-	receipt     *types.Receipt
-	receiptErr  error
-	receiptWait int
+	mu                sync.Mutex
+	calls             []string // aggregate_type записи (BatchCall)
+	receiptCalls      int      // сколько раз дёрнули TransactionReceipt
+	callErr           error
+	callErrFor        map[string]error // per-aggregate error
+	receipt           *types.Receipt
+	receiptErr        error
+	receiptErrForHash map[common.Hash]error // per-tx-hash receipt error
+	receiptWait       int
 }
 
 func (s *stubChain) BatchCall(_ context.Context, aggregateType string, _, _ []*big.Int) (common.Hash, error) {
@@ -46,9 +49,15 @@ func (s *stubChain) BatchCall(_ context.Context, aggregateType string, _, _ []*b
 	return common.HexToHash("0xdeadbeef"), nil
 }
 
-func (s *stubChain) TransactionReceipt(_ context.Context, _ common.Hash) (*types.Receipt, error) {
+func (s *stubChain) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.receiptCalls++
+	if s.receiptErrForHash != nil {
+		if err, ok := s.receiptErrForHash[h]; ok {
+			return nil, err
+		}
+	}
 	if s.receiptErr != nil {
 		return nil, s.receiptErr
 	}
@@ -71,6 +80,8 @@ type stubStore struct {
 	statusErr error
 	insertErr error
 	failedErr error
+
+	reconcilable []store.ReconcileRow
 }
 
 func newStubStore() *stubStore {
@@ -103,6 +114,29 @@ func (s *stubStore) Status(_ context.Context, id uuid.UUID) (string, error) {
 		return st, nil
 	}
 	return "PENDING", nil
+}
+
+func (s *stubStore) StatusAndTx(_ context.Context, id uuid.UUID) (string, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statusErr != nil {
+		return "", "", s.statusErr
+	}
+	status := "PENDING"
+	if st, ok := s.statuses[id]; ok {
+		status = st
+	}
+	// sent[] хранит tx_hash, выставленный MarkSent; пусто = tx ещё не отправлялась.
+	return status, s.sent[id], nil
+}
+
+func (s *stubStore) ListReconcilable(_ context.Context, _ time.Duration) ([]store.ReconcileRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statusErr != nil {
+		return nil, s.statusErr
+	}
+	return s.reconcilable, nil
 }
 
 func (s *stubStore) InsertPending(_ context.Context, id uuid.UUID, agg string) error {
@@ -348,20 +382,17 @@ func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) 
 	}
 }
 
-// TestFlusher_StrandedPending_GetsRetried gives FALSE CONFIDENCE about crash recovery
-// (bug S2). It asserts a stranded PENDING row is resubmitted and reaches COMMITTED, and
-// only passes because the stub chain (stubChain.BatchCall) has no `processedEventIds`
-// equivalent — it returns success for the same eventId every call. The REAL contract's
-// _requireNewEvent reverts "Duplicate eventId" on a resubmit, so in production this same
-// path marks the already-succeeded event FAILED. This test proves "the retry code path
-// runs", NOT "resubmission is safe". The true behavior is reproduced by the e2e
-// scenario tests/e2e/scenarios/09-s2-crash-recovery.sh. Do not treat a green here as S2
-// coverage; a faithful fix must make resubmission of a non-terminal row idempotent.
+// TestFlusher_StrandedPending_GetsRetried covers a PENDING row that was never broadcast
+// (no tx_hash): InsertPending ran but MarkSent did not, so resubmitting is the correct,
+// safe recovery — there is no in-flight tx to clash with, and contract idempotency
+// (#44) backstops it anyway. The dangerous case (a row that ALREADY has a tx_hash) is
+// covered separately by the reconcile-not-resubmit tests below, which keep tx_hash
+// stable instead of re-broadcasting (S2 — scenarios/09-s2-crash-recovery.sh).
 func TestFlusher_StrandedPending_GetsRetried(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
 	msgs := makeMessages(1, "receiving")
 	st.exists[msgs[0].EventID] = true
-	st.statuses[msgs[0].EventID] = "PENDING"
+	st.statuses[msgs[0].EventID] = "PENDING" // no st.sent → tx_hash empty → resubmit-safe
 
 	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("retry of stranded PENDING should succeed, got: %v", err)
@@ -374,6 +405,145 @@ func TestFlusher_StrandedPending_GetsRetried(t *testing.T) {
 	}
 	if len(st.inserted) != 0 {
 		t.Errorf("InsertPending should skip existing row, got %d inserts", len(st.inserted))
+	}
+}
+
+// TestFlusher_RedeliveredSentRow_ReconcilesNoResubmit covers S2: a SENT row already has
+// a broadcast tx_hash, so a redelivery must reconcile that tx (not resubmit). The mined
+// tx resolves to COMMITTED and tx_hash stays stable — no second BatchCall.
+func TestFlusher_RedeliveredSentRow_ReconcilesNoResubmit(t *testing.T) {
+	f, ch, st, dq := newFlusherT() // ch.receipt = Status 1
+	m := makeMessages(1, "receiving")[0]
+	st.exists[m.EventID] = true
+	st.statuses[m.EventID] = "SENT"
+	st.sent[m.EventID] = "0xabc123" // already broadcast
+
+	if err := f.Flush(context.Background(), []*Message{m}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("must NOT resubmit a row with tx_hash, got %d BatchCalls", len(ch.calls))
+	}
+	if !st.committed[m.EventID] {
+		t.Errorf("reconcile of a mined tx must MarkCommitted")
+	}
+	if len(st.failed) != 0 || len(dq.messages) != 0 {
+		t.Errorf("no FAILED/DLQ expected, got failed=%d dlq=%d", len(st.failed), len(dq.messages))
+	}
+	if st.sent[m.EventID] != "0xabc123" {
+		t.Errorf("tx_hash must stay stable, got %q", st.sent[m.EventID])
+	}
+}
+
+// TestFlusher_RedeliveredPendingRowWithTx_ReconcilesNoResubmit covers scenario 09's
+// PENDING variant: status was reset to PENDING but tx_hash retained — the discriminator
+// is tx_hash PRESENCE, not the status string, so this must still reconcile (not resubmit).
+func TestFlusher_RedeliveredPendingRowWithTx_ReconcilesNoResubmit(t *testing.T) {
+	f, ch, st, _ := newFlusherT()
+	m := makeMessages(1, "putaway")[0]
+	st.exists[m.EventID] = true
+	st.statuses[m.EventID] = "PENDING"
+	st.sent[m.EventID] = "0xdef456" // tx_hash present despite PENDING status
+
+	if err := f.Flush(context.Background(), []*Message{m}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("tx_hash present → reconcile, not resubmit; got %d calls", len(ch.calls))
+	}
+	if !st.committed[m.EventID] {
+		t.Errorf("expected reconcile → COMMITTED")
+	}
+}
+
+// TestFlusher_RedeliveredRow_TxNotMined_LeftForLoop: if the existing tx is not yet mined,
+// the redelivery path neither resubmits nor marks terminal — it leaves the row for the
+// background reconcile loop.
+func TestFlusher_RedeliveredRow_TxNotMined_LeftForLoop(t *testing.T) {
+	f, ch, st, _ := newFlusherT()
+	ch.receiptWait = 5 // TransactionReceipt returns ethereum.NotFound
+	m := makeMessages(1, "receiving")[0]
+	st.exists[m.EventID] = true
+	st.statuses[m.EventID] = "SENT"
+	st.sent[m.EventID] = "0xstillmining"
+
+	if err := f.Flush(context.Background(), []*Message{m}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("must not resubmit, got %d", len(ch.calls))
+	}
+	if len(st.committed) != 0 || len(st.failed) != 0 {
+		t.Errorf("tx not mined → row left as-is, got committed=%d failed=%d", len(st.committed), len(st.failed))
+	}
+}
+
+// TestFlusher_RedeliveredRow_TxReverted_MarksFailed: an already-broadcast tx that mined
+// but reverted resolves to terminal FAILED — still no resubmit.
+func TestFlusher_RedeliveredRow_TxReverted_MarksFailed(t *testing.T) {
+	f, ch, st, _ := newFlusherT()
+	ch.receipt = &types.Receipt{Status: 0} // mined but reverted
+	m := makeMessages(1, "shipping")[0]
+	st.exists[m.EventID] = true
+	st.statuses[m.EventID] = "SENT"
+	st.sent[m.EventID] = "0xreverted"
+
+	if err := f.Flush(context.Background(), []*Message{m}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("must not resubmit, got %d", len(ch.calls))
+	}
+	if _, ok := st.failed[m.EventID]; !ok {
+		t.Errorf("reverted tx → MarkFailed")
+	}
+}
+
+// TestFlusher_IntraBatchDuplicate_Deduped covers N9: the same event_id redelivered within
+// one flush window is collapsed to a single batch entry (no [id,id] reaching the contract).
+func TestFlusher_IntraBatchDuplicate_Deduped(t *testing.T) {
+	f, ch, st, _ := newFlusherT()
+	m := makeMessages(1, "receiving")[0]
+	dup := *m // identical EventID
+	msgs := []*Message{m, &dup}
+
+	if err := f.Flush(context.Background(), msgs); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 1 {
+		t.Errorf("expected 1 chain call (deduped), got %d", len(ch.calls))
+	}
+	if len(st.committed) != 1 {
+		t.Errorf("expected 1 committed, got %d", len(st.committed))
+	}
+	if len(st.inserted) != 1 {
+		t.Errorf("dup must not InsertPending twice, got %d", len(st.inserted))
+	}
+}
+
+// TestFlusher_RedeliveredRow_ReceiptRPCError_Propagates: a non-NotFound receipt error
+// while reconciling a redelivered row is transient — it propagates (blocking the offset
+// commit) and the row is left untouched: no resubmit, no terminal mark, no DLQ.
+func TestFlusher_RedeliveredRow_ReceiptRPCError_Propagates(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	ch.receiptErr = errors.New("rpc connection refused") // non-NotFound
+	m := makeMessages(1, "receiving")[0]
+	st.exists[m.EventID] = true
+	st.statuses[m.EventID] = "SENT"
+	st.sent[m.EventID] = "0xinflight"
+
+	err := f.Flush(context.Background(), []*Message{m})
+	if err == nil {
+		t.Fatal("non-NotFound receipt error during reconcile must propagate (transient, no offset commit)")
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("must not resubmit, got %d", len(ch.calls))
+	}
+	if len(st.committed) != 0 || len(st.failed) != 0 {
+		t.Errorf("error path must not mark terminal, got committed=%d failed=%d", len(st.committed), len(st.failed))
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("no DLQ on transient receipt error, got %d", len(dq.messages))
 	}
 }
 

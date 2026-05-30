@@ -21,6 +21,8 @@ type Config struct {
 	BatchTimeout       time.Duration
 	DLQTopic           string
 	ReceiptPollTimeout time.Duration
+	ReconcileInterval  time.Duration
+	ReconcileMinAge    time.Duration
 	LogLevel           string
 }
 
@@ -42,6 +44,10 @@ func Load() (*Config, error) {
 		BatchSize:          getIntDefault("BATCH_SIZE", 10),
 		BatchTimeout:       getDurationDefault("BATCH_TIMEOUT", 100*time.Millisecond),
 		ReceiptPollTimeout: getDurationDefault("RECEIPT_POLL_TIMEOUT", 30*time.Second),
+		// Reconcile loop (N1): сверяет stuck SENT/FAILED строки с on-chain receipt'ом.
+		// MinAge должен быть > ReceiptPollTimeout, чтобы не гоняться с in-flight WaitReceipt.
+		ReconcileInterval: getDurationDefault("RECONCILE_INTERVAL", 30*time.Second),
+		ReconcileMinAge:   getDurationDefault("RECONCILE_MIN_AGE", time.Minute),
 	}
 
 	required := []struct {
@@ -60,6 +66,21 @@ func Load() (*Config, error) {
 			return nil, err
 		}
 		*r.field = v
+	}
+
+	// Инвариант: reconcile-loop не должен трогать строку, пока её ещё дожимает
+	// синхронный WaitReceipt. ReconcileMinAge > ReceiptPollTimeout гарантирует, что
+	// строка станет reconcile-eligible только после того, как WaitReceipt завершился.
+	// Без этого loop мог бы пометить SENT-строку COMMITTED, а последующий timeout —
+	// FAILED (см. MarkFailed). Проверяем на старте, а не в 3 часа ночи.
+	if c.ReconcileMinAge <= c.ReceiptPollTimeout {
+		return nil, fmt.Errorf("RECONCILE_MIN_AGE (%s) must be > RECEIPT_POLL_TIMEOUT (%s): a shorter min-age lets the reconcile loop race the flusher's in-flight WaitReceipt", c.ReconcileMinAge, c.ReceiptPollTimeout)
+	}
+	// time.ParseDuration accepts "0s"/"-5s" without error, so getDurationDefault keeps
+	// them verbatim. A non-positive interval would panic time.NewTicker in the reconcile
+	// loop (reconcile.go) — crashing the process inside the errgroup. Reject at startup.
+	if c.ReconcileInterval <= 0 {
+		return nil, fmt.Errorf("RECONCILE_INTERVAL (%s) must be > 0", c.ReconcileInterval)
 	}
 	return c, nil
 }

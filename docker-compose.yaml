@@ -276,8 +276,13 @@ services:
       CONTRACT_ADDR: ${CONTRACT_ADDR:-0x0000000000000000000000000000000000000000}
       DLQ_TOPIC: wms.dlq.v1
       BATCH_SIZE: "10"
-      BATCH_TIMEOUT: 100ms
-      RECEIPT_POLL_TIMEOUT: 30s
+      # Env-interpolated so e2e scenarios can widen the batch window (S3/10) or shrink
+      # the receipt poll + reconcile cadence (N1/11) by exporting these before a
+      # `docker compose up --force-recreate ledger-adapter`. Defaults = production values.
+      BATCH_TIMEOUT: ${BATCH_TIMEOUT:-100ms}
+      RECEIPT_POLL_TIMEOUT: ${RECEIPT_POLL_TIMEOUT:-30s}
+      RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-30s}
+      RECONCILE_MIN_AGE: ${RECONCILE_MIN_AGE:-1m}
       LOG_LEVEL: info
       # test-profile overrides via shared volume (silently ignored if files absent)
       RPC_URL_FILE: /shared/rpc_url.txt

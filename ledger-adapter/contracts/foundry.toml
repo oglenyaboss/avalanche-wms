@@ -1,7 +1,12 @@
 [profile.default]
 src = "."
 out = "out"
-libs = []
+# lib/ holds forge-std (fetched on demand for `forge test`, gitignored — see .gitignore).
+# Declaring it as a libs dir keeps forge from treating those sources as project src
+# (so `forge create BatchMappingWMS` never tries to compile forge-std) and resolves the
+# forge-std/ import for the test file. Absent on a clean checkout — harmless: the
+# deploy target imports nothing from lib/.
+libs = ["lib"]
 remappings = []
 solc_version = "0.8.23"
 evm_version = "paris"

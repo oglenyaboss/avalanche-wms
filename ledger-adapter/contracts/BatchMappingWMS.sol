@@ -16,24 +16,38 @@ contract BatchMappingWMS {
         uint256 timestamp
     );
 
+    // ItemTransitionFailed эмитится когда элемент batch'а пропущен из-за неверного
+    // item status (#47/S3): транзакция НЕ ревертится, валидные siblings проходят,
+    // а пропуск остаётся наблюдаемым on-chain для chain-status gate (#45) / reconcile.
+    event ItemTransitionFailed(
+        uint256 indexed eventId,
+        uint256 indexed itemId,
+        Status actualStatus,
+        Status expectedStatus
+    );
 
+
+    // Per-item функции СТРОГИЕ: дубликат eventId → no-op (early return), но неверный
+    // item status → revert (через require в _transition). Batch-функции МЯГКИЕ: оба
+    // случая → skip. Адаптер ходит только через batch*; per-item оставлены для
+    // единичных вызовов (тесты/CLI), где revert на неверный статус уместен.
     function accept(uint256 eventId, uint256 itemId) external {
-        _requireNewEvent(eventId);
+        if (!_markEventIfNew(eventId)) return;
         _transition(eventId, itemId, Status.None, Status.Accepted);
     }
 
     function putAway(uint256 eventId, uint256 itemId) external {
-        _requireNewEvent(eventId);
+        if (!_markEventIfNew(eventId)) return;
         _transition(eventId, itemId, Status.Accepted, Status.PutAway);
     }
 
     function pick(uint256 eventId, uint256 itemId) external {
-        _requireNewEvent(eventId);
+        if (!_markEventIfNew(eventId)) return;
         _transition(eventId, itemId, Status.PutAway, Status.Picked);
     }
 
     function ship(uint256 eventId, uint256 itemId) external {
-        _requireNewEvent(eventId);
+        if (!_markEventIfNew(eventId)) return;
         _transition(eventId, itemId, Status.Picked, Status.Shipped);
     }
 
@@ -55,6 +69,9 @@ contract BatchMappingWMS {
     }
 
 
+    // _batchTransition обрабатывает каждый элемент независимо: ни дубликат eventId,
+    // ни неверный item status НЕ ревертят весь batch (Kafka at-least-once гарантирует
+    // дубликаты; один плохой item не должен ронять валидные siblings — #44, #47).
     function _batchTransition(
         uint256[] calldata eventIds,
         uint256[] calldata itemIds,
@@ -65,15 +82,39 @@ contract BatchMappingWMS {
         require(eventIds.length > 0, "Empty arrays");
 
         for (uint256 i; i < eventIds.length; ) {
-            _requireNewEvent(eventIds[i]);
-            _transition(eventIds[i], itemIds[i], requiredStatus, nextStatus);
+            uint256 eventId = eventIds[i];
+            uint256 itemId = itemIds[i];
+
+            // #44: дубликат eventId (cross-tx redelivery или повтор внутри batch) → skip.
+            if (!_markEventIfNew(eventId)) {
+                unchecked { ++i; }
+                continue;
+            }
+
+            // #47/S3: неверный item status — пропускаем ТОЛЬКО этот элемент с
+            // наблюдаемым событием, не ревертим транзакцию.
+            Status current = itemStatus[itemId];
+            if (current != requiredStatus) {
+                emit ItemTransitionFailed(eventId, itemId, current, requiredStatus);
+                unchecked { ++i; }
+                continue;
+            }
+
+            itemStatus[itemId] = nextStatus;
+            emit ItemTransition(eventId, itemId, requiredStatus, nextStatus, msg.sender, block.timestamp);
             unchecked { ++i; }
         }
     }
 
-    function _requireNewEvent(uint256 eventId) internal {
-        require(!processedEventIds[eventId], "Duplicate eventId");
+    // _markEventIfNew атомарно проверяет-и-помечает eventId. Возвращает false если
+    // событие уже обработано (replay) — вызывающий должен сделать no-op, НЕ revert.
+    // Replay-защита сохраняется: каждый eventId исполняется ровно один раз.
+    function _markEventIfNew(uint256 eventId) internal returns (bool isNew) {
+        if (processedEventIds[eventId]) {
+            return false;
+        }
         processedEventIds[eventId] = true;
+        return true;
     }
 
     function _transition(

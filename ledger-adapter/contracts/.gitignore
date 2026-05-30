@@ -1,0 +1,8 @@
+# Foundry build artifacts
+out/
+cache/
+
+# forge-std is fetched on demand for running contract tests locally
+# (`git clone --depth 1 https://github.com/foundry-rs/forge-std lib/forge-std`),
+# not vendored. The deploy path (`forge create BatchMappingWMS`) needs no libs.
+lib/
