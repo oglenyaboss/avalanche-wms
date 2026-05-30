@@ -66,6 +66,10 @@ func reconcileReceipt(
 		log.Info("reconciled to committed", "tx", txHash, "n", len(ids))
 		return true, nil
 	}
+	// NOTE: reconcile-sourced FAILED НЕ публикуется в DLQ (в отличие от синхронного
+	// recordFailure). После contract-fix'а reverted mined tx — редкость (валидные
+	// transition'ы больше не ревертят); полноценная видимость отказа — это
+	// reverse-outbox (#41) / chain-status gate (#45). TODO(#41): DLQ для reconcile-FAILED.
 	if err := st.MarkFailed(ctx, ids, txHash, "reconcile: tx reverted on-chain"); err != nil {
 		return false, fmt.Errorf("reconcile mark failed: %w", err)
 	}
@@ -132,11 +136,18 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	}
 	r.log.Info("reconcile sweep", "stuck_rows", len(rows), "distinct_tx", len(byTx))
 
+	errCount := 0
 	for txHash, ids := range byTx {
 		// Один битый tx (например receipt RPC-блип) не должен останавливать sweep.
 		if _, err := reconcileReceipt(ctx, r.chain, r.store, ids, txHash, r.log); err != nil {
+			errCount++
 			r.log.Error("reconcile tx failed", "tx", txHash, "err", err)
 		}
+	}
+	if errCount > 0 {
+		// Видимость для оператора: устойчиво ненулевой счётчик = застрявший batch
+		// (RPC стабильно отдаёт не-NotFound ошибку), а не разовый блип.
+		r.log.Warn("reconcile sweep completed with errors", "tx_errors", errCount, "distinct_tx", len(byTx))
 	}
 	return nil
 }

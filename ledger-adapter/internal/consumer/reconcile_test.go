@@ -2,10 +2,12 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 
@@ -87,6 +89,34 @@ func TestReconciler_GroupsByTxHash_OneCheckPerTx(t *testing.T) {
 	}
 	if !st.committed[a] || !st.committed[b] {
 		t.Errorf("both events of the shared tx must be committed")
+	}
+}
+
+// TestReconciler_PerTxErrorIsolation: one tx whose receipt lookup errors must not abort
+// the sweep — healthy sibling txs still reconcile, and reconcileOnce returns nil (the
+// error is logged-and-isolated, not propagated).
+func TestReconciler_PerTxErrorIsolation(t *testing.T) {
+	ch := &stubChain{
+		receipt: &types.Receipt{Status: 1},
+		receiptErrForHash: map[common.Hash]error{
+			common.HexToHash("0xbad"): errors.New("rpc down"),
+		},
+	}
+	st := newStubStore()
+	good, bad := uuid.New(), uuid.New()
+	st.reconcilable = []store.ReconcileRow{
+		{EventID: good, TxHash: "0xgood"},
+		{EventID: bad, TxHash: "0xbad"},
+	}
+
+	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+		t.Fatalf("per-tx error must be isolated, not propagated from reconcileOnce: %v", err)
+	}
+	if !st.committed[good] {
+		t.Errorf("the healthy tx must still reconcile to COMMITTED despite a sibling error")
+	}
+	if st.committed[bad] {
+		t.Errorf("the errored tx must NOT be committed")
 	}
 }
 

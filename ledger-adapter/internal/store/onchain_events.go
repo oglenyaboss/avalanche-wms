@@ -62,6 +62,8 @@ func (r *Repository) InsertPending(ctx context.Context, eventID uuid.UUID, aggTy
 }
 
 // MarkSent выставляет status=SENT и tx_hash для всех events в батче (UUID[]).
+// Guard `status <> 'COMMITTED'`: запись forward-only — никогда не «откатываем»
+// уже подтверждённую строку обратно в SENT (defense-in-depth против гонок).
 func (r *Repository) MarkSent(ctx context.Context, ids []uuid.UUID, txHash string) error {
 	if len(ids) == 0 {
 		return nil
@@ -69,7 +71,7 @@ func (r *Repository) MarkSent(ctx context.Context, ids []uuid.UUID, txHash strin
 	_, err := r.pool.Exec(ctx,
 		`UPDATE public.onchain_events
 		 SET tx_hash=$2, status='SENT', updated_at=now()
-		 WHERE event_id = ANY($1)`,
+		 WHERE event_id = ANY($1) AND status <> 'COMMITTED'`,
 		ids, txHash)
 	if err != nil {
 		return fmt.Errorf("mark sent: %w", err)
@@ -96,6 +98,13 @@ func (r *Repository) MarkCommitted(ctx context.Context, ids []uuid.UUID) error {
 // MarkFailed — receipt.Status=0 или EstimateGas revert. txHash опционален
 // (может быть пусто если tx даже не был отправлен). reason — человекочитаемое
 // описание ошибки.
+//
+// Guard `status <> 'COMMITTED'`: критично для DB↔chain consistency. Если фоновый
+// reconcile-loop уже подтянул строку в COMMITTED (тот же tx замайнен успешно), а
+// затем синхронный WaitReceipt по таймауту вызывает MarkFailed — без guard'а это
+// перезаписало бы COMMITTED обратно в FAILED, ровно воссоздав расхождение, которое
+// этот MR чинит. Легальный путь восстановления FAILED→COMMITTED идёт через
+// MarkCommitted, не через MarkFailed, поэтому guard его не задевает.
 func (r *Repository) MarkFailed(ctx context.Context, ids []uuid.UUID, txHash, reason string) error {
 	if len(ids) == 0 {
 		return nil
@@ -106,7 +115,7 @@ func (r *Repository) MarkFailed(ctx context.Context, ids []uuid.UUID, txHash, re
 		     tx_hash = COALESCE(NULLIF($2,''), tx_hash),
 		     error_message=$3,
 		     updated_at=now()
-		 WHERE event_id = ANY($1)`,
+		 WHERE event_id = ANY($1) AND status <> 'COMMITTED'`,
 		ids, txHash, reason)
 	if err != nil {
 		return fmt.Errorf("mark failed: %w", err)
@@ -145,6 +154,11 @@ func (r *Repository) StatusAndTx(ctx context.Context, eventID uuid.UUID) (status
 	return status, txHash, nil
 }
 
+// reconcileBatchLimit ограничивает один sweep: при затяжном RPC/DB-инциденте stuck
+// rows могут накопиться, и без LIMIT первый sweep после восстановления загрузил бы их
+// все в память разом. reconcileOnce естественно дренирует backlog за несколько tick'ов.
+const reconcileBatchLimit = 1000
+
 // ListReconcilable возвращает stuck rows (SENT/FAILED с tx_hash), не обновлявшиеся
 // дольше minAge. minAge отсекает in-flight события, которые flusher ещё дожимает
 // своим WaitReceipt — их трогать рано. Используется фоновым reconcile-loop'ом (N1).
@@ -154,8 +168,9 @@ func (r *Repository) ListReconcilable(ctx context.Context, minAge time.Duration)
 		 WHERE status IN ('SENT','FAILED')
 		   AND tx_hash IS NOT NULL AND tx_hash <> ''
 		   AND updated_at < now() - make_interval(secs => $1)
-		 ORDER BY updated_at ASC`,
-		minAge.Seconds())
+		 ORDER BY updated_at ASC
+		 LIMIT $2`,
+		minAge.Seconds(), reconcileBatchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("list reconcilable: %w", err)
 	}

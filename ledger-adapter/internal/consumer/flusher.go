@@ -210,7 +210,11 @@ func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]
 			// revert). Терминально, не ретраим.
 			f.log.Info("skip failed event without tx", "event_id", m.EventID, "aggregate", m.AggregateType)
 		default:
-			// PENDING без tx_hash — tx ещё не уходила, безопасно отправить.
+			// PENDING без tx_hash — InsertPending был, MarkSent нет, tx ещё не уходила:
+			// безопасно отправить. Краевой случай: если BatchCall прошёл, но MarkSent
+			// упал → redelivery попадёт сюда и отправит повторно. Contract idempotency
+			// (#44) не даст двойной transition, но первая tx осиротеет в DB (всплывёт
+			// через chain-status gate #45). Без распределённой транзакции окно неустранимо.
 			f.log.Warn("resubmitting pending event without tx", "event_id", m.EventID, "aggregate", m.AggregateType, "status", status)
 			pending = append(pending, m)
 		}

@@ -67,6 +67,15 @@ func Load() (*Config, error) {
 		}
 		*r.field = v
 	}
+
+	// Инвариант: reconcile-loop не должен трогать строку, пока её ещё дожимает
+	// синхронный WaitReceipt. ReconcileMinAge > ReceiptPollTimeout гарантирует, что
+	// строка станет reconcile-eligible только после того, как WaitReceipt завершился.
+	// Без этого loop мог бы пометить SENT-строку COMMITTED, а последующий timeout —
+	// FAILED (см. MarkFailed). Проверяем на старте, а не в 3 часа ночи.
+	if c.ReconcileMinAge <= c.ReceiptPollTimeout {
+		return nil, fmt.Errorf("RECONCILE_MIN_AGE (%s) must be > RECEIPT_POLL_TIMEOUT (%s): a shorter min-age lets the reconcile loop race the flusher's in-flight WaitReceipt", c.ReconcileMinAge, c.ReceiptPollTimeout)
+	}
 	return c, nil
 }
 

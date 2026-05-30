@@ -221,6 +221,22 @@ contract BatchMappingWMSTest is Test {
         assertEq(uint256(wms.itemStatus(700)), uint256(BatchMappingWMS.Status.None));
     }
 
+    // #47: один batch, два РАЗНЫХ eventId на ОДИН item. Первый продвигает item; второй —
+    // eventId новый (_markEventIfNew=true), но item уже Accepted → ItemTransitionFailed,
+    // НЕ двойной transition и НЕ revert. Оба eventId помечены processed.
+    function test_batchSameItem_twoEventIds_secondEmitsFailed() public {
+        uint256[] memory eIds = new uint256[](2);
+        uint256[] memory iIds = new uint256[](2);
+        eIds[0] = 1; eIds[1] = 2;
+        iIds[0] = 10; iIds[1] = 10;
+
+        wms.batchAccept(eIds, iIds);
+
+        assertEq(uint256(wms.itemStatus(10)), uint256(BatchMappingWMS.Status.Accepted));
+        assertTrue(wms.processedEventIds(1));
+        assertTrue(wms.processedEventIds(2));
+    }
+
     function test_revert_arrayLengthMismatch() public {
         uint256[] memory eIds = new uint256[](2);
         uint256[] memory iIds = new uint256[](1);

@@ -23,14 +23,15 @@ import (
 // --- моки interfaces -----------------------------------------------------
 
 type stubChain struct {
-	mu           sync.Mutex
-	calls        []string // aggregate_type записи (BatchCall)
-	receiptCalls int      // сколько раз дёрнули TransactionReceipt
-	callErr      error
-	callErrFor   map[string]error // per-aggregate error
-	receipt      *types.Receipt
-	receiptErr   error
-	receiptWait  int
+	mu                sync.Mutex
+	calls             []string // aggregate_type записи (BatchCall)
+	receiptCalls      int      // сколько раз дёрнули TransactionReceipt
+	callErr           error
+	callErrFor        map[string]error // per-aggregate error
+	receipt           *types.Receipt
+	receiptErr        error
+	receiptErrForHash map[common.Hash]error // per-tx-hash receipt error
+	receiptWait       int
 }
 
 func (s *stubChain) BatchCall(_ context.Context, aggregateType string, _, _ []*big.Int) (common.Hash, error) {
@@ -48,10 +49,15 @@ func (s *stubChain) BatchCall(_ context.Context, aggregateType string, _, _ []*b
 	return common.HexToHash("0xdeadbeef"), nil
 }
 
-func (s *stubChain) TransactionReceipt(_ context.Context, _ common.Hash) (*types.Receipt, error) {
+func (s *stubChain) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.receiptCalls++
+	if s.receiptErrForHash != nil {
+		if err, ok := s.receiptErrForHash[h]; ok {
+			return nil, err
+		}
+	}
 	if s.receiptErr != nil {
 		return nil, s.receiptErr
 	}
@@ -512,6 +518,32 @@ func TestFlusher_IntraBatchDuplicate_Deduped(t *testing.T) {
 	}
 	if len(st.inserted) != 1 {
 		t.Errorf("dup must not InsertPending twice, got %d", len(st.inserted))
+	}
+}
+
+// TestFlusher_RedeliveredRow_ReceiptRPCError_Propagates: a non-NotFound receipt error
+// while reconciling a redelivered row is transient — it propagates (blocking the offset
+// commit) and the row is left untouched: no resubmit, no terminal mark, no DLQ.
+func TestFlusher_RedeliveredRow_ReceiptRPCError_Propagates(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	ch.receiptErr = errors.New("rpc connection refused") // non-NotFound
+	m := makeMessages(1, "receiving")[0]
+	st.exists[m.EventID] = true
+	st.statuses[m.EventID] = "SENT"
+	st.sent[m.EventID] = "0xinflight"
+
+	err := f.Flush(context.Background(), []*Message{m})
+	if err == nil {
+		t.Fatal("non-NotFound receipt error during reconcile must propagate (transient, no offset commit)")
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("must not resubmit, got %d", len(ch.calls))
+	}
+	if len(st.committed) != 0 || len(st.failed) != 0 {
+		t.Errorf("error path must not mark terminal, got committed=%d failed=%d", len(st.committed), len(st.failed))
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("no DLQ on transient receipt error, got %d", len(dq.messages))
 	}
 }
 

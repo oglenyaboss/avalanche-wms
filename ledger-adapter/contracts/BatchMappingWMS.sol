@@ -27,6 +27,10 @@ contract BatchMappingWMS {
     );
 
 
+    // Per-item функции СТРОГИЕ: дубликат eventId → no-op (early return), но неверный
+    // item status → revert (через require в _transition). Batch-функции МЯГКИЕ: оба
+    // случая → skip. Адаптер ходит только через batch*; per-item оставлены для
+    // единичных вызовов (тесты/CLI), где revert на неверный статус уместен.
     function accept(uint256 eventId, uint256 itemId) external {
         if (!_markEventIfNew(eventId)) return;
         _transition(eventId, itemId, Status.None, Status.Accepted);
