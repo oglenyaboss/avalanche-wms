@@ -1,152 +1,234 @@
-# E2E Bug-Hunt Backlog (MR 59 line)
+# Бэклог E2E баг-ханта (линия MR 59)
 
-Branch `test/wms-outbound-flow-e2e-onchain-fsm`. Produced 2026-05-25 by a 5-agent
-parallel sweep — one agent per layer (receiving / putaway / assembly / shipping+dispatches
-/ ledger-adapter+contract) — that mapped each module's FSM, error paths, and invariants,
-cross-referenced them against the existing `tests/e2e/` suite, and ranked latent defects.
+Ветка `test/wms-outbound-flow-e2e-onchain-fsm`. Подготовлено 2026-05-25 параллельным
+проходом из 5 агентов — по одному агенту на слой (receiving / putaway / assembly /
+shipping+dispatches / ledger-adapter+contract), — который разметил FSM каждого модуля,
+пути ошибок и инварианты, сверил их с существующим набором `tests/e2e/` и проранжировал
+латентные дефекты.
 
-This file is the durable output of that sweep. It lists **every** finding, what was shipped
-this batch, and what is deferred with a proposed scenario shape. All line refs are against
-the worktree at sweep time; re-confirm before acting.
+Этот файл — устойчивый результат того прохода. В нём перечислены **все** находки, что
+выпущено в этом батче и что отложено с предложенной формой сценария. Все ссылки на строки —
+относительно worktree на момент прохода; перепроверяйте перед действием.
 
-**Severity:** CRITICAL = data loss / silent DB↔chain divergence · HIGH = functional bug or
-stuck state · MEDIUM = maintainability/robustness · LOW = minor/style.
+**Серьёзность:** CRITICAL = потеря данных / тихое расхождение DB↔chain · HIGH = функциональный
+баг или застрявшее состояние · MEDIUM = поддерживаемость/устойчивость · LOW = мелочь/стиль.
 
-> ⚠️ The reproduction recipes were originally derived from code analysis, **not** a live run
-> (the suite was not executable at authoring time — a host port clash held :5432/:9092).
-> **Update 2026-05-26:** the suite is now runnable end-to-end (clean-checkout `JWT_SECRET`
-> hermeticity fix) and the three off-gate scenarios `09`/`10`/`11` were **validated live** —
-> each exits non-zero, reproducing S2/S3/N1 respectively (see §1). The `*_pendingFix` `t.Skip`
-> stubs remain code-analysis-only; validate before trusting.
+> ⚠️ Рецепты воспроизведения изначально выведены из анализа кода, **не** из живого прогона
+> (на момент написания набор не запускался — конфликт хост-портов держал :5432/:9092).
+> **Обновление 2026-05-26:** набор теперь запускается end-to-end (фикс герметичности
+> `JWT_SECRET` на чистом checkout), и три off-gate сценария `09`/`10`/`11` **проверены
+> вживую** — каждый завершается с ненулевым кодом, воспроизводя S2/S3/N1 соответственно
+> (см. §1). Заглушки `t.Skip` `*_pendingFix` остаются только на уровне анализа кода;
+> проверяйте перед тем, как доверять.
 
 ---
 
-## 1. Shipped in this batch
+## 0. Статус решения (обновлено 2026-05-30)
 
-**Green tests added to the `-tags=e2e` gate (correct-behaviour coverage):**
+После прохода бэклог разобрали на заведённые issue **#44–#50** и починили в четырёх MR —
+**все влиты в `dev`** (`!61`/`!62`/`!63`/`!64`).
 
-| Test | Closes |
-|---|---|
-| `newMultiProductFixture` + rewritten `TestMultiProduct_AllocatePickAssemble` | Harness bug **T11**: the old test consumed the seed's fixed 5+5 stock and only passed on a fresh stack. Now per-run + re-runnable in `E2E_USE_EXISTING_STACK`. |
-| `TestPartialShipment_MofN` | Spot-ship M of N (DB contract): order/dispatch complete only after all items ship; `buffer_remaining` tracks the rest. On-chain isolation deferred — see §3. |
-| `TestAllocate_InsufficientStock` | Allocate shortage contract: HTTP 200 + `insufficient_orders` (not 422), all-or-nothing (order NEW, unit STORED/unbound, 0 tasks). |
-| `TestAuth_OperatorOnlyEndpoints` | Auth gap: no-token→401 + CUSTOMER→403 across **putaway / assembly / shipping** (previously only receiving). |
+> ⚠️ Фиксы **в `dev`, ещё не в `master`**. GitLab автозакрывает issue только при мердже в
+> дефолтную ветку (`master`), поэтому **#44–#48 на трекере всё ещё _открыты_**; они закроются
+> при `dev → master`. «✅» ниже означает **починено в `dev`**, а не выкачено в прод.
 
-**Off-gate bug reproductions (exit non-zero while the bug lives, 0 once fixed):**
+**MR → issue → какие дефекты починены:**
 
-| Artifact | Proves | Status |
+| MR | Issue(s) | Закрытые ID из BUGHUNT |
 |---|---|---|
-| `scenarios/09-s2-crash-recovery.sh` | **S2** (CRITICAL) — fills the blind spot in `07` | ✅ Validated live 2026-05-26 (exit 1, S2 confirmed: redelivered SENT row → FAILED while COMMITTED on-chain) |
-| `scenarios/10-s3-batch-poisoning.sh` | **S3** (HIGH) adapter-side fan-out | ✅ Validated live 2026-05-26 (`BATCH_TIMEOUT=5s`; exit 1, S3 confirmed: valid sibling dragged to FAILED) |
-| `scenarios/11-receipt-timeout.sh` | **N1** (CRITICAL) | ✅ Validated live 2026-05-26 (`RECEIPT_POLL_TIMEOUT=1ms`; exit 1, N1 confirmed: mined tx left DB FAILED) |
+| `!61` | #49 | Receiving-1, Shipping-4, Shipping-5, Putaway-4, Dispatches-1, Assembly-6, Assembly-7 |
+| `!62` | #50 | Receiving-3/4/5, Putaway-6, Shipping-6, Shipping-8, Assembly-2, Assembly-4, Assembly-5, N4, N7 |
+| `!63` | #44, #47 | S2, N1, N2, N9 (#44) · S3 (#47) |
+| `!64` | #45, #46, #48 | S1 *(частично)* (#45) · Assembly-1 (#46) · Shipping-2 (#48) |
 
-**`t.Skip` documentation stubs added to `known_failures_test.go`** (same convention as S1/S2/S3):
-`TestAssemblyCartLostOnRestart_pendingFix`, `TestAdapterN1_ReceiptTimeoutDivergence_pendingFix`,
-`TestShippingShipBeforeAssembled_pendingFix`, `TestReceivingOpenBoxReachesChain_pendingFix`.
+**Построчный статус** — ✅ починено в `dev` · ⚪ mitigated / by design (фикс не нужен) ·
+🔴 ещё открыто:
 
-**False-confidence annotations** (these *looked* like they covered S2; they don't):
-`scenarios/07-idempotency-restart.sh` (drives to COMMITTED before redelivery) and
+| ID | Сев. | Статус | Решение |
+|---|---|---|---|
+| S2 | CRIT | ✅ | Идемпотентный контракт + reconcile-цикл — #44 / `!63` |
+| N1 | CRIT | ✅ | Reconcile по таймауту receipt, без преждевременного FAILED — #44 / `!63` |
+| Assembly-1 | CRIT | ✅ | Корзины оператора выводятся из БД, а не из памяти процесса — #46 / `!64` |
+| S1 | CRIT | 🔴 | **Частично.** Каскад остановлен в источнике (gate на putaway+pick, #45/`!64`). Открыто: ship-gate + read-path `chain_synced` → **#52**; reverse-outbox → **#41** |
+| S3 | HIGH | ✅ | Поэлементная изоляция батча в контракте — #47 / `!63` |
+| N2 | HIGH | ✅ | Идемпотентность контракта (дубликат eventId больше не ревёртит) — #44 / `!63` |
+| N9 | HIGH | ✅ | Дедуп внутри батча в `filterAndMarkPending` — #44 / `!63` |
+| Shipping-2 | HIGH | ✅ | Статус `PARTIALLY_SHIPPED` + gate по статусу заказа — #48 / `!64` |
+| Receiving-1 | HIGH | ✅ | Фильтр по CLOSED-боксу в close-cargoplace — #49 / `!61` |
+| Shipping-5 | HIGH | ✅ | `pgx.ErrNoRows` → 404 — #49 / `!61` |
+| Putaway-4 | HIGH | ✅ | Guard `section IS NOT NULL` — #49 / `!61` |
+| Dispatches-1 | HIGH | ✅ | `requireOperator` в 3 хэндлерах dispatch — #49 / `!61` |
+| Assembly-6 | HIGH | ✅ | nullable `bins.section` сканируется через NullString — #49 / `!61` |
+| Assembly-2 | HIGH* | ✅ | Частичный unique-индекс `(product_id) WHERE status='PENDING'` — #50 / `!62` |
+| Shipping-4 | MED | ✅ | Маппинг ошибки already-departed — #49 / `!61` |
+| Assembly-7 | MED | ✅ | `ErrSKUNotFound` → 404 — #49 / `!61` |
+| Receiving-3 | MED | ✅ | Чтение статуса перенесено внутрь tx — #50 / `!62` |
+| Receiving-4 | MED | ✅ | Guard от пустого лога при повторном ScanBuffer — #50 / `!62` |
+| Receiving-5 | MED | ✅ | Audit-лог на NOT_RECEIVED — #50 / `!62` |
+| Putaway-6 | MED | ✅ | Проверка вместимости bin `volume` — #50 / `!62` |
+| Shipping-6 | MED | ✅ | Сериализованная нумерация dispatch_code — #49/#50 |
+| N4 | MED | ✅ | MarkFailed до публикации в DLQ — #50 / `!62` |
+| Assembly-4 | LOW | ✅ | `ErrOrderNotNew` в `mapServiceError` — #50 / `!62` |
+| Assembly-5 | LOW | ✅ | Тайбрейкер FIFO `ORDER BY created_at, product_id` — #50 / `!62` |
+| Shipping-8 | LOW | ✅ | Допуск (tolerance) на `scheduled_at` — #50 / `!62` |
+| N7 | LOW | ✅ | Readiness-проба pool/Kafka/RPC в `/health` — #50 / `!62` |
+| Putaway-3 | MED | ⚪ | SQL-guard теперь покрыт e2e-фикстурами — #50 |
+| N5 | MED | ⚪ | Безвредно после идемпотентности контракта (#44) |
+| N6 | MED | ⚪ | Дубликаты при DLQ-replay скипаются on-chain после #44 |
+| N8 | LOW | ⚪ | Поверхность S2 (resubmittable) закрыта #44 |
+| Putaway-1 | — | ⚪ | By design — авторитетный `product_ids[]` держит фронтенд |
+| Putaway-2 | LOW | ⚪ | By design — каждый товар валидируется независимо |
+| **Shipping-3** | HIGH | 🔴 | **Открыто, не заведено.** Скоупинг depart-with-unshipped: два AT_GATE dispatch'а на один destination могут растащить чужой груз. Баг корректности, релевантен и для одного склада. |
+| **Receiving-2** | HIGH | 🔴 | **Открыто, не заведено.** Over-receipt: ghost-товар (SKU не из `expected_cargoplace_skus`) попадает на chain. Нужно продуктовое решение (lenient-by-design?). |
+| **N3** | HIGH | 🔴 | **Открыто, не заведено.** Cross-aggregate head-of-line blocking в `Flush`; нужна per-aggregate изоляция (редизайн флашера). |
+| **Putaway-5** | HIGH | 🔴 | **Открыто, не заведено.** Нет межскладской проверки. В скоупе, только если multi-warehouse — цель; для проверки нужна фикстура со 2-м складом. |
+| **Assembly-3** | MED | 🔴 | **Открыто, не заведено.** Аллокация матчит только по `sku_id`, без скоупа по складу. Та же multi-warehouse-оговорка, что у Putaway-5. |
+
+**Открытая работа после этого батча:**
+- **Хвост S1** — #52 (ship-gate + read-path; дёшево, defense-in-depth, т.к. источник уже под gate'ом) и #41 (reverse-outbox; архитектурный).
+- **#51** — follow-up по ревью идемпотентности в ledger-adapter (nits после `!63`).
+- **Shipping-3 · Receiving-2** (HIGH, WMS) и **N3** (HIGH, адаптер — редизайн) — пока не заведены как issue.
+- **Putaway-5 · Assembly-3** — multi-warehouse; в скоупе, только если multi-warehouse — цель.
+
+> §2/§3 ниже — анализ **на момент прохода (2026-05-25)**. Этот §0 — текущий overlay
+> статуса; при расхождении приоритет у §0.
+
+---
+
+## 1. Выпущено в этом батче
+
+**Зелёные тесты, добавленные в гейт `-tags=e2e` (покрытие корректного поведения):**
+
+| Тест | Закрывает |
+|---|---|
+| `newMultiProductFixture` + переписанный `TestMultiProduct_AllocatePickAssemble` | Баг харнесса **T11**: старый тест съедал фиксированный сток сида 5+5 и проходил только на свежем стенде. Теперь per-run и перезапускаем в `E2E_USE_EXISTING_STACK`. |
+| `TestPartialShipment_MofN` | Spot-отгрузка M из N (контракт БД): заказ/dispatch завершаются только после отгрузки всех товаров; `buffer_remaining` отслеживает остаток. On-chain изоляция отложена — см. §3. |
+| `TestAllocate_InsufficientStock` | Контракт нехватки при allocate: HTTP 200 + `insufficient_orders` (не 422), всё-или-ничего (заказ NEW, юнит STORED/не привязан, 0 задач). |
+| `TestAuth_OperatorOnlyEndpoints` | Дыра в авторизации: без токена→401 + CUSTOMER→403 для **putaway / assembly / shipping** (раньше только receiving). |
+
+**Off-gate воспроизведения багов (ненулевой код, пока баг жив; 0 после фикса):**
+
+| Артефакт | Доказывает | Статус |
+|---|---|---|
+| `scenarios/09-s2-crash-recovery.sh` | **S2** (CRITICAL) — закрывает слепое пятно в `07` | ✅ Проверено вживую 2026-05-26 (exit 1, S2 подтверждён: переотправленная SENT-строка → FAILED, при этом COMMITTED on-chain) |
+| `scenarios/10-s3-batch-poisoning.sh` | **S3** (HIGH) fan-out на стороне адаптера | ✅ Проверено вживую 2026-05-26 (`BATCH_TIMEOUT=5s`; exit 1, S3 подтверждён: валидный сосед утащен в FAILED) |
+| `scenarios/11-receipt-timeout.sh` | **N1** (CRITICAL) | ✅ Проверено вживую 2026-05-26 (`RECEIPT_POLL_TIMEOUT=1ms`; exit 1, N1 подтверждён: смайненная tx оставила в БД FAILED) |
+
+**Документационные заглушки `t.Skip`, добавленные в `known_failures_test.go`** (та же конвенция,
+что у S1/S2/S3): `TestAssemblyCartLostOnRestart_pendingFix`,
+`TestAdapterN1_ReceiptTimeoutDivergence_pendingFix`, `TestShippingShipBeforeAssembled_pendingFix`,
+`TestReceivingOpenBoxReachesChain_pendingFix`.
+
+**Аннотации ложной уверенности** (выглядели так, будто покрывают S2; на деле нет):
+`scenarios/07-idempotency-restart.sh` (доводит до COMMITTED до переотправки) и
 `ledger-adapter/internal/consumer/flusher_test.go::TestFlusher_StrandedPending_GetsRetried`
-(mock chain lacks `_requireNewEvent`).
+(mock-чейн без `_requireNewEvent`).
 
 ---
 
-## 2. Product defects (genuine — not test bugs)
+## 2. Продуктовые дефекты (настоящие — не баги тестов)
 
-Sorted by severity. "Tracked as" → the durable artifact. S1/S2/S3 were found in the earlier
-MR-59 review; N*/BUG-* are new from this sweep.
+Отсортировано по серьёзности. «Отслеживается как» → устойчивый артефакт. S1/S2/S3 найдены в
+более раннем ревью MR-59; N*/BUG-* — новые из этого прохода.
 
-| ID | Sev | Defect | Key ref | Tracked as |
+> **Статус:** текущее решение собрано в §0 (2026-05-30). Таблица ниже — анализ на момент
+> прохода; колонка «Отслеживается как» отражает то, что было заведено на момент прохода.
+
+| ID | Сев. | Дефект | Ключевая ссылка | Отслеживается как |
 |---|---|---|---|---|
-| S1 | CRITICAL | WMS never reads `onchain_events.status`; a chain revert/DLQ leaves the order SHIPPED with no compensation (one-way coupling). **Data model fixed:** migration 0008 created VIEWs (`v_*_with_chain`) joining via `event_id`; reverse-outbox deferred to issue #41. Go code still does not query chain_status. | `shipping/service.go` Ship; VIEWs in `0008_chain_views.up.sql`; no reader in `wms/**/*.go` | `TestS1_*` stub; data model ready (#24 merged), behavior pending (#41); **→ [#45](https://git.miem.hse.ru/2340/blockchain_project/-/issues/45)** |
-| S2 | CRITICAL | Crash-recovery resubmits PENDING/SENT events → contract `Duplicate eventId` revert → event wrongly FAILED+DLQ despite succeeding. | `consumer/flusher.go:155-180` (skips only COMMITTED/FAILED), `:117` | `TestS2_*` stub + `scenarios/09`; **→ [#44](https://git.miem.hse.ru/2340/blockchain_project/-/issues/44)** |
-| N1 | CRITICAL | `WaitReceipt` timeout marks event FAILED while the tx is still mining → tx mines → DB FAILED vs chain COMMITTED forever. No crash needed. | `consumer/flusher.go:124-129`; `RECEIPT_POLL_TIMEOUT` default 30s | `TestAdapterN1_*` stub + `scenarios/11`; **→ [#44](https://git.miem.hse.ru/2340/blockchain_project/-/issues/44)** |
-| Assembly-1 | CRITICAL | Pick cart is process-memory only; no endpoint rebuilds it. WMS restart between Pick and ScanShippingBuffer strands products ASSEMBLED / order ALLOCATED forever. Same pattern in putaway (lower risk — frontend is source of truth, cart is counter only). | `assembly/service.go:18,266-270,286,376`; `putaway/service.go:15-22` | `TestAssemblyCartLostOnRestart_*` stub; **→ [#46](https://git.miem.hse.ru/2340/blockchain_project/-/issues/46)** |
-| S3 | HIGH | One bad item reverts the whole batch tx; adapter then FAILs+DLQs all valid siblings. | contract `_batchTransition` loop; `consumer/flusher.go:143-153` | `TestS3_*` stub + `scenarios/10`; **→ [#47](https://git.miem.hse.ru/2340/blockchain_project/-/issues/47)** |
-| Shipping-2 | HIGH | Ship gates on product status only, never order status. Shipping a not-yet-ASSEMBLED order's ready items leaves the order stuck ALLOCATED (can never reach SHIPPED). Decision: add PARTIALLY_SHIPPED status, partial shipping allowed, SHIPPED only when buffer_remaining=0. | `shipping/service.go:147`; `UpdateOrdersShippedConditional` (status='ASSEMBLED' only) | `TestShippingShipBeforeAssembled_*` stub (pure-HTTP repro); **→ [#48](https://git.miem.hse.ru/2340/blockchain_project/-/issues/48)** |
-| Receiving-1 | HIGH | `close-cargoplace` emits a receiving event for every RECEIVED product regardless of box status, but ScanBuffer only moves CLOSED-box products. An OPEN-box product gets Accepted(1) on-chain with `bin_id` NULL — on-chain but physically unplaceable. | `receiving/repository.go` `listProductIDsByCargoplaceTx` (no box filter) vs `ScanBufferWithLog` (`b.status='CLOSED'`) | `TestReceivingOpenBoxReachesChain_*` stub (pure-HTTP repro); **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
-| Shipping-5 | HIGH | `GET /dispatches/{id}` for a nonexistent id returns 503, not 404 (`pgx.ErrNoRows` unmapped). | `dispatches/repository.go:121-142`; `dispatches/handler.go:128-131` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
-| Shipping-3 | HIGH | Depart-with-unshipped scoping: `CountReadyToShipProductsInBuffer` spans all of a destination's bins; multiple AT_GATE dispatches for one destination can claim each other's cargo. | `shipping/repository.go:383-398` | Deferred — §3 |
-| Shipping-4 | MEDIUM | Two concurrent Ship calls draining the same buffer: one departs (200), the other hits `UpdateDispatchDeparted` 0-rows → 409 `DISPATCH_NOT_AT_GATE` (not 500 as originally stated — the error IS mapped). The shipped products are committed but the operator gets a misleading "dispatch not at gate" error instead of "already departed". | `shipping/repository.go:400-415` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
-| Putaway-4 | HIGH | NULL-section bin is accepted as a storage destination (`section IS DISTINCT FROM 'BUFFER'` is TRUE for NULL) → products stored in an unclassified bin, on-chain advances to PutAway. | `putaway/repository.go:82-97`; `bins.section` nullable (`0001:216`) | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
-| Putaway-5 | HIGH | No cross-warehouse enforcement: a product from warehouse A's buffer can be placed into warehouse B's bin. | `putaway/repository.go:62-97` | Deferred — §3 (needs 2nd warehouse) |
-| Receiving-2 | HIGH | Over-receipt: scanning a SKU not in `expected_cargoplace_skus` creates a ghost product that reaches the chain; the close summary hides the overage. | `receiving/service.go:498`; no join to `expected_cargoplace_skus` | Deferred — §3 (may be lenient-by-design; needs product call) |
-| Assembly-2 | HIGH* | Re-allocation can mint a duplicate PENDING task + duplicate picking outbox/chain event for one product. *Conditional: currently blocked by the order `status='NEW'` guard; no `(product_id) WHERE status='PENDING'` partial unique index backs it up. | `assembly_tasks` unique only on `event_id` (`0001:408`) | Deferred — §3 |
-| N2 | HIGH | Nonce/broadcast race: a transient SendTransaction error after the tx hit the mempool leaves the row PENDING; retry reuses the eventId → `Duplicate eventId` → S2 path. | `chain/client.go:160,197-199` | **→ [#44](https://git.miem.hse.ru/2340/blockchain_project/-/issues/44)** |
-| N3 | HIGH | Cross-aggregate head-of-line blocking: a failing earlier sub-batch aborts the whole `Flush`; an unrelated later aggregate is starved/retried indefinitely. | `consumer/flusher.go:79-88` | Deferred — §3 |
-| Receiving-3 | MEDIUM | TOCTOU: `ScanCargoplace`/`ScanTableCargoplace` read shipment/cargoplace status outside the tx; a concurrent close can mismatch the surfaced error code. | `receiving/service.go:189-194,343-365` | Deferred |
-| Receiving-4 | MEDIUM | `ScanBuffer` callable repeatedly; after the first call it moves 0 rows but still writes a log row, with no guard. | `receiving/repository.go:596-623` | Deferred |
-| Receiving-5 | MEDIUM | `MarkExpectedAsNotReceived` writes no audit log for the per-cargoplace NOT_RECEIVED transition. | `receiving/repository.go:286-300` | Deferred |
-| Putaway-3 | MEDIUM | Placement status guard is SQL-only; the unit tests mock `WithTx` as a passthrough, so real DB lock/rollback is unexercised by unit tests (the new fixture-based e2e tests now hit the real path). | `putaway/service.go:154-175`; `putaway/service_test.go:56-61` | Partially mitigated |
-| Putaway-6 | MEDIUM | No bin capacity (`bins.volume`) enforcement on putaway. | `putaway/repository.go` | Deferred |
-| Shipping-6 | MEDIUM | Dispatch code generation (`count+1`) is not atomic under concurrency → spurious unique-violation 503s. | `dispatches/repository.go:67-77` | Deferred |
-| N4 | MEDIUM | DLQ is published before MarkFailed; if MarkFailed fails, redelivery double-publishes to the DLQ. | `consumer/flusher.go:144-148` | Deferred |
-| N5 | MEDIUM | `finalFlush` on shutdown uses `context.Background()`, resubmitting in-flight SENT rows through the S2 path on every routine deploy/restart. | `consumer/consumer.go:170-186` | Deferred |
-| N6 | MEDIUM | DLQ replay: replayed messages re-hit terminal/duplicate paths; a fixed-and-replayed S3 sibling would be silently skipped (FAILED is terminal). | `dlq/producer.go`; `consumer/flusher.go:167` | Deferred |
-| Assembly-3 | MEDIUM | No warehouse scoping in product allocation (matches on `sku_id` only). | `assembly/repository.go:113-120` | Deferred (needs 2nd warehouse) |
-| Putaway-1 | — | **Design observation, not filed as a defect:** `scan-storage-bin` takes `product_ids` directly and never consults the in-memory cart — any operator can place any RECEIVED-in-a-buffer product. This is **intentional** (the cart is a UI counter; the frontend holds the authoritative `product_ids[]` — see the comment at `putaway/service.go:18-19`). Flagged here as an authorization consideration: there is no server-side check that the placing operator is the one who scanned the items. | `putaway/service.go:135,210-229` | Observation only |
-| Putaway-2 | LOW | Cross-buffer mixing: one `scan-storage-bin` call may place products from different buffer bins (each validated independently). | `putaway/service.go:151` | Observation |
-| Assembly-4 | LOW | `ErrOrderNotNew` is not in `mapServiceError` → would surface as 500 (currently unreachable behind the in-tx guard). | `assembly/handler.go:234-256` | Deferred |
-| Assembly-5 | LOW | FIFO allocation `ORDER BY created_at` has no tiebreaker → non-deterministic per-unit bin assignment on `created_at` ties. | `assembly/repository.go:118` | Deferred |
-| Shipping-8 | LOW | `scheduled_at` past-check uses wall clock with no tolerance/injection. | `dispatches/handler.go:99` | Deferred |
-| N7 | LOW | `/health` always returns 200 — no pool/Kafka/RPC readiness probe, so a wedged adapter still reports healthy. | `ledger-adapter/internal/handler/handler.go:24-33` | Deferred |
-| N8 | LOW | `InsertPending` rows are not rolled back on a mid-loop error, expanding the S2 (resubmittable non-terminal) surface. | `consumer/flusher.go:172-176` | Deferred |
-| Dispatches-1 | HIGH | Dispatches handlers (`GetDispatches`, `NewDispatch`, `GetDispatchByID`) never call `requireOperator`; JWT middleware validates the token, but a CUSTOMER-role user can list, create, and look up dispatches. All other modules (receiving/putaway/assembly/shipping) enforce OPERATOR-only via `requireOperator`. | `dispatches/handler.go:37-141` (no `requireOperator` call) vs `assembly/handler.go:218-231` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
-| N9 | HIGH | Intra-batch duplicate: if Kafka redelivers the same `event_id` within a single flush window, `filterAndMarkPending` appends it twice (first iteration: `InsertPending`; second: `Exists=true, status=PENDING` → also appended). `buildBatchArgs` produces `[id, id]` → contract `Duplicate eventId` revert → entire batch FAILED+DLQ. Compounds S2 on recovery. | `consumer/flusher.go:155-180` | **→ [#44](https://git.miem.hse.ru/2340/blockchain_project/-/issues/44)** |
-| Assembly-6 | HIGH | `GetBinSectionByID` scans nullable `bins.section` into a plain `string`; a NULL section bin causes `pgx` scan error → 500 INTERNAL_ERROR on cart allocation. Related to Putaway-4 (NULL-section bin accepted). | `assembly/repository.go:175-186` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
-| Assembly-7 | MEDIUM | `GetSKUByID` returns `ErrInsufficientStock` on `pgx.ErrNoRows` → allocate with a nonexistent SKU returns 422 `INSUFFICIENT_STOCK` instead of 404 `SKU_NOT_FOUND`. | `assembly/repository.go:140-155` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
+| S1 | CRITICAL | WMS никогда не читает `onchain_events.status`; реверт/DLQ на chain оставляет заказ SHIPPED без компенсации (одностороннее связывание). **Модель данных починена:** миграция 0008 создала VIEW'ы (`v_*_with_chain`), джойнящие через `event_id`; reverse-outbox отложен в issue #41. Go-код по-прежнему не запрашивает chain_status. | `shipping/service.go` Ship; VIEW'ы в `0008_chain_views.up.sql`; нет читателя в `wms/**/*.go` | Заглушка `TestS1_*`; модель данных готова (#24 влит), поведение в ожидании (#41); **→ [#45](https://git.miem.hse.ru/2340/blockchain_project/-/issues/45)** |
+| S2 | CRITICAL | Crash-recovery переотправляет PENDING/SENT события → ревёрт контракта `Duplicate eventId` → событие ошибочно FAILED+DLQ, хотя оно прошло. | `consumer/flusher.go:155-180` (скипает только COMMITTED/FAILED), `:117` | Заглушка `TestS2_*` + `scenarios/09`; **→ [#44](https://git.miem.hse.ru/2340/blockchain_project/-/issues/44)** |
+| N1 | CRITICAL | Таймаут `WaitReceipt` помечает событие FAILED, пока tx ещё майнится → tx майнится → в БД FAILED против COMMITTED on-chain навсегда. Краш не нужен. | `consumer/flusher.go:124-129`; `RECEIPT_POLL_TIMEOUT` по умолчанию 30s | Заглушка `TestAdapterN1_*` + `scenarios/11`; **→ [#44](https://git.miem.hse.ru/2340/blockchain_project/-/issues/44)** |
+| Assembly-1 | CRITICAL | Корзина подбора живёт только в памяти процесса; ни один эндпоинт её не восстанавливает. Рестарт WMS между Pick и ScanShippingBuffer навсегда оставляет товары ASSEMBLED / заказ ALLOCATED. Тот же паттерн в putaway (риск ниже — источник истины фронтенд, корзина лишь счётчик). | `assembly/service.go:18,266-270,286,376`; `putaway/service.go:15-22` | Заглушка `TestAssemblyCartLostOnRestart_*`; **→ [#46](https://git.miem.hse.ru/2340/blockchain_project/-/issues/46)** |
+| S3 | HIGH | Один плохой элемент ревёртит всю batch-tx; адаптер затем FAIL+DLQ для всех валидных соседей. | цикл `_batchTransition` в контракте; `consumer/flusher.go:143-153` | Заглушка `TestS3_*` + `scenarios/10`; **→ [#47](https://git.miem.hse.ru/2340/blockchain_project/-/issues/47)** |
+| Shipping-2 | HIGH | Ship гейтит только по статусу товара, никогда по статусу заказа. Отгрузка готовых товаров заказа, ещё не перешедшего в ASSEMBLED, оставляет заказ застрявшим в ALLOCATED (никогда не достигнет SHIPPED). Решение: добавить статус PARTIALLY_SHIPPED, разрешить частичную отгрузку, SHIPPED только когда buffer_remaining=0. | `shipping/service.go:147`; `UpdateOrdersShippedConditional` (только status='ASSEMBLED') | Заглушка `TestShippingShipBeforeAssembled_*` (чистый HTTP-репро); **→ [#48](https://git.miem.hse.ru/2340/blockchain_project/-/issues/48)** |
+| Receiving-1 | HIGH | `close-cargoplace` эмитит receiving-событие для каждого RECEIVED-товара независимо от статуса бокса, но ScanBuffer двигает только товары из CLOSED-бокса. Товар из OPEN-бокса получает Accepted(1) on-chain с `bin_id` NULL — на chain, но физически неразмещаемый. | `receiving/repository.go` `listProductIDsByCargoplaceTx` (без фильтра по боксу) против `ScanBufferWithLog` (`b.status='CLOSED'`) | Заглушка `TestReceivingOpenBoxReachesChain_*` (чистый HTTP-репро); **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
+| Shipping-5 | HIGH | `GET /dispatches/{id}` для несуществующего id возвращает 503, а не 404 (`pgx.ErrNoRows` не замаплен). | `dispatches/repository.go:121-142`; `dispatches/handler.go:128-131` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
+| Shipping-3 | HIGH | Скоупинг depart-with-unshipped: `CountReadyToShipProductsInBuffer` охватывает все bin'ы destination'а; несколько AT_GATE dispatch'ей на один destination могут забрать груз друг друга. | `shipping/repository.go:383-398` | Отложено — §3 |
+| Shipping-4 | MEDIUM | Два конкурентных вызова Ship, опустошающих один буфер: один отправляется (200), другой попадает на `UpdateDispatchDeparted` с 0 строк → 409 `DISPATCH_NOT_AT_GATE` (не 500, как было заявлено изначально — ошибка ЗАмаплена). Отгруженные товары закоммичены, но оператор получает вводящую в заблуждение ошибку «dispatch not at gate» вместо «already departed». | `shipping/repository.go:400-415` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
+| Putaway-4 | HIGH | Bin с NULL-секцией принимается как место хранения (`section IS DISTINCT FROM 'BUFFER'` истинно для NULL) → товары хранятся в неклассифицированном bin'е, on-chain продвигается до PutAway. | `putaway/repository.go:82-97`; `bins.section` nullable (`0001:216`) | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
+| Putaway-5 | HIGH | Нет межскладской проверки: товар из буфера склада A можно разместить в bin склада B. | `putaway/repository.go:62-97` | Отложено — §3 (нужен 2-й склад) |
+| Receiving-2 | HIGH | Over-receipt: сканирование SKU, которого нет в `expected_cargoplace_skus`, создаёт ghost-товар, попадающий на chain; сводка закрытия скрывает превышение. | `receiving/service.go:498`; нет джойна к `expected_cargoplace_skus` | Отложено — §3 (возможно, lenient-by-design; нужно продуктовое решение) |
+| Assembly-2 | HIGH* | Повторная аллокация может породить дублирующую PENDING-задачу + дублирующее picking outbox/chain-событие для одного товара. *Условно: сейчас блокируется guard'ом заказа `status='NEW'`; нет подстраховки в виде частичного unique-индекса `(product_id) WHERE status='PENDING'`. | `assembly_tasks` unique только по `event_id` (`0001:408`) | Отложено — §3 |
+| N2 | HIGH | Гонка nonce/broadcast: транзиентная ошибка SendTransaction после попадания tx в mempool оставляет строку PENDING; ретрай переиспользует eventId → `Duplicate eventId` → путь S2. | `chain/client.go:160,197-199` | **→ [#44](https://git.miem.hse.ru/2340/blockchain_project/-/issues/44)** |
+| N3 | HIGH | Cross-aggregate head-of-line blocking: упавший ранний sub-batch прерывает весь `Flush`; не связанный поздний aggregate голодает/ретраится бесконечно. | `consumer/flusher.go:79-88` | Отложено — §3 |
+| Receiving-3 | MEDIUM | TOCTOU: `ScanCargoplace`/`ScanTableCargoplace` читают статус shipment/cargoplace вне tx; конкурентное закрытие может рассогласовать выдаваемый код ошибки. | `receiving/service.go:189-194,343-365` | Отложено |
+| Receiving-4 | MEDIUM | `ScanBuffer` можно вызывать повторно; после первого вызова он двигает 0 строк, но всё равно пишет log-строку, без guard'а. | `receiving/repository.go:596-623` | Отложено |
+| Receiving-5 | MEDIUM | `MarkExpectedAsNotReceived` не пишет audit-лог для перехода NOT_RECEIVED по каждому cargoplace. | `receiving/repository.go:286-300` | Отложено |
+| Putaway-3 | MEDIUM | Guard статуса размещения только в SQL; юнит-тесты мокают `WithTx` как passthrough, поэтому реальный lock/rollback БД юнит-тестами не покрыт (новые e2e-тесты на фикстурах теперь бьют в реальный путь). | `putaway/service.go:154-175`; `putaway/service_test.go:56-61` | Частично mitigated |
+| Putaway-6 | MEDIUM | Нет проверки вместимости bin'а (`bins.volume`) при putaway. | `putaway/repository.go` | Отложено |
+| Shipping-6 | MEDIUM | Генерация dispatch code (`count+1`) не атомарна при конкуренции → ложные 503 из-за нарушения unique. | `dispatches/repository.go:67-77` | Отложено |
+| N4 | MEDIUM | Публикация в DLQ происходит до MarkFailed; если MarkFailed падает, переотправка дублирует публикацию в DLQ. | `consumer/flusher.go:144-148` | Отложено |
+| N5 | MEDIUM | `finalFlush` при шатдауне использует `context.Background()`, переотправляя in-flight SENT-строки по пути S2 на каждом штатном деплое/рестарте. | `consumer/consumer.go:170-186` | Отложено |
+| N6 | MEDIUM | DLQ replay: переигранные сообщения снова попадают на терминальные/дублирующие пути; починенный-и-переигранный сосед S3 будет молча пропущен (FAILED терминален). | `dlq/producer.go`; `consumer/flusher.go:167` | Отложено |
+| Assembly-3 | MEDIUM | Нет скоупа по складу в аллокации товара (матчит только по `sku_id`). | `assembly/repository.go:113-120` | Отложено (нужен 2-й склад) |
+| Putaway-1 | — | **Дизайн-наблюдение, не заведено как дефект:** `scan-storage-bin` принимает `product_ids` напрямую и никогда не сверяется с in-memory корзиной — любой оператор может разместить любой RECEIVED-в-буфере товар. Это **намеренно** (корзина — UI-счётчик; авторитетный `product_ids[]` держит фронтенд — см. комментарий в `putaway/service.go:18-19`). Отмечено здесь как соображение авторизации: нет серверной проверки, что размещающий оператор — тот же, кто сканировал товары. | `putaway/service.go:135,210-229` | Только наблюдение |
+| Putaway-2 | LOW | Смешивание между буферами: один вызов `scan-storage-bin` может разместить товары из разных буферных bin'ов (каждый валидируется независимо). | `putaway/service.go:151` | Наблюдение |
+| Assembly-4 | LOW | `ErrOrderNotNew` нет в `mapServiceError` → всплыло бы как 500 (сейчас недостижимо за in-tx guard'ом). | `assembly/handler.go:234-256` | Отложено |
+| Assembly-5 | LOW | FIFO-аллокация `ORDER BY created_at` без тайбрейкера → недетерминированное назначение bin'а на юнит при равенстве `created_at`. | `assembly/repository.go:118` | Отложено |
+| Shipping-8 | LOW | Проверка `scheduled_at` на прошлое использует wall clock без допуска/инъекции. | `dispatches/handler.go:99` | Отложено |
+| N7 | LOW | `/health` всегда возвращает 200 — нет readiness-пробы pool/Kafka/RPC, поэтому заклинивший адаптер всё ещё рапортует healthy. | `ledger-adapter/internal/handler/handler.go:24-33` | Отложено |
+| N8 | LOW | Строки `InsertPending` не откатываются при ошибке в середине цикла, расширяя поверхность S2 (переотправляемое нетерминальное состояние). | `consumer/flusher.go:172-176` | Отложено |
+| Dispatches-1 | HIGH | Хэндлеры dispatches (`GetDispatches`, `NewDispatch`, `GetDispatchByID`) никогда не вызывают `requireOperator`; JWT-middleware валидирует токен, но пользователь с ролью CUSTOMER может листать, создавать и смотреть dispatch'и. Все остальные модули (receiving/putaway/assembly/shipping) форсят OPERATOR-only через `requireOperator`. | `dispatches/handler.go:37-141` (нет вызова `requireOperator`) против `assembly/handler.go:218-231` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
+| N9 | HIGH | Дубликат внутри батча: если Kafka переотправляет тот же `event_id` в пределах одного окна flush, `filterAndMarkPending` добавляет его дважды (первая итерация: `InsertPending`; вторая: `Exists=true, status=PENDING` → тоже добавлен). `buildBatchArgs` выдаёт `[id, id]` → ревёрт контракта `Duplicate eventId` → весь батч FAILED+DLQ. Усугубляет S2 при восстановлении. | `consumer/flusher.go:155-180` | **→ [#44](https://git.miem.hse.ru/2340/blockchain_project/-/issues/44)** |
+| Assembly-6 | HIGH | `GetBinSectionByID` сканирует nullable `bins.section` в обычный `string`; bin с NULL-секцией вызывает ошибку скана `pgx` → 500 INTERNAL_ERROR при аллокации корзины. Связано с Putaway-4 (принимается bin с NULL-секцией). | `assembly/repository.go:175-186` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
+| Assembly-7 | MEDIUM | `GetSKUByID` возвращает `ErrInsufficientStock` на `pgx.ErrNoRows` → allocate с несуществующим SKU возвращает 422 `INSUFFICIENT_STOCK` вместо 404 `SKU_NOT_FOUND`. | `assembly/repository.go:140-155` | **→ [#49](https://git.miem.hse.ru/2340/blockchain_project/-/issues/49)** |
 
 ---
 
-## 3. Coverage gaps — correct behaviour
+## 3. Пробелы в покрытии — корректное поведение
 
-> **Update 2026-05-26 (batch 2):** the receiving, putaway, assembly, and shipping/dispatches
-> guard tests below were implemented as green tests on the `-tags=e2e` gate. Remaining gaps
-> marked *(still deferred)* below.
+> **Статус (2026-05-30):** решение собрано в §0; строки ниже — на момент прохода.
 
-**Receiving** — ✅ shipped in `receiving_guards_test.go`
-- ✅ `TestReceiving_GateFlow` — scan-ttn → scan-cargoplace → accept-shipment (with custom `newGateFixture`)
+> **Обновление 2026-05-26 (батч 2):** guard-тесты receiving, putaway, assembly и
+> shipping/dispatches ниже реализованы как зелёные тесты в гейте `-tags=e2e`. Оставшиеся
+> пробелы помечены ниже *(всё ещё отложено)*.
+
+**Receiving** — ✅ выпущено в `receiving_guards_test.go`
+- ✅ `TestReceiving_GateFlow` — scan-ttn → scan-cargoplace → accept-shipment (с кастомной `newGateFixture`)
 - ✅ `TestReceiving_ScanTTN_AlreadyClosed` — 409 SHIPMENT_ALREADY_CLOSED
 - ✅ `TestReceiving_ScanCargoplace_AlreadyReceived` — 409 CARGOPLACE_ALREADY_RECEIVED
 - ✅ `TestReceiving_ScanQR_Duplicate` — 409 QR_ALREADY_EXISTS
-- ✅ `TestReceiving_ScanBox_ClosedBox` — 409 BOX_NOT_OPEN (via scan-sku on closed box)
+- ✅ `TestReceiving_ScanBox_ClosedBox` — 409 BOX_NOT_OPEN (через scan-sku на закрытом боксе)
 - ✅ `TestReceiving_ScanSKU_UnknownBarcode` — 404 BARCODE_NOT_FOUND
 - ✅ `TestReceiving_ScanBuffer_NonBufferBin` — 400 BIN_NOT_BUFFER
-- *(still deferred)* box from another cargoplace → 400 `BOX_NOT_IN_CARGOPLACE`
+- *(всё ещё отложено)* бокс из другого cargoplace → 400 `BOX_NOT_IN_CARGOPLACE`
 
-**Putaway** — ✅ shipped in `putaway_guards_test.go`
-- ✅ `TestPutaway_DoublePlace_Conflict` — 409 PRODUCT_NOT_IN_BUFFER, outbox delta 0
-- ✅ `TestPutaway_PlaceIntoBufferBin_Rejected` — BUFFER/SHIPPING_BUFFER bins → 404 STORAGE_BIN_NOT_FOUND
+**Putaway** — ✅ выпущено в `putaway_guards_test.go`
+- ✅ `TestPutaway_DoublePlace_Conflict` — 409 PRODUCT_NOT_IN_BUFFER, дельта outbox 0
+- ✅ `TestPutaway_PlaceIntoBufferBin_Rejected` — bin'ы BUFFER/SHIPPING_BUFFER → 404 STORAGE_BIN_NOT_FOUND
 - ✅ `TestPutaway_ScanProduct_AlreadyStored` — 409 PRODUCT_NOT_RECEIVED
-- ✅ `TestPutaway_PlaceWithBogusProduct_Rollback` — tx rollback, P1 stays RECEIVED, no outbox
-- *(still deferred)* **Putaway-4 (defect):** NULL-section bin currently accepted → should be 404
+- ✅ `TestPutaway_PlaceWithBogusProduct_Rollback` — откат tx, P1 остаётся RECEIVED, нет outbox
+- *(всё ещё отложено)* **Putaway-4 (дефект):** bin с NULL-секцией сейчас принимается → должно быть 404
 
-**Assembly** — ✅ shipped in `assembly_guards_test.go`
-- ✅ `TestAssembly_CartIsolation` — op1 picks, op2 CART_EMPTY, op1 completes
-- ✅ `TestAssembly_DoubleAllocate` — second allocate → allocated_orders=0, task count unchanged
-- *(still deferred)* Concurrent allocate race (needs parallel goroutines)
+**Assembly** — ✅ выпущено в `assembly_guards_test.go`
+- ✅ `TestAssembly_CartIsolation` — op1 подбирает, op2 CART_EMPTY, op1 завершает
+- ✅ `TestAssembly_DoubleAllocate` — второй allocate → allocated_orders=0, число задач не меняется
+- *(всё ещё отложено)* Гонка конкурентного allocate (нужны параллельные горутины)
 
-**Shipping / dispatches** — ✅ shipped in `shipping_guards_test.go`
+**Shipping / dispatches** — ✅ выпущено в `shipping_guards_test.go`
 - ✅ `TestShipping_DoubleShip_Conflict` — 409 PRODUCT_NOT_IN_BUFFER
-- ✅ `TestShipping_ScanDriver_Idempotent` — 200, arrived_at unchanged
+- ✅ `TestShipping_ScanDriver_Idempotent` — 200, arrived_at не меняется
 - ✅ `TestShipping_ScanDriver_AlreadyDeparted` — 409 DISPATCH_ALREADY_DEPARTED
-- ✅ `TestShipping_DestinationMismatch` — 409 DESTINATION_MISMATCH (with ad-hoc second destination)
-- ✅ `TestDispatches_GetByID_NotFound` — documents Shipping-5 (currently 503, should be 404)
+- ✅ `TestShipping_DestinationMismatch` — 409 DESTINATION_MISMATCH (с ad-hoc вторым destination)
+- ✅ `TestDispatches_GetByID_NotFound` — документирует Shipping-5 (сейчас 503, должно быть 404)
 
-**Adapter (off-gate scenarios)** — *(still deferred)*
-- N1/N2/N3/N4/N5 reproductions (see §2 refs). N1 has a scenario stub (`11`); the rest need RPC/chaos fault injection.
+**Адаптер (off-gate сценарии)** — *(всё ещё отложено)*
+- Воспроизведения N1/N2/N3/N4/N5 (см. ссылки §2). У N1 есть заглушка-сценарий (`11`); остальным нужна инъекция сбоев RPC/chaos.
 
-**Fixture follow-ups (on-chain priming)** — *(still deferred)*
-- `newMultiProductFixture` inserts pre-STORED products with no prior receiving/putaway events, so their on-chain `itemStatus` is `None` and any picking/shipping events they generate revert (land FAILED). `TestMultiProduct_AllocatePickAssemble` and `TestPartialShipment_MofN` therefore assert **DB state only**. To also verify on-chain partial isolation (shipped → Shipped(4) while the remainder stays Picked(3)), extend the fixture to emit a receiving + a putaway outbox event per product and `waitForOnchainCommitted` for both before returning (priming each item to PutAway on-chain). That also removes the FAILED-row residue the fixture currently cleans up. The same prerequisite applies before adding on-chain assertions to `TestShippingShipBeforeAssembled_*` (its DB assertion — order stuck ALLOCATED — needs no chain).
+**Доработки фикстур (on-chain прайминг)** — *(всё ещё отложено)*
+- `newMultiProductFixture` вставляет товары сразу в STORED без предшествующих receiving/putaway-событий, поэтому их on-chain `itemStatus` = `None`, и любые порождаемые ими picking/shipping-события ревёртят (падают в FAILED). Поэтому `TestMultiProduct_AllocatePickAssemble` и `TestPartialShipment_MofN` проверяют **только состояние БД**. Чтобы проверить ещё и on-chain частичную изоляцию (отгружено → Shipped(4), пока остаток остаётся Picked(3)), расширьте фикстуру: эмитить по receiving- и putaway-outbox-событию на товар и `waitForOnchainCommitted` для обоих перед возвратом (прайминг каждого товара до PutAway on-chain). Это также убирает остаток FAILED-строк, который фикстура сейчас чистит. Та же предпосылка нужна перед добавлением on-chain-проверок в `TestShippingShipBeforeAssembled_*` (его проверка БД — заказ застрял в ALLOCATED — не требует chain).
 
 ---
 
-## 4. Methodology notes
+## 4. Заметки по методологии
 
-- The merge gate (`-tags=e2e`) stays **green and hermetic**. Product defects are proved by
-  **off-gate** artifacts (bash scenarios) and documented by `t.Skip` stubs — never by red
-  tests on the gate. Removing a stub's `t.Skip` and implementing its body turns it into a
-  live regression once the product is fixed (S2/S3/N1 also have a runnable bash repro).
-- Two pre-existing tests gave **false confidence** about S2 and are now annotated (§1).
-- Subagent agent IDs (for follow-up via SendMessage) and the raw per-module reports live in
-  the session transcript; this file is the distilled, durable form.
+- Merge-гейт (`-tags=e2e`) остаётся **зелёным и герметичным**. Продуктовые дефекты
+  доказываются **off-gate** артефактами (bash-сценарии) и документируются заглушками
+  `t.Skip` — никогда красными тестами в гейте. Удаление `t.Skip` у заглушки и реализация
+  её тела превращает её в живой регресс после того, как продукт починен (у S2/S3/N1 также
+  есть запускаемый bash-репро).
+- Два ранее существовавших теста давали **ложную уверенность** по S2 и теперь
+  аннотированы (§1).
+- ID агентов-субагентов (для follow-up через SendMessage) и сырые отчёты по модулям лежат
+  в транскрипте сессии; этот файл — дистиллированная, устойчивая форма.
