@@ -11,9 +11,9 @@ type TokenPayload = {
 
 export function getUserFromAccessToken(accessToken: string): User | null {
   try {
-    const payload = jwtDecode<TokenPayload>(accessToken)
+    const payload = jwtDecode<Partial<TokenPayload>>(accessToken)
 
-    if (payload.type !== 'access') {
+    if (payload.type !== 'access' || !payload.user_id || !payload.role) {
       return null
     }
 

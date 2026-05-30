@@ -15,17 +15,11 @@ export const managedPasswordSchema = z
   .min(6, 'Пароль должен содержать не менее 6 символов')
   .max(72, 'Пароль должен быть не длиннее 72 символов')
 
+// Login only checks the field is present; password strength is the backend's
+// concern here. Strength rules live on registration (managedPasswordSchema).
 export const loginSchema = z.object({
   username: usernameSchema,
   password: loginPasswordSchema,
-}).superRefine(({ password, username }, ctx) => {
-  if (username !== 'admin' && password.length < 6) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'Пароль должен содержать не менее 6 символов',
-      path: ['password'],
-    })
-  }
 })
 
 export const registrationSchema = z.object({
