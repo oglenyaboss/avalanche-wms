@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -87,6 +86,27 @@ func waitOnchainStatus(t *testing.T, ctx context.Context, env *env, eventID uuid
 	deadline := time.Now().Add(timeout)
 	for {
 		if onchainStatus(t, ctx, env, eventID) == expected {
+			return true
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return false
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// waitOnchainRowExists blocks until ANY onchain_events row exists for eventID (any
+// status), polling every 2s up to timeout. The row is written by InsertPending at the
+// very start of flushSubBatch — BEFORE any chain call — so its mere existence proves the
+// adapter's Kafka consumer pulled the message and started flushing. This is the
+// group-membership signal the consumer-readiness probe needs (see waitAdapterConsuming);
+// it deliberately does NOT require a terminal status, because under N1's
+// RECEIPT_POLL_TIMEOUT=1ms a warmup event lands FAILED — still a row, still proof.
+func waitOnchainRowExists(t *testing.T, ctx context.Context, env *env, eventID uuid.UUID, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if onchainStatus(t, ctx, env, eventID) != "" {
 			return true
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
@@ -197,6 +217,43 @@ func recreateAdapterWithEnv(t *testing.T, ctx context.Context, env *env, overrid
 
 	require.Truef(t, waitAdapterHealthy(ctx, 90*time.Second),
 		"ledger-adapter did not become healthy on :8085 after recreate (overrides=%v)", overrides)
+
+	// /health only proves the HTTP server is up — it returns 200 well before the Kafka
+	// consumer rejoins its group after the `docker rm -f` (SIGKILL) above. A SIGKILLed
+	// kafka-go member lingers in the broker for the 30s session timeout, so a fresh
+	// consumer (especially when two recreates stack) must wait out a rebalance before it
+	// is assigned the partition and starts reading. Block until the consumer is actually
+	// consuming, so callers never publish into that blind window (the N9 flake).
+	waitAdapterConsuming(t, ctx, env)
+}
+
+// adapterConsumingTimeout caps the wait for a freshly-recreated adapter's consumer to
+// rejoin its group and start reading. Sized for the worst case: a hard-killed member's
+// 30s session timeout plus a broker rebalance settle, observed to push the blind window
+// past 60s under a loaded single-Kafka e2e host.
+const adapterConsumingTimeout = 90 * time.Second
+
+// waitAdapterConsuming proves the recreated adapter's Kafka consumer has joined the
+// group and is reading its partition — not merely that /health is 200. It publishes a
+// throwaway warmup event with FRESH event_id AND product_id and waits for its
+// onchain_events row to appear (any status). Because the row is created by InsertPending
+// before any chain call, "row exists" is a clean group-membership signal.
+//
+// The warmup uses distinct random UUIDs, so it can never collide with a test's
+// event_id/product_id-scoped assertions, and it accretes harmlessly: no fixture cleanup
+// matches its random product_id (it has no outbox row — it is published straight to
+// Kafka), and no assertion counts total onchain_events rows. aggregate_type "receiving"
+// keeps it on the valid None->Accepted path (commits cleanly under default config; lands
+// FAILED only under N1's 1ms poll — still a row).
+func waitAdapterConsuming(t *testing.T, ctx context.Context, env *env) {
+	t.Helper()
+	warmupEvent := uuid.New()
+	warmupProduct := uuid.New()
+	publishEvent(t, ctx, "receiving", warmupEvent, warmupProduct, "{}")
+	require.Truef(t, waitOnchainRowExists(t, ctx, env, warmupEvent, adapterConsumingTimeout),
+		"ledger-adapter consumer did not start processing within %s after recreate: warmup "+
+			"event %s never produced an onchain_events row (consumer not in-group / partition unassigned)",
+		adapterConsumingTimeout, warmupEvent)
 }
 
 // inspectAdapter returns the running adapter's image ref and its full env list
@@ -281,5 +338,3 @@ func txEmittedItemTransitionFailed(t *testing.T, ctx context.Context, env *env, 
 	}
 	return false
 }
-
-var _ = fmt.Sprintf // diagnostics convenience
