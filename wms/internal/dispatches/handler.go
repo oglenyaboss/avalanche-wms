@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"wms/internal/auth"
 	"wms/internal/domain"
+	"wms/internal/platform/httputil"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -36,7 +36,7 @@ type DispatchFilter struct {
 }
 
 func (h *Handler) GetDispatches(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireOperator(w, r); !ok {
+	if _, ok := httputil.RequireOperator(w, r); !ok {
 		return
 	}
 
@@ -87,7 +87,7 @@ type NewDispatchQuery struct {
 }
 
 func (h *Handler) NewDispatch(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireOperator(w, r); !ok {
+	if _, ok := httputil.RequireOperator(w, r); !ok {
 		return
 	}
 
@@ -126,7 +126,7 @@ func (h *Handler) NewDispatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetDispatchByID(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireOperator(w, r); !ok {
+	if _, ok := httputil.RequireOperator(w, r); !ok {
 		return
 	}
 
@@ -150,20 +150,6 @@ func (h *Handler) GetDispatchByID(w http.ResponseWriter, r *http.Request) {
 	respondWithSuccess(w, map[string]interface{}{
 		"dispatch": dispatch,
 	})
-}
-
-func requireOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	operatorID := auth.UserIDFromCtx(r.Context())
-	if operatorID == uuid.Nil {
-		respondWithError(w, "Требуется авторизация", "UNAUTHORIZED", 401)
-		return uuid.Nil, false
-	}
-	role := auth.UserRoleFromCtx(r.Context())
-	if role != domain.UserRoleOperator {
-		respondWithError(w, "Только оператор может выполнять это действие", "FORBIDDEN", 403)
-		return uuid.Nil, false
-	}
-	return operatorID, true
 }
 
 func decodeJSON(r *http.Request, dest any) error {

@@ -10,9 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
-	"wms/internal/auth"
-	"wms/internal/domain"
 	"wms/internal/ledger"
+	"wms/internal/platform/httputil"
 )
 
 // maxProductIDsPerRequest bounds the product_ids[] array a single request may carry, so
@@ -88,7 +87,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 
 // Сканирование буфферной ячейки - выдает все товары, которые хранятся в данном буфере
 func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -116,7 +115,7 @@ func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
 
 // сканирование товара для добавления - берем товары из буфера для последующего добавления
 func (h *Handler) ScanProduct(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -150,7 +149,7 @@ func (h *Handler) ScanProduct(w http.ResponseWriter, r *http.Request) {
 
 // Сканирование ячейки хранения товара и размещения товара - сканируем мезонин и размещаем туда товар
 func (h *Handler) ScanStorageBin(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -230,22 +229,6 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("putaway.writeJSON encode: %v", err)
 	}
-}
-
-func requireOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	operatorID := auth.UserIDFromCtx(r.Context())
-	if operatorID == uuid.Nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Требуется авторизация")
-		return uuid.Nil, false
-	}
-
-	role := auth.UserRoleFromCtx(r.Context())
-	if role != domain.UserRoleOperator {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "Только оператор может выполнять это действие")
-		return uuid.Nil, false
-	}
-
-	return operatorID, true
 }
 
 func mapServiceError(err error) (status int, code, message string) {
