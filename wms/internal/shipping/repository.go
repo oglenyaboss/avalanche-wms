@@ -372,13 +372,13 @@ func (r *Repository) UpdateOrdersShippedConditional(ctx context.Context, orderID
 			FOR UPDATE
 		)
 		UPDATE wms_inventory.orders o
-		SET status = CASE
+		SET status = (CASE
 				WHEN NOT EXISTS (
 					SELECT 1 FROM wms_inventory.products
 					WHERE order_id = o.order_id AND status != 'SHIPPED'
 				) THEN 'SHIPPED'
 				ELSE 'PARTIALLY_SHIPPED'
-			END,
+			END)::wms_inventory.order_status,
 			updated_at = NOW()
 		WHERE o.order_id IN (SELECT order_id FROM locked)
 		  AND EXISTS (
