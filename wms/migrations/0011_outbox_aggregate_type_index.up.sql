@@ -10,4 +10,9 @@
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_events_aggregate_id_type
 ON public.outbox_events (aggregate_id, aggregate_type);
 
-INSERT INTO public.schema_migrations (version) VALUES (11);
+-- ON CONFLICT keeps the version write idempotent: because this file is not wrapped in a
+-- transaction (CONCURRENTLY forbids it), a crash between the index build and this INSERT
+-- would otherwise leave a re-run hitting the schema_migrations PK (version) on the second
+-- attempt. The index itself is already idempotent via IF NOT EXISTS.
+INSERT INTO public.schema_migrations (version) VALUES (11)
+ON CONFLICT (version) DO NOTHING;

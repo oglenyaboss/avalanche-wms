@@ -259,6 +259,10 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 	// (stable JWT_SECRET; the user persists in the un-restarted DB), and operatorToken would
 	// otherwise mint a brand-new operator.
 
+	// Confirm the WMS serves authed traffic before the assertion under test, so a warming
+	// WMS never surfaces as a misleading CART_EMPTY.
+	waitWMSServingAuthed(t, ctx, env, token, fx.DestinationID)
+
 	// The fix: scan-shipping-buffer reconstructs the cart from DB, so the picked product is
 	// placed (products_placed=1) instead of being stranded with 409 CART_EMPTY.
 	var placed scanShippingBufferData

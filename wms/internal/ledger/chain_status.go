@@ -43,6 +43,9 @@ type RowQuerier interface {
 // ledger-adapter reconciler, not gated here, so the gate never produces timing-dependent
 // 409s on the happy path.
 func CheckChainStatus(ctx context.Context, q RowQuerier, productIDs []uuid.UUID, aggregateType string) error {
+	// No products to gate (e.g. an empty batch): nothing to check, pass. Callers gate
+	// against empty input before reaching here (putaway via ErrInvalidInput, Pick passes
+	// exactly one id), so this is defensive, not a fail-open path.
 	if len(productIDs) == 0 {
 		return nil
 	}

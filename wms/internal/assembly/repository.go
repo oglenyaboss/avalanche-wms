@@ -468,14 +468,21 @@ func (r *Repository) MoveOperatorAssembledToBuffer(ctx context.Context, operator
 
 	seenOrder := make(map[uuid.UUID]struct{})
 	for rows.Next() {
-		var productID, orderID uuid.UUID
+		var productID uuid.UUID
+		// products.order_id is nullable (ON DELETE SET NULL), so scan into a pointer:
+		// decoding a SQL NULL into a non-pointer uuid.UUID would error and 500 the call.
+		var orderID *uuid.UUID
 		if err := rows.Scan(&productID, &orderID); err != nil {
 			return nil, nil, fmt.Errorf("assembly.Repository.MoveOperatorAssembledToBuffer scan: %w", err)
 		}
 		productIDs = append(productIDs, productID)
-		if _, ok := seenOrder[orderID]; !ok {
-			seenOrder[orderID] = struct{}{}
-			orderIDs = append(orderIDs, orderID)
+		// A product whose order was deleted mid-flow still moves to the buffer, but there
+		// is no order to promote (matches the old GetOrderIDsByProductIDs IS NOT NULL filter).
+		if orderID != nil {
+			if _, ok := seenOrder[*orderID]; !ok {
+				seenOrder[*orderID] = struct{}{}
+				orderIDs = append(orderIDs, *orderID)
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
