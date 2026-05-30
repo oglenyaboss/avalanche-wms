@@ -141,6 +141,11 @@ func (f *Flusher) flushSubBatch(ctx context.Context, aggregateType string, msgs 
 }
 
 func (f *Flusher) recordFailure(ctx context.Context, pending []*Message, ids []uuid.UUID, txHash, reason string) error {
+	// DLQ first, then MarkFailed. Trade-off: if MarkFailed fails after a successful
+	// DLQ publish, the retry re-publishes to DLQ (noisy double-publish). The reverse
+	// order (MarkFailed first) silently loses the DLQ entry when DLQ publish fails,
+	// because filterAndMarkPending skips FAILED events — unrecoverable without manual
+	// intervention. Noisy-but-recoverable beats silent-loss.
 	if err := f.dlq.PublishAll(ctx, pending, reason); err != nil {
 		f.log.Error("dlq publish", "reason", reason, "err", err)
 		return fmt.Errorf("dlq publish: %w", err)

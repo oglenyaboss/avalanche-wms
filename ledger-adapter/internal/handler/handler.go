@@ -19,8 +19,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", h.Health)
 }
 
-// Health отвечает 200 если процесс жив. В будущем можно расширить до readiness
-// (проверка pool/kafka reachability) — пока liveness достаточно.
+// Health отвечает 200 если процесс жив.
+// TODO(#50): add readiness probe checking pool/Kafka/RPC reachability
 func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

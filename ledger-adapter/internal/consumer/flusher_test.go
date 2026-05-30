@@ -319,8 +319,9 @@ func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
 	if err == nil {
 		t.Fatal("DLQ publish fail should propagate (transient, block offset commit)")
 	}
+	// DLQ runs before MarkFailed: DLQ fails, so MarkFailed is never reached.
 	if len(st.failed) != 0 {
-		t.Errorf("MarkFailed should NOT run when DLQ fails (reordered), got %d", len(st.failed))
+		t.Errorf("DLQ fails first — MarkFailed should not run, got %d", len(st.failed))
 	}
 	if len(st.committed) != 0 {
 		t.Errorf("no commits expected on DLQ fail, got %d", len(st.committed))
@@ -337,8 +338,10 @@ func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) 
 	if err == nil {
 		t.Fatal("MarkFailed fail should propagate (transient, block offset commit)")
 	}
+	// DLQ-first ordering: the DLQ message is already published before MarkFailed
+	// is attempted, so when MarkFailed fails the DLQ row still exists (count == 1).
 	if len(dq.messages) != 1 {
-		t.Errorf("DLQ should publish before MarkFailed (reordered), got %d", len(dq.messages))
+		t.Errorf("DLQ already published before MarkFailed, expected 1, got %d", len(dq.messages))
 	}
 	if len(st.failed) != 0 {
 		t.Errorf("MarkFailed failed -> no rows marked, got %d", len(st.failed))

@@ -62,7 +62,7 @@ type receivingRepository interface {
 	UpdateShipmentStatus(ctx context.Context, shipmentID uuid.UUID, newStatus, expectedStatus string) error
 	UpdateCargoplaceReceivedAtGate(ctx context.Context, cargoplaceID uuid.UUID, newStatus, expectedStatus string, receivedAt time.Time) error
 	UpdateCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID, newStatus, expectedStatus string) error
-	MarkExpectedAsNotReceived(ctx context.Context, shipmentID uuid.UUID, notReceivedStatus string) error
+	MarkExpectedAsNotReceived(ctx context.Context, shipmentID uuid.UUID, notReceivedStatus string, operatorID uuid.UUID) error
 	CountCargoplaces(ctx context.Context, shipmentID uuid.UUID) (int, error)
 	CountCargoplacesByStatus(ctx context.Context, shipmentID uuid.UUID, status string) (int, error)
 	ListExpectedSKUsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) ([]ExpectedSKU, error)
@@ -186,29 +186,32 @@ func (s *Service) ScanCargoplace(
 		return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", err)
 	}
 
-	shipment, err := s.repo.GetShipmentByID(ctx, shipmentID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanCargoplace get shipment: %w", err)
-	}
-	if shipment.Status != shipmentStatusGateInProgress {
-		return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", ErrShipmentNotInProgress)
-	}
-
-	cp, err := s.repo.GetCargoplaceByShipmentAndCode(ctx, shipmentID, cargoplaceCode)
-	if err != nil {
-		if errors.Is(err, ErrCargoplaceNotInShipment) {
-			return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", err)
-		}
-		return nil, fmt.Errorf("receiving.Service.ScanCargoplace get cargoplace: %w", err)
-	}
-
-	if cp.Status == cargoplaceStatusReceivedAtGate {
-		return nil, fmt.Errorf("receiving.Service.ScanCargoplace: %w", ErrCargoplaceAlreadyReceived)
-	}
-
 	receivedAt := time.Now().UTC()
+	var cp *domain.Cargoplace
+	var shipment *domain.InboundShipment
 	var total, received int
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		var err error
+		shipment, err = txRepo.GetShipmentByID(ctx, shipmentID)
+		if err != nil {
+			return fmt.Errorf("receiving.Service.ScanCargoplace get shipment: %w", err)
+		}
+		if shipment.Status != shipmentStatusGateInProgress {
+			return fmt.Errorf("receiving.Service.ScanCargoplace: %w", ErrShipmentNotInProgress)
+		}
+
+		cp, err = txRepo.GetCargoplaceByShipmentAndCode(ctx, shipmentID, cargoplaceCode)
+		if err != nil {
+			if errors.Is(err, ErrCargoplaceNotInShipment) {
+				return fmt.Errorf("receiving.Service.ScanCargoplace: %w", err)
+			}
+			return fmt.Errorf("receiving.Service.ScanCargoplace get cargoplace: %w", err)
+		}
+
+		if cp.Status == cargoplaceStatusReceivedAtGate {
+			return fmt.Errorf("receiving.Service.ScanCargoplace: %w", ErrCargoplaceAlreadyReceived)
+		}
+
 		if err := txRepo.UpdateCargoplaceReceivedAtGate(
 			ctx,
 			cp.CargoplaceID,
@@ -281,7 +284,7 @@ func (s *Service) AcceptShipment(
 
 	var total, received, notReceived int
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
-		if err := txRepo.MarkExpectedAsNotReceived(ctx, shipmentID, cargoplaceStatusNotReceived); err != nil {
+		if err := txRepo.MarkExpectedAsNotReceived(ctx, shipmentID, cargoplaceStatusNotReceived, operatorID); err != nil {
 			return fmt.Errorf("receiving.Service.AcceptShipment mark not received: %w", err)
 		}
 		if err := txRepo.UpdateShipmentStatus(ctx, shipmentID, shipmentStatusGateClosed, shipmentStatusGateInProgress); err != nil {
@@ -340,25 +343,28 @@ func (s *Service) ScanTableCargoplace(
 		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace: %w", ErrInvalidInput)
 	}
 
-	cargoplace, err := s.repo.GetCargoplaceByID(ctx, cargoplaceID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace get cargoplace: %w", err)
-	}
-	if cargoplace.Status != cargoplaceStatusReceivedAtGate {
-		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace: %w", ErrCargoplaceNotReceivedAtGate)
-	}
-
-	expectedSKUs, err := s.repo.ListExpectedSKUsByCargoplace(ctx, cargoplaceID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.ScanTableCargoplace list expected skus: %w", err)
-	}
-
+	var cargoplace *domain.Cargoplace
+	var expectedSKUs []ExpectedSKU
 	totalExpected := 0
-	for _, expectedSKU := range expectedSKUs {
-		totalExpected += expectedSKU.ExpectedQty
-	}
-
 	if err := s.repo.WithTx(ctx, func(txRepo receivingRepository) error {
+		var err error
+		cargoplace, err = txRepo.GetCargoplaceByID(ctx, cargoplaceID)
+		if err != nil {
+			return fmt.Errorf("receiving.Service.ScanTableCargoplace get cargoplace: %w", err)
+		}
+		if cargoplace.Status != cargoplaceStatusReceivedAtGate {
+			return fmt.Errorf("receiving.Service.ScanTableCargoplace: %w", ErrCargoplaceNotReceivedAtGate)
+		}
+
+		expectedSKUs, err = txRepo.ListExpectedSKUsByCargoplace(ctx, cargoplaceID)
+		if err != nil {
+			return fmt.Errorf("receiving.Service.ScanTableCargoplace list expected skus: %w", err)
+		}
+
+		for _, expectedSKU := range expectedSKUs {
+			totalExpected += expectedSKU.ExpectedQty
+		}
+
 		if err := txRepo.UpdateCargoplaceStatus(ctx, cargoplaceID, cargoplaceStatusTableInProgress, cargoplaceStatusReceivedAtGate); err != nil {
 			if errors.Is(err, ErrCargoplaceNotFound) {
 				return fmt.Errorf("receiving.Service.ScanTableCargoplace: %w", ErrCargoplaceNotReceivedAtGate)

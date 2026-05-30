@@ -115,7 +115,7 @@ func (r *Repository) GetAllocateProductsForSKU(ctx context.Context, skuID uuid.U
 		SELECT product_id, bin_id
 		FROM wms_inventory.products
 		WHERE sku_id = $1 AND status = 'STORED' AND order_id IS NULL
-		ORDER BY created_at
+		ORDER BY created_at, product_id
 		LIMIT $2
 		FOR UPDATE SKIP LOCKED`
 

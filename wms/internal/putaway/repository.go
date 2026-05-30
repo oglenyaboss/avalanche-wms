@@ -79,13 +79,16 @@ func (r *Repository) GetBufferBinByID(ctx context.Context, bufferBinID uuid.UUID
 // размещение в которые через putaway запрещено. Прочие значения рассматриваются как зоны хранения.
 // Сравнение через UPPER(TRIM(...)) — устойчивость к дрифту регистра/пробелов в seed-данных.
 func (r *Repository) GetStorageBinByID(ctx context.Context, storageBinID uuid.UUID) (*domain.Bin, error) {
+	// volume > 0 rejects misconfigured zero-volume bins.
+	// TODO(#50): full fill-level enforcement (volume vs current_fill) is deferred.
 	const query = `
 		SELECT bin_id, warehouse_id, code, section, volume, created_at, updated_at
 		FROM wms_inventory.bins
 		WHERE bin_id = $1
 		  AND section IS NOT NULL
 		  AND UPPER(TRIM(section)) IS DISTINCT FROM 'BUFFER'
-		  AND UPPER(TRIM(section)) IS DISTINCT FROM 'SHIPPING_BUFFER'`
+		  AND UPPER(TRIM(section)) IS DISTINCT FROM 'SHIPPING_BUFFER'
+		  AND volume > 0`
 	var bin domain.Bin
 	err := r.q.QueryRow(ctx, query, storageBinID).Scan(&bin.BinID, &bin.WarehouseID, &bin.Code, &bin.Section, &bin.Volume, &bin.CreatedAt, &bin.UpdatedAt)
 	if err != nil {
