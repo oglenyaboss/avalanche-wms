@@ -76,6 +76,12 @@ func Load() (*Config, error) {
 	if c.ReconcileMinAge <= c.ReceiptPollTimeout {
 		return nil, fmt.Errorf("RECONCILE_MIN_AGE (%s) must be > RECEIPT_POLL_TIMEOUT (%s): a shorter min-age lets the reconcile loop race the flusher's in-flight WaitReceipt", c.ReconcileMinAge, c.ReceiptPollTimeout)
 	}
+	// time.ParseDuration accepts "0s"/"-5s" without error, so getDurationDefault keeps
+	// them verbatim. A non-positive interval would panic time.NewTicker in the reconcile
+	// loop (reconcile.go) — crashing the process inside the errgroup. Reject at startup.
+	if c.ReconcileInterval <= 0 {
+		return nil, fmt.Errorf("RECONCILE_INTERVAL (%s) must be > 0", c.ReconcileInterval)
+	}
 	return c, nil
 }
 
