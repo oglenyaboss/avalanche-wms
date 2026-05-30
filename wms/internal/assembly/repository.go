@@ -147,7 +147,7 @@ func (r *Repository) GetSKUByID(ctx context.Context, skuID uuid.UUID) (*domain.S
 	err := r.q.QueryRow(ctx, query, skuID).Scan(&sku.SKUID, &sku.Name)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrInsufficientStock
+			return nil, ErrSKUNotFound
 		}
 		return nil, fmt.Errorf("assembly.Repository.GetSKUByID scan: %w", err)
 	}
@@ -178,12 +178,15 @@ func (r *Repository) GetBinSectionByID(ctx context.Context, binID uuid.UUID) (st
 		FROM wms_inventory.bins
 		WHERE bin_id = $1`
 
-	var section string
+	var section *string
 	err := r.q.QueryRow(ctx, query, binID).Scan(&section)
 	if err != nil {
 		return "", fmt.Errorf("assembly.Repository.GetBinSectionByID scan: %w", err)
 	}
-	return section, nil
+	if section == nil {
+		return "", nil
+	}
+	return *section, nil
 }
 
 // BatchInsertAssemblyTasks создает tasks для аллоцированных товаров

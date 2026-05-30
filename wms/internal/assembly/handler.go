@@ -237,6 +237,8 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusNotFound, "DESTINATION_NOT_FOUND", "магазин не найден"
 	case errors.Is(err, ErrOrderNotNew):
 		return http.StatusConflict, "ORDER_NOT_NEW", "Заказ не в статусе NEW"
+	case errors.Is(err, ErrSKUNotFound):
+		return http.StatusNotFound, "SKU_NOT_FOUND", "SKU не найден"
 	case errors.Is(err, ErrInsufficientStock):
 		return http.StatusUnprocessableEntity, "INSUFFICIENT_STOCK", "Недостаточно товара на складе"
 	case errors.Is(err, ErrNoTaskForProduct):

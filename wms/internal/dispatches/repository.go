@@ -143,7 +143,10 @@ func (r *Repository) GetDispatchByID(ctx context.Context, dispID uuid.UUID) (dom
 		&result.UpdatedAt,
 	)
 	if err != nil {
-		return domain.OutboundDispatch{}, err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.OutboundDispatch{}, ErrDispatchNotFound
+		}
+		return domain.OutboundDispatch{}, fmt.Errorf("dispatches.Repository.GetDispatchByID: %w", err)
 	}
 	return result, nil
 }

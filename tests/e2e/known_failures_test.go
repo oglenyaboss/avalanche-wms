@@ -2,7 +2,15 @@
 
 package e2e
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+)
 
 // These tests document known product defects in the WMS <-> chain integration.
 // They are intentionally skipped: the fault injection is NOT implemented, only
@@ -130,42 +138,160 @@ func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 	// never stranded once its items have shipped.
 }
 
-// TestReceivingOpenBoxReachesChain_pendingFix documents a HIGH WMS<->chain divergence:
-// close-cargoplace emits a receiving outbox event for every RECEIVED product regardless
-// of its box (receiving/repository.go listProductIDsByCargoplaceTx has no box-status
-// filter), but ScanBuffer only moves products whose box is CLOSED. A product left in an
-// OPEN box keeps bin_id NULL yet gets an Accepted(1) on-chain transition — it is on-chain
-// but physically unplaceable, so putaway can never find it.
-func TestReceivingOpenBoxReachesChain_pendingFix(t *testing.T) {
-	t.Skip("documents Receiving BUG-1 (open-box product reaches chain); pending product fix")
+// TestReceivingOpenBoxReachesChain documents a HIGH WMS<->chain divergence
+// (Receiving-1): close-cargoplace must NOT emit a receiving outbox event for a
+// product that is still in an OPEN box. ScanBuffer only places (sets bin_id for)
+// products whose box is CLOSED, so an open-box product keeps bin_id NULL; if
+// close-cargoplace nonetheless emits its outbox event, the product gets an
+// on-chain Accepted transition while being physically unplaceable, and putaway
+// can never surface it.
+//
+// Expected RED on dev / GREEN on fix:
+//   - dev: receiving.Repository.listProductIDsByCargoplaceTx selects every
+//     RECEIVED product of the cargoplace with no box-status filter, so close-
+//     cargoplace inserts a 'receiving' outbox event for the open-box product
+//     P — outboxCountForAggregate(P,"receiving") >= 1.
+//   - fix: the query JOINs boxes and requires b.status='CLOSED', so the open-box
+//     product P is excluded from the emit list — outboxCountForAggregate(P,
+//     "receiving") == 0.
+//
+// close-cargoplace returns 200 on both branches (the fix only narrows the emit
+// list; it adds no precondition), so the flow drives entirely through postJSON.
+// The only product-level receiving outbox insert is this close-cargoplace path
+// (insertOutboxEventsTx), so the count for P is exactly the open-box leak.
+func TestReceivingOpenBoxReachesChain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
 
-	// Reproduction (pure HTTP — implement to flip live):
-	//  1. scan-cargoplace; scan-box (B OPEN); scan-sku; scan-qr (product P RECEIVED, in box B).
-	//  2. Do NOT close-box. POST /receiving/table/scan-buffer -> products_placed=0 (P stays bin_id NULL).
-	//  3. POST /receiving/table/close-cargoplace -> outbox_events_created>=1 (an event for P).
-	//  4. Bug: P has bin_id NULL but a receiving event reaches the chain (itemStatus=Accepted),
-	//     and putaway /scan-buffer can never surface it.
-	// Invariant that SHOULD hold: close-cargoplace must NOT emit on-chain events for products
-	// still in OPEN boxes (or must require all boxes closed first), so every on-chain Accepted
-	// item is physically placed and can proceed through putaway.
+	env := testEnv
+	require.NotNil(t, env)
+
+	token := operatorToken(t, env)
+	fixture := newOutboundFixture(t, ctx, env)
+
+	// Move cargoplace to TABLE_IN_PROGRESS.
+	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+	}, nil)
+
+	// Open a box (left OPEN — we deliberately never close it).
+	var box scanBoxData
+	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+		"box_barcode":   fixture.BoxBarcode,
+	}, &box)
+
+	// Scan the SKU and the QR so product P is RECEIVED inside the OPEN box.
+	var sku scanSKUData
+	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+		"box_id":        box.BoxID.String(),
+		"barcode":       fixture.Barcode,
+	}, &sku)
+
+	var qr scanQRData
+	postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+		"box_id":        box.BoxID.String(),
+		"sku_id":        sku.SKUID.String(),
+		"qr_code":       fixture.QRCode,
+	}, &qr)
+	require.Equal(t, "RECEIVED", qr.Status)
+	requireProductStatus(t, ctx, env, qr.ProductID, "RECEIVED")
+
+	// Do NOT close-box. scan-buffer places only CLOSED-box products, so the open-box
+	// product P is not placed: products_placed must be 0 and P keeps bin_id NULL.
+	var placed scanStorageBinData
+	postJSON(t, env, token, "/receiving/table/scan-buffer", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+		"buffer_bin_id": fixture.ReceivingBinID.String(),
+	}, &placed)
+	require.Equal(t, 0, placed.ProductsPlaced, "open-box product must not be placed by scan-buffer")
+
+	var binID *uuid.UUID
+	err := env.db.QueryRow(ctx, `
+		SELECT bin_id FROM wms_inventory.products WHERE product_id = $1`, qr.ProductID).Scan(&binID)
+	require.NoError(t, err)
+	require.Nil(t, binID, "open-box product must still have bin_id NULL after scan-buffer")
+
+	// close-cargoplace (200 on both branches). On dev it emits a receiving event
+	// for P; on fix it filters P out.
+	var closed closeCargoplaceData
+	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+	}, &closed)
+
+	// Invariant: no receiving outbox event may exist for the open-box product P.
+	count := outboxCountForAggregate(t, ctx, env, qr.ProductID, "receiving")
+	require.Equalf(t, 0, count,
+		"close-cargoplace emitted %d receiving outbox event(s) for open-box product %s; an OPEN-box product (bin_id NULL) must never reach the chain (Receiving-1)",
+		count, qr.ProductID)
 }
 
 // ─── Defects found in the 2026-05-26 backend audit sweep ────────────────────
 
-// TestDispatchesAuth_CustomerAccess_pendingFix documents Dispatches-1: the three
-// dispatches handlers (GetDispatches, NewDispatch, GetDispatchByID) never call
-// requireOperator, so a CUSTOMER-role JWT can list, create, and look up dispatches.
-// All other modules (receiving/putaway/assembly/shipping) enforce OPERATOR-only.
-func TestDispatchesAuth_CustomerAccess_pendingFix(t *testing.T) {
-	t.Skip("documents Dispatches-1 (missing requireOperator in dispatches handlers); pending product fix")
+// TestDispatchesAuth_CustomerAccess documents Dispatches-1: the three dispatches
+// handlers (GetDispatches, NewDispatch, GetDispatchByID) must reject a CUSTOMER-role
+// JWT with 403 FORBIDDEN, like every other protected module (receiving/putaway/
+// assembly/shipping).
+//
+// Expected RED on dev / GREEN on fix:
+//   - dev: none of the dispatches handlers call requireOperator, so a valid
+//     CUSTOMER token passes straight through: GET /dispatches/ returns 200, POST
+//     /dispatches/ returns 200/4xx-from-body, and GET /dispatches/{id} returns
+//     200/4xx — never 403.
+//   - fix: each handler calls requireOperator first, returning 403 FORBIDDEN for
+//     any non-OPERATOR role before any body parsing or lookup.
+//
+// requireOperator runs before body parsing and before any DB lookup, so the dummy
+// body and the random {dispatch_id} never need to be valid: the 403 is decided
+// purely by the CUSTOMER role.
+func TestDispatchesAuth_CustomerAccess(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
-	// Reproduction (pure HTTP — add dispatches endpoints to TestAuth_OperatorOnlyEndpoints):
-	//  1. Authenticate as CUSTOMER: POST /auth/login {username:"customer",password:"customer"}.
-	//  2. GET /dispatches/ with the CUSTOMER token → currently 200 (should be 403 FORBIDDEN).
-	//  3. POST /dispatches/ with a valid destination_id → currently 200 (should be 403).
-	//  4. GET /dispatches/{existing-id} → currently 200 (should be 403).
-	// Invariant that SHOULD hold: dispatches handlers must call requireOperator like
-	// all other protected handlers, returning 403 FORBIDDEN for non-OPERATOR roles.
+	env := testEnv
+	require.NotNil(t, env)
+
+	// CUSTOMER token: authenticated but wrong role -> must be 403 FORBIDDEN.
+	customerToken := loginAs(t, env, "customer", "customer")
+
+	// getStatusForbidden issues a GET with the CUSTOMER token and asserts 403.
+	// Mirrors the manual request style of TestDispatches_GetByID_NotFound: the dev
+	// 200 (or any non-403) body is not guaranteed to be enveloped, so we assert on
+	// the status code only.
+	getStatusForbidden := func(t *testing.T, path string) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, env.wmsURL+path, nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+customerToken)
+
+		resp, err := env.httpClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equalf(t, http.StatusForbidden, resp.StatusCode,
+			"GET %s with CUSTOMER token must be 403 FORBIDDEN (Dispatches-1)", path)
+	}
+
+	t.Run("GET /dispatches/ -> 403 FORBIDDEN", func(t *testing.T) {
+		getStatusForbidden(t, "/dispatches/")
+	})
+
+	t.Run("POST /dispatches/ -> 403 FORBIDDEN", func(t *testing.T) {
+		// requireOperator rejects before the body is parsed; the destination_id is
+		// well-formed only so the request is otherwise valid. dispatches'
+		// respondWithError emits the standard {success:false, error:{code,message}}
+		// envelope, so postExpectError can decode the 403 error.code.
+		status, code, _ := postExpectError(t, env, customerToken, "/dispatches/", map[string]string{
+			"destination_id": uuid.NewString(),
+		})
+		require.Equal(t, http.StatusForbidden, status)
+		require.Equal(t, "FORBIDDEN", code)
+	})
+
+	t.Run("GET /dispatches/{id} -> 403 FORBIDDEN", func(t *testing.T) {
+		getStatusForbidden(t, "/dispatches/"+uuid.NewString())
+	})
 }
 
 // TestAdapterN9_IntraBatchDuplicate_pendingFix documents N9: if Kafka redelivers

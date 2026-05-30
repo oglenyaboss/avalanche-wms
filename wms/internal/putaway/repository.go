@@ -85,6 +85,7 @@ func (r *Repository) GetStorageBinByID(ctx context.Context, storageBinID uuid.UU
 		SELECT bin_id, warehouse_id, code, section, volume, created_at, updated_at
 		FROM wms_inventory.bins
 		WHERE bin_id = $1
+		  AND section IS NOT NULL
 		  AND UPPER(TRIM(section)) IS DISTINCT FROM 'BUFFER'
 		  AND UPPER(TRIM(section)) IS DISTINCT FROM 'SHIPPING_BUFFER'
 		  AND volume > 0`

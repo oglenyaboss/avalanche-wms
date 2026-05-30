@@ -408,6 +408,10 @@ func (r *Repository) UpdateDispatchDeparted(ctx context.Context, dispatchID uuid
 		return fmt.Errorf("shipping.Repository.UpdateDispatchDeparted exec: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		var status string
+		if serr := r.q.QueryRow(ctx, `SELECT status FROM wms_inventory.outbound_dispatches WHERE dispatch_id = $1`, dispatchID).Scan(&status); serr == nil && status == "DEPARTED" {
+			return fmt.Errorf("shipping.Repository.UpdateDispatchDeparted: %w", ErrDispatchAlreadyDeparted)
+		}
 		return fmt.Errorf("shipping.Repository.UpdateDispatchDeparted: %w", ErrDispatchNotAtGate)
 	}
 

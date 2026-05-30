@@ -275,16 +275,19 @@ func TestShipping_DestinationMismatch(t *testing.T) {
 }
 
 // TestDispatches_GetByID_NotFound issues GET /dispatches/{random-uuid} for a
-// nonexistent dispatch. Per Shipping-5 (BUGHUNT.md), the server currently returns
-// 503 because pgx.ErrNoRows is unmapped; the correct response would be 404.
+// nonexistent dispatch and asserts 404 NOT FOUND (Shipping-5).
 //
-// This test asserts only that the status is NOT 200, and logs the actual status so
-// the failure mode is documented. Once the product bug is fixed, tighten the
-// assertion to 404.
+// Expected RED on dev / GREEN on fix:
+//   - dev: dispatches.Repository.GetDispatchByID returns the raw pgx.ErrNoRows,
+//     which the handler maps to a generic 503 INTERNAL_ERROR — a nonexistent row
+//     is reported as a server error.
+//   - fix: the repository maps pgx.ErrNoRows to ErrDispatchNotFound and the
+//     handler returns 404, so a missing dispatch is correctly a client-side
+//     not-found.
 //
-// NOTE: we do NOT use getExpectError here because the 503 response may not follow
-// the standard envelope format (the bug is that the error is unmapped, so the
-// handler may return a raw body rather than {success, error}).
+// We assert on the HTTP status only (not the error envelope): the dev 503 body
+// is the unmapped error and is not guaranteed to follow the {success, error}
+// envelope, so the status code is the single robust signal of the fix.
 func TestDispatches_GetByID_NotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -307,12 +310,6 @@ func TestDispatches_GetByID_NotFound(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
-	// The response MUST NOT be 200 (a nonexistent dispatch is not a success).
-	require.NotEqualf(t, http.StatusOK, resp.StatusCode,
-		"GET %s for nonexistent dispatch should not return 200; body: %s", path, string(body))
-
-	// Document the actual status for visibility. Once Shipping-5 is fixed, change
-	// to: require.Equal(t, http.StatusNotFound, resp.StatusCode)
-	t.Logf("GET %s returned status %d (expected 404 once Shipping-5 is fixed); body: %s",
-		path, resp.StatusCode, string(body))
+	require.Equalf(t, http.StatusNotFound, resp.StatusCode,
+		"GET %s for nonexistent dispatch must return 404 (Shipping-5); body: %s", path, string(body))
 }
