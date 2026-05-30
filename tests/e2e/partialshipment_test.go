@@ -80,10 +80,13 @@ func TestPartialShipment_MofN(t *testing.T) {
 	}, &firstShip)
 	require.Equal(t, len(firstBatch), firstShip.ProductsShipped)
 	require.Equal(t, 0, firstShip.OrdersCompleted, "order must not complete while products remain")
+	require.Equal(t, 1, firstShip.OrdersPartiallyShipped, "order flips to PARTIALLY_SHIPPED after a partial ship (#48)")
 	require.False(t, firstShip.DispatchDeparted, "dispatch must not depart while the buffer is non-empty")
 	require.Equal(t, len(remainder), firstShip.BufferRemaining)
 
-	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
+	// #48: a partly-shipped order is PARTIALLY_SHIPPED (previously it misleadingly
+	// stayed ASSEMBLED, looking as though nothing had shipped).
+	requireOrderStatus(t, ctx, env, fx.OrderID, "PARTIALLY_SHIPPED")
 	requireDispatchStatus(t, ctx, env, fx.DispatchID, "AT_GATE")
 	for _, pid := range firstBatch {
 		parsed, err := uuid.Parse(pid)

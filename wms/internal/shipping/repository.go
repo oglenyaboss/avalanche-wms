@@ -352,32 +352,102 @@ func (r *Repository) BatchInsertShippingOutbox(
 	return int(tag.RowsAffected()), nil
 }
 
-func (r *Repository) UpdateOrdersShippedConditional(ctx context.Context, orderIDs []uuid.UUID) (int, error) {
+// UpdateOrdersShippedConditional advances every affected order that now has at least
+// one SHIPPED product (issue #48). An order whose products are ALL shipped becomes
+// SHIPPED; an order with only some shipped becomes PARTIALLY_SHIPPED. The candidate set
+// spans ALLOCATED/ASSEMBLED/PARTIALLY_SHIPPED so that (a) an order whose items were
+// shipped before it ever reached ASSEMBLED is never stranded, and (b) a re-entrant
+// ship on an already-partially-shipped order can advance it to SHIPPED. Orders with
+// no shipped product are left untouched. Returns (completed=SHIPPED, partial=PARTIALLY_SHIPPED).
+//
+// The lock and the decision are deliberately two statements, not one CTE. Under READ
+// COMMITTED a single statement evaluates its products subqueries against the snapshot
+// taken at statement start, which does not observe a concurrent ship's committed product
+// rows (Postgres only re-reads the row it is updating, not other rows it reads). Two
+// operators shipping different products of the same order from different buffer bins could
+// then both compute PARTIALLY_SHIPPED and strand the order. Splitting it makes the SELECT
+// ... FOR UPDATE block until the competing ship commits; the separate UPDATE then takes a
+// fresh snapshot that sees the now-committed products and resolves to SHIPPED. (Locking the
+// products in the CTE also closes the gap but deadlocks against SelectProductsForShip.)
+func (r *Repository) UpdateOrdersShippedConditional(ctx context.Context, orderIDs []uuid.UUID) (completed, partial int, err error) {
 	if len(orderIDs) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
-	const query = `
-		WITH locked AS (
-			SELECT order_id FROM wms_inventory.orders
-			WHERE order_id = ANY($1::uuid[]) AND status = 'ASSEMBLED'
-			FOR UPDATE
-		)
-		UPDATE wms_inventory.orders
-		SET status = 'SHIPPED', updated_at = NOW()
-		WHERE order_id IN (SELECT order_id FROM locked)
-		  AND NOT EXISTS (
-			SELECT 1
-			FROM wms_inventory.products
-			WHERE order_id = orders.order_id AND status != 'SHIPPED'
-		  )`
+	// Statement 1: lock the candidate orders. Blocks behind any concurrent ship that
+	// holds these order rows and returns only after that ship has committed. ORDER BY
+	// order_id gives a deterministic lock order so two concurrent calls with overlapping
+	// order sets cannot deadlock.
+	const lockQuery = `
+		SELECT order_id FROM wms_inventory.orders
+		WHERE order_id = ANY($1::uuid[])
+		  AND status IN ('ALLOCATED', 'ASSEMBLED', 'PARTIALLY_SHIPPED')
+		ORDER BY order_id
+		FOR UPDATE`
 
-	tag, err := r.q.Exec(ctx, query, orderIDs)
+	lockRows, err := r.q.Query(ctx, lockQuery, orderIDs)
 	if err != nil {
-		return 0, fmt.Errorf("shipping.Repository.UpdateOrdersShippedConditional exec: %w", err)
+		return 0, 0, fmt.Errorf("shipping.Repository.UpdateOrdersShippedConditional lock: %w", err)
+	}
+	lockedIDs := make([]uuid.UUID, 0, len(orderIDs))
+	for lockRows.Next() {
+		var id uuid.UUID
+		if err := lockRows.Scan(&id); err != nil {
+			lockRows.Close()
+			return 0, 0, fmt.Errorf("shipping.Repository.UpdateOrdersShippedConditional lock scan: %w", err)
+		}
+		lockedIDs = append(lockedIDs, id)
+	}
+	lockRows.Close()
+	if err := lockRows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("shipping.Repository.UpdateOrdersShippedConditional lock rows: %w", err)
+	}
+	if len(lockedIDs) == 0 {
+		return 0, 0, nil
 	}
 
-	return int(tag.RowsAffected()), nil
+	// Statement 2: a fresh snapshot (taken after the lock wait above) now observes every
+	// concurrently shipped product as committed, so the SHIPPED vs PARTIALLY_SHIPPED
+	// decision is consistent. The orders are already locked, so no status filter is needed.
+	const updateQuery = `
+		UPDATE wms_inventory.orders o
+		SET status = (CASE
+				WHEN NOT EXISTS (
+					SELECT 1 FROM wms_inventory.products
+					WHERE order_id = o.order_id AND status != 'SHIPPED'
+				) THEN 'SHIPPED'
+				ELSE 'PARTIALLY_SHIPPED'
+			END)::wms_inventory.order_status,
+			updated_at = NOW()
+		WHERE o.order_id = ANY($1::uuid[])
+		  AND EXISTS (
+			SELECT 1 FROM wms_inventory.products
+			WHERE order_id = o.order_id AND status = 'SHIPPED'
+		  )
+		RETURNING (status = 'SHIPPED')`
+
+	rows, err := r.q.Query(ctx, updateQuery, lockedIDs)
+	if err != nil {
+		return 0, 0, fmt.Errorf("shipping.Repository.UpdateOrdersShippedConditional update: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var isShipped bool
+		if err := rows.Scan(&isShipped); err != nil {
+			return 0, 0, fmt.Errorf("shipping.Repository.UpdateOrdersShippedConditional scan: %w", err)
+		}
+		if isShipped {
+			completed++
+		} else {
+			partial++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("shipping.Repository.UpdateOrdersShippedConditional rows: %w", err)
+	}
+
+	return completed, partial, nil
 }
 
 func (r *Repository) CountReadyToShipProductsInBuffer(ctx context.Context, binID uuid.UUID) (int, error) {

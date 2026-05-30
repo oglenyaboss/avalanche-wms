@@ -12,6 +12,7 @@ import (
 
 	"wms/internal/auth"
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 type Handler struct {
@@ -245,17 +246,16 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "NO_TASK_FOR_PRODUCT", "Нет задачи сборки для этого товара"
 	case errors.Is(err, ErrProductNotAllocated):
 		return http.StatusConflict, "PRODUCT_NOT_ALLOCATED", "Товар не в статусе ALLOCATED"
+	case errors.Is(err, ledger.ErrChainEventRejected):
+		return http.StatusConflict, "CHAIN_EVENT_REJECTED", "Подбор отклонён: размещение товара не подтверждено в блокчейне (FAILED)"
 	case errors.Is(err, ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_REQUEST", "Невалидные входные данные"
 	case errors.Is(err, ErrBinNotShippingBuffer):
 		return http.StatusBadRequest, "BIN_NOT_SHIPPING_BUFFER", "Ячейка не является буфером отгрузки"
 	case errors.Is(err, ErrCartEmpty):
 		return http.StatusConflict, "CART_EMPTY", "Корзина оператора пуста"
-	case errors.Is(err, ErrDestinationMismatch):
-		return http.StatusConflict, "DESTINATION_MISMATCH", "Товары в корзине принадлежат другому магазину"
-	case errors.Is(err, ErrPartialPlacement):
-		return http.StatusConflict, "PARTIAL_PLACEMENT", "Не все товары из корзины были размещены"
 	default:
+		log.Printf("assembly: unmapped service error -> 500: %v", err)
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"
 	}
 }

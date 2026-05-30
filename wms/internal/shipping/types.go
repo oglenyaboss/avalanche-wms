@@ -36,6 +36,9 @@ type ShipResponse struct {
 	OutboxEventsCreated int `json:"outbox_events_created"`
 	// OrdersCompleted показывает количество заказов, переведённых в статус SHIPPED после отгрузки.
 	OrdersCompleted int `json:"orders_completed"`
+	// OrdersPartiallyShipped показывает количество заказов, переведённых в PARTIALLY_SHIPPED
+	// (часть товаров отгружена, часть ещё в буфере) в этом запросе.
+	OrdersPartiallyShipped int `json:"orders_partially_shipped"`
 	// DispatchDeparted показывает, был ли буфер очищен и переведён ли рейс в DEPARTED.
 	DispatchDeparted bool `json:"dispatch_departed"`
 	// BufferRemaining показывает количество товаров READY_TO_SHIP, оставшихся в буфере после отгрузки.

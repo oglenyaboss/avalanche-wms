@@ -556,10 +556,12 @@ func TestFullChain_PartialShip(t *testing.T) {
 	}, &shipped)
 	require.Equal(t, 2, shipped.ProductsShipped)
 	require.Equal(t, 0, shipped.OrdersCompleted, "order must not complete while products remain")
+	require.Equal(t, 1, shipped.OrdersPartiallyShipped, "order flips to PARTIALLY_SHIPPED after a partial ship (#48)")
 	require.False(t, shipped.DispatchDeparted, "dispatch must not depart while buffer is non-empty")
 	require.Equal(t, 1, shipped.BufferRemaining)
 
-	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
+	// #48: partly-shipped order is PARTIALLY_SHIPPED, not ASSEMBLED.
+	requireOrderStatus(t, ctx, env, fx.OrderID, "PARTIALLY_SHIPPED")
 	requireDispatchStatus(t, ctx, env, fx.DispatchID, "AT_GATE")
 
 	// Wait for shipping events for shipped products → Shipped(4).

@@ -32,8 +32,9 @@ type mockShippingRepo struct {
 	shipProducts    []ProductForShip
 	shipProductsErr error
 
-	ordersCompleted int
-	updateOrdersErr error
+	ordersCompleted        int
+	ordersPartiallyShipped int
+	updateOrdersErr        error
 
 	bufferRemaining int
 	countErr        error
@@ -143,12 +144,12 @@ func (m *mockShippingRepo) BatchInsertShippingOutbox(
 	return len(events), nil
 }
 
-func (m *mockShippingRepo) UpdateOrdersShippedConditional(_ context.Context, orderIDs []uuid.UUID) (int, error) {
+func (m *mockShippingRepo) UpdateOrdersShippedConditional(_ context.Context, orderIDs []uuid.UUID) (int, int, error) {
 	m.updatedOrderIDs = append([]uuid.UUID(nil), orderIDs...)
 	if m.updateOrdersErr != nil {
-		return 0, m.updateOrdersErr
+		return 0, 0, m.updateOrdersErr
 	}
-	return m.ordersCompleted, nil
+	return m.ordersCompleted, m.ordersPartiallyShipped, nil
 }
 
 func (m *mockShippingRepo) CountReadyToShipProductsInBuffer(_ context.Context, _ uuid.UUID) (int, error) {
@@ -636,9 +637,11 @@ func TestShipPartialOrderKeepsOrderOpen(t *testing.T) {
 			Status:        domain.OutboundDispatchStatusAtGate,
 		},
 		shipProducts: []ProductForShip{{ProductID: productID, OrderID: &orderID}},
-		// Repository returns 0 when the order still has non-SHIPPED products.
-		ordersCompleted: 0,
-		bufferRemaining: 0,
+		// Order still has non-SHIPPED products: the repository reports it as
+		// partially shipped (completed=0, partial=1) rather than completed (issue #48).
+		ordersCompleted:        0,
+		ordersPartiallyShipped: 1,
+		bufferRemaining:        0,
 	}
 
 	result, err := NewService(repo).Ship(context.Background(), ShipRequest{
@@ -655,6 +658,9 @@ func TestShipPartialOrderKeepsOrderOpen(t *testing.T) {
 	}
 	if result.OrdersCompleted != 0 {
 		t.Fatalf("expected no completed orders, got %d", result.OrdersCompleted)
+	}
+	if result.OrdersPartiallyShipped != 1 {
+		t.Fatalf("expected 1 partially shipped order, got %d", result.OrdersPartiallyShipped)
 	}
 	assertSameUUIDs(t, repo.updatedOrderIDs, []uuid.UUID{orderID})
 	assertShippingEventsMatch(t, repo.insertedShippings, repo.insertedOutbox, []uuid.UUID{productID})

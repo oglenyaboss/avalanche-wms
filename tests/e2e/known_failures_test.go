@@ -17,23 +17,57 @@ import (
 // the intended invariant is described, so the suite stays green while the gap is
 // tracked. Remove the Skip and implement the body once the product is fixed.
 
-// TestS1_WMSChainDivergence_pendingFix documents S1: WMS never reads
-// onchain_events.status, so an on-chain FAILED transition does not roll WMS back.
+// TestS1_WMSChainDivergence_pendingFix is the live regression for the S1 putaway gate
+// (#45): once a product's receiving event is FAILED on-chain, the WMS must refuse to
+// advance that product to putaway instead of silently diverging from the ledger.
+//
+// Scope: this MR adds the putaway and pick gates, which stop the divergence cascade at
+// its source — a product blocked at putaway never reaches assembly or shipping. The ship
+// gate and read-path chain_synced enrichment are tracked as #45 follow-ups.
 func TestS1_WMSChainDivergence_pendingFix(t *testing.T) {
-	t.Skip("documents S1; pending product fix")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
 
-	// Intended assertions (NOT yet implementable without fault injection):
-	//
-	// 1. Drive a product through a stage (e.g. receiving) so an outbox event is
-	//    emitted and the adapter submits it on-chain.
-	// 2. Force the on-chain transition to FAIL (e.g. inject an invalid FSM
-	//    transition or a revert), so onchain_events.status becomes FAILED.
-	// 3. Invariant that SHOULD hold but currently does NOT:
-	//      - When onchain_events.status = 'FAILED' for a product's stage event,
-	//        the product's WMS status MUST NOT advance past that stage.
-	//    Today WMS advances regardless because it never consults
-	//    onchain_events.status, so WMS and chain diverge. Assert the product
-	//    status is rolled back / held, and surface the divergence.
+	env := testEnv
+	require.NotNil(t, env)
+
+	token := operatorToken(t, env)
+	fixture := newOutboundFixture(t, ctx, env)
+
+	// 1. Drive the product through the full receiving flow → RECEIVED in BUFFER-01,
+	//    emitting a real receiving outbox event.
+	productID := driveReceivingToBuffer(t, env, token, fixture)
+	requireProductStatus(t, ctx, env, productID, "RECEIVED")
+
+	// 2. Wait for the receiving event to COMMIT on-chain, THEN force it FAILED
+	//    (simulating a chain revert / DLQ). Forcing before the row exists would be a
+	//    no-op, so the wait is load-bearing.
+	receivingEventID := eventIDForAggregate(t, ctx, env, productID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, receivingEventID, "receiving")
+	setOnchainStatus(t, ctx, env, receivingEventID, "FAILED")
+
+	// 3. The operator can still scan into the putaway cart, but placement must be gated:
+	//    scan-storage-bin → 409 CHAIN_EVENT_REJECTED.
+	postJSON[map[string]any](t, env, token, "/putaway/scan-buffer", map[string]string{
+		"buffer_bin_id": fixture.ReceivingBinID.String(),
+	}, nil)
+	postJSON[map[string]any](t, env, token, "/putaway/scan-product", map[string]string{
+		"product_id":    productID.String(),
+		"buffer_bin_id": fixture.ReceivingBinID.String(),
+	}, nil)
+
+	status, code, _ := postExpectError(t, env, token, "/putaway/scan-storage-bin", map[string]any{
+		"product_ids":    []string{productID.String()},
+		"storage_bin_id": fixture.StorageBinID.String(),
+	})
+	require.Equal(t, http.StatusConflict, status)
+	require.Equal(t, "CHAIN_EVENT_REJECTED", code)
+
+	// 4. The product must NOT advance past RECEIVED and no putaway outbox event may be
+	//    emitted — WMS and chain do not diverge.
+	requireProductStatus(t, ctx, env, productID, "RECEIVED")
+	require.Equal(t, 0, outboxCountForAggregate(t, ctx, env, productID, "putaway"),
+		"gated putaway must not emit a putaway outbox event")
 }
 
 // TestS2_AdapterCrashRecovery_pendingFix exercises the S2 fix (#44): a redelivered
@@ -186,23 +220,59 @@ func TestS3_BatchPoisoning_pendingFix(t *testing.T) {
 // implementing the body once the product is fixed; see tests/e2e/BUGHUNT.md for the
 // full backlog (severity, file:line, and the deferred lower-severity findings).
 
-// TestAssemblyCartLostOnRestart_pendingFix documents a CRITICAL data-integrity bug:
-// the assembly pick cart lives only in WMS process memory (assembly/service.go:18,
-// 266-270) and no endpoint rebuilds it from the DB. If WMS restarts (or a request
-// lands on another instance) between Pick and ScanShippingBuffer, the picked items
-// are stranded ASSEMBLED with their order ALLOCATED forever — ScanShippingBuffer
-// reads only s.carts (service.go:286) and there is no recovery path.
+// TestAssemblyCartLostOnRestart_pendingFix is the live regression for Assembly BUG-1 (#46):
+// before the fix the pick cart lived only in WMS process memory, so a WMS restart between
+// Pick and ScanShippingBuffer stranded the picked product ASSEMBLED with its order ALLOCATED
+// forever. Now ScanShippingBuffer derives the cart from DB state (the operator's ASSEMBLED
+// products with a DONE task), so the product survives a restart and is placed normally.
 func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
-	t.Skip("documents Assembly BUG-1 (cart not persisted); pending product fix")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
 
-	// Reproduction (needs a wms_app restart, so not pure HTTP):
-	//  1. Allocate an order; POST /assembly/pick for product P (P -> ASSEMBLED, cart=[P]).
-	//  2. Restart WMS:  docker compose -p blockchain_project_e2e restart wms_app
-	//  3. POST /assembly/scan-shipping-buffer {buffer_bin_id} -> 409 CART_EMPTY (cart lost).
-	//  4. P is stuck: products.status='ASSEMBLED', orders.status='ALLOCATED', unrecoverable.
-	// Invariant that SHOULD hold: a restart must not strand picked items — either the
-	// cart is persisted (Redis/DB; see the TODO at service.go:376) or ScanShippingBuffer
-	// rebuilds it from status='ASSEMBLED' products for the destination.
+	env := testEnv
+	require.NotNil(t, env)
+
+	token := operatorToken(t, env)
+	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 1, 1)
+
+	// Allocate and pick the single product (-> ASSEMBLED, task DONE by this operator).
+	var allocated allocateData
+	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+		"destination_id": fx.DestinationID.String(),
+	}, &allocated)
+	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
+
+	orderProductIDs := productIDsForOrder(t, ctx, env, fx.OrderID)
+	require.Len(t, orderProductIDs, 1)
+	productID, err := uuid.Parse(orderProductIDs[0])
+	require.NoError(t, err)
+
+	var picked pickData
+	postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": productID.String()}, &picked)
+	requireProductStatus(t, ctx, env, productID, "ASSEMBLED")
+
+	// Restart the WMS: any in-memory cart is dropped here.
+	restartWMS(t, ctx, env)
+
+	// Reuse the SAME operator token: the derived cart is scoped to assembly_tasks.operator_id,
+	// so it must match the operator that picked. The JWT is stateless and survives the restart
+	// (stable JWT_SECRET; the user persists in the un-restarted DB), and operatorToken would
+	// otherwise mint a brand-new operator.
+
+	// Confirm the WMS serves authed traffic before the assertion under test, so a warming
+	// WMS never surfaces as a misleading CART_EMPTY.
+	waitWMSServingAuthed(t, ctx, env, token, fx.DestinationID)
+
+	// The fix: scan-shipping-buffer reconstructs the cart from DB, so the picked product is
+	// placed (products_placed=1) instead of being stranded with 409 CART_EMPTY.
+	var placed scanShippingBufferData
+	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
+		"buffer_bin_id": fx.ShippingBinID.String(),
+	}, &placed)
+	require.Equal(t, 1, placed.ProductsPlaced, "picked product must survive a WMS restart (cart derived from DB)")
+
+	requireProductStatus(t, ctx, env, productID, "READY_TO_SHIP")
+	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 }
 
 // TestAdapterN1_ReceiptTimeoutDivergence_pendingFix documents a CRITICAL bug found in
@@ -259,26 +329,80 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 		"COMMITTED row has no tx_hash; reconcile must reuse the mined tx")
 }
 
-// TestShippingShipBeforeAssembled_pendingFix documents a HIGH bug: Ship gates on
-// product status (READY_TO_SHIP) but never on order status — shipping/service.go:147
-// selects products by status only, and UpdateOrdersShippedConditional only flips orders
-// already ASSEMBLED. If only SOME of an order's products are READY_TO_SHIP while the
-// order is still ALLOCATED, shipping them succeeds but the order can never reach SHIPPED.
+// TestShippingShipBeforeAssembled_pendingFix is the live regression for Shipping-2 (#48):
+// an order whose items are shipped before it ever reaches ASSEMBLED must NOT be stranded
+// in ALLOCATED. Before the fix, UpdateOrdersShippedConditional only advanced ASSEMBLED
+// orders, so shipping a subset of an ALLOCATED order left it ALLOCATED forever. After the
+// fix, the order moves to PARTIALLY_SHIPPED — a non-terminal state from which it still
+// completes to SHIPPED (PARTIALLY_SHIPPED -> SHIPPED is covered by TestPartialShipment_MofN).
+//
+// Pure-HTTP / DB-contract test: newMultiProductFixture inserts synthetic STORED products
+// with no chain history, so their picking/shipping events revert on-chain and never COMMIT.
+// The WMS commits its DB transaction before the chain is touched and the ship path is not
+// chain-gated, so the HTTP flow succeeds and every assertion is DB-only.
 func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
-	t.Skip("documents Shipping BUG-2 (order stuck ALLOCATED after partial ship); pending product fix")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
 
-	// Reproduction (pure HTTP — implement with newMultiProductFixture to flip live):
-	//  1. newMultiProductFixture(SHOP-7, storedCount=2, orderQty=2); allocate (order ALLOCATED, 2 tasks).
-	//  2. Pick only ONE product P1 (cart=[P1]); leave P2 ALLOCATED/PENDING.
-	//  3. POST /assembly/scan-shipping-buffer -> P1 READY_TO_SHIP, order STAYS ALLOCATED
-	//     (UpdateOrdersToAssembled needs ALL products READY_TO_SHIP).
-	//  4. scan-driver to AT_GATE; POST /shipping/ship {product_ids:[P1]} -> 200, P1 SHIPPED,
-	//     orders_completed=0.
-	//  5. Bug: order is stuck ALLOCATED — UpdateOrdersShippedConditional requires
-	//     status='ASSEMBLED', so it can never become SHIPPED even after P2 ships.
-	// Invariant that SHOULD hold: Ship must reject products whose order is not ASSEMBLED
-	// (or order completion must not require the ASSEMBLED precondition), so an order is
-	// never stranded once its items have shipped.
+	env := testEnv
+	require.NotNil(t, env)
+
+	token := operatorToken(t, env)
+	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 2, 2)
+
+	// Allocate: NEW -> ALLOCATED, two PENDING tasks.
+	var allocated allocateData
+	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+		"destination_id": fx.DestinationID.String(),
+	}, &allocated)
+	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
+
+	orderProductIDs := productIDsForOrder(t, ctx, env, fx.OrderID)
+	require.Len(t, orderProductIDs, 2)
+	p1, err := uuid.Parse(orderProductIDs[0])
+	require.NoError(t, err)
+	p2, err := uuid.Parse(orderProductIDs[1])
+	require.NoError(t, err)
+
+	// Pick ONLY P1; P2 stays ALLOCATED with a PENDING task.
+	var picked pickData
+	postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": p1.String()}, &picked)
+
+	// Scan the shipping buffer: P1 -> READY_TO_SHIP. The order does NOT reach ASSEMBLED
+	// because P2 is still ALLOCATED (UpdateOrdersToAssembled needs every product ready).
+	var placed scanShippingBufferData
+	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
+		"buffer_bin_id": fx.ShippingBinID.String(),
+	}, &placed)
+	require.Equal(t, 1, placed.ProductsPlaced)
+	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
+	requireProductStatus(t, ctx, env, p1, "READY_TO_SHIP")
+	requireProductStatus(t, ctx, env, p2, "ALLOCATED")
+
+	// Bring the dispatch to the gate and ship P1 only.
+	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
+		"buffer_bin_id": fx.ShippingBinID.String(),
+	}, nil)
+	var driver scanDriverData
+	postJSON(t, env, token, "/shipping/scan-driver", map[string]string{
+		"dispatch_code": fx.DispatchCode,
+	}, &driver)
+	require.Equal(t, "AT_GATE", driver.Status)
+
+	var shipped shipData
+	postJSON(t, env, token, "/shipping/ship", map[string]any{
+		"buffer_bin_id": fx.ShippingBinID.String(),
+		"dispatch_id":   fx.DispatchID.String(),
+		"product_ids":   []string{p1.String()},
+	}, &shipped)
+	require.Equal(t, 1, shipped.ProductsShipped)
+	require.Equal(t, 0, shipped.OrdersCompleted, "order is not complete — P2 never shipped")
+	require.Equal(t, 1, shipped.OrdersPartiallyShipped, "order moves to PARTIALLY_SHIPPED, not stranded ALLOCATED")
+
+	requireProductStatus(t, ctx, env, p1, "SHIPPED")
+	requireProductStatus(t, ctx, env, p2, "ALLOCATED")
+	// The fix: before #48 this order was stuck ALLOCATED forever; now it is PARTIALLY_SHIPPED.
+	requireOrderStatus(t, ctx, env, fx.OrderID, "PARTIALLY_SHIPPED")
 }
 
 // TestReceivingOpenBoxReachesChain documents a HIGH WMS<->chain divergence

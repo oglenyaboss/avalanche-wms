@@ -256,6 +256,50 @@ func waitAdapterConsuming(t *testing.T, ctx context.Context, env *env) {
 		adapterConsumingTimeout, warmupEvent)
 }
 
+// wmsContainer is the fixed container_name of the WMS service in docker-compose.yaml,
+// shared by every compose project (an explicit container_name overrides the project prefix).
+const wmsContainer = "wms-service"
+
+// restartWMS restarts the WMS service in place and waits for it to serve again. `docker
+// restart` preserves env, network and volumes — issue #46 needs no env change, only a
+// process restart that drops any in-memory state. It polls /health; callers should then
+// re-fetch their operator token (an authed read) before issuing requests, so they never hit
+// a WMS that answers /health but is not yet serving authenticated traffic. The WMS is a pure
+// outbox producer (no Kafka consumer), so it needs no consumer-readiness warmup like the adapter.
+func restartWMS(t *testing.T, ctx context.Context, env *env) {
+	t.Helper()
+
+	out, err := exec.CommandContext(ctx, "docker", "restart", wmsContainer).CombinedOutput()
+	require.NoErrorf(t, err, "docker restart %s: %s", wmsContainer, strings.TrimSpace(string(out)))
+
+	require.NoErrorf(t, waitForHTTP(ctx, env.httpClient, env.wmsURL+"/health", http.StatusOK, 90*time.Second),
+		"wms-service did not become healthy on %s after restart", env.wmsURL)
+}
+
+// waitWMSServingAuthed proves the WMS serves AUTHENTICATED traffic (JWT middleware + DB
+// pool) after a restart, not merely that /health is 200. Callers pass a token obtained
+// before the restart (valid because the JWT is stateless); a warming WMS that 401s/500s on
+// the first authed request would otherwise surface as a misleading business error (e.g. a
+// spurious CART_EMPTY) instead of an auth/DB-warmup failure.
+func waitWMSServingAuthed(t *testing.T, ctx context.Context, env *env, token string, destinationID uuid.UUID) {
+	t.Helper()
+
+	url := env.wmsURL + "/assembly/tasks?destination_id=" + destinationID.String()
+	require.Eventuallyf(t, func() bool {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return false
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := env.httpClient.Do(req)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode == http.StatusOK
+	}, 30*time.Second, time.Second, "WMS did not serve authenticated requests within 30s after restart")
+}
+
 // inspectAdapter returns the running adapter's image ref and its full env list
 // (KEY=VALUE entries) via `docker inspect`. Used so the recreated container keeps all
 // stable compose-injected config (DB_URL, RPC_URL_FILE, KAFKA_BROKERS, DLQ_TOPIC, …).

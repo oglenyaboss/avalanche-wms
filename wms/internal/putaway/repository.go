@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
 
 type dbTX interface {
@@ -29,6 +30,28 @@ type Repository struct {
 
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db, q: db}
+}
+
+// CheckChainStatus rejects placement when a product's receiving event is FAILED
+// on-chain (issue #45). Call it before the placement transaction (it runs on r.q).
+func (r *Repository) CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error {
+	return ledger.CheckChainStatus(ctx, r.q, productIDs, aggregateType)
+}
+
+// CountReceivedInBuffer counts products currently RECEIVED in the given buffer bin.
+// DB-derived replacement for the in-memory putaway cart counter (issue #46): the cart_size
+// shown after a scan, reconstructed from DB state so it survives a WMS restart.
+func (r *Repository) CountReceivedInBuffer(ctx context.Context, bufferBinID uuid.UUID) (int, error) {
+	const query = `
+		SELECT count(*)
+		FROM wms_inventory.products
+		WHERE bin_id = $1 AND status = 'RECEIVED'`
+
+	var count int
+	if err := r.q.QueryRow(ctx, query, bufferBinID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("putaway.Repository.CountReceivedInBuffer scan: %w", err)
+	}
+	return count, nil
 }
 
 func (r *Repository) WithTx(ctx context.Context, fn func(putawayRepository) error) error {
@@ -246,10 +269,10 @@ func (r *Repository) InsertOutboxEvents(ctx context.Context, params *OutboxEvent
 
 	const query = `
 		INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
-		SELECT event_id, aggregate_id, 'putaway', 'wms.putaway.v1', payload_hash
+		SELECT event_id, aggregate_id, $4::text, 'wms.putaway.v1', payload_hash
 		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
 
-	if _, err := r.q.Exec(ctx, query, params.EventIDs, aggregateIDs, payloadHashes); err != nil {
+	if _, err := r.q.Exec(ctx, query, params.EventIDs, aggregateIDs, payloadHashes, ledger.AggregatePutaway); err != nil {
 		return fmt.Errorf("putaway.Repository.InsertOutboxEvents exec: %w", err)
 	}
 
@@ -266,7 +289,7 @@ func payloadHashForPutaway(productID, storageBinID uuid.UUID) (string, error) {
 	}{
 		ProductID:     productID,
 		StorageBinID:  storageBinID,
-		AggregateType: "putaway",
+		AggregateType: ledger.AggregatePutaway,
 		EventType:     "wms.putaway.v1",
 	}
 
