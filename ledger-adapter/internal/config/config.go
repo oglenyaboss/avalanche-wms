@@ -21,6 +21,8 @@ type Config struct {
 	BatchTimeout       time.Duration
 	DLQTopic           string
 	ReceiptPollTimeout time.Duration
+	ReconcileInterval  time.Duration
+	ReconcileMinAge    time.Duration
 	LogLevel           string
 }
 
@@ -42,6 +44,10 @@ func Load() (*Config, error) {
 		BatchSize:          getIntDefault("BATCH_SIZE", 10),
 		BatchTimeout:       getDurationDefault("BATCH_TIMEOUT", 100*time.Millisecond),
 		ReceiptPollTimeout: getDurationDefault("RECEIPT_POLL_TIMEOUT", 30*time.Second),
+		// Reconcile loop (N1): сверяет stuck SENT/FAILED строки с on-chain receipt'ом.
+		// MinAge должен быть > ReceiptPollTimeout, чтобы не гоняться с in-flight WaitReceipt.
+		ReconcileInterval: getDurationDefault("RECONCILE_INTERVAL", 30*time.Second),
+		ReconcileMinAge:   getDurationDefault("RECONCILE_MIN_AGE", time.Minute),
 	}
 
 	required := []struct {

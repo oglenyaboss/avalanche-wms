@@ -46,7 +46,9 @@ func run(log *slog.Logger) error {
 		"topic", eventsTopic,
 		"contract_addr", cfg.ContractAddr,
 		"batch_size", cfg.BatchSize,
-		"batch_timeout", cfg.BatchTimeout)
+		"batch_timeout", cfg.BatchTimeout,
+		"reconcile_interval", cfg.ReconcileInterval,
+		"reconcile_min_age", cfg.ReconcileMinAge)
 
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -70,6 +72,7 @@ func run(log *slog.Logger) error {
 	defer func() { _ = prod.Close() }()
 
 	flusher := consumer.NewFlusher(cli, repo, prod, cfg.ReceiptPollTimeout, log)
+	reconciler := consumer.NewReconciler(cli, repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log)
 
 	g, gCtx := errgroup.WithContext(rootCtx)
 	g.Go(func() error {
@@ -80,6 +83,11 @@ func run(log *slog.Logger) error {
 			return err
 		}
 		return nil
+	})
+	// Reconcile loop (N1): фоновая сверка stuck SENT/FAILED строк с on-chain receipt'ом.
+	// Read-mostly — НИКОГДА не переотправляет tx; только подтягивает DB к chain-истине.
+	g.Go(func() error {
+		return reconciler.Run(gCtx)
 	})
 
 	srv := startHealthServer(log, cfg.Port)

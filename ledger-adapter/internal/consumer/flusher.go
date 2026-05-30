@@ -24,7 +24,7 @@ type ChainCaller interface {
 // Store — minimal interface к onchain_events repo.
 type Store interface {
 	Exists(ctx context.Context, eventID uuid.UUID) (bool, error)
-	Status(ctx context.Context, eventID uuid.UUID) (string, error)
+	StatusAndTx(ctx context.Context, eventID uuid.UUID) (status, txHash string, err error)
 	InsertPending(ctx context.Context, eventID uuid.UUID, aggType string) error
 	MarkSent(ctx context.Context, ids []uuid.UUID, txHash string) error
 	MarkCommitted(ctx context.Context, ids []uuid.UUID) error
@@ -157,29 +157,63 @@ func (f *Flusher) recordFailure(ctx context.Context, pending []*Message, ids []u
 	return nil
 }
 
+// filterAndMarkPending решает для каждого сообщения: отправить (resubmit/новое),
+// reconcile уже-broadcast'нутую tx, или скипнуть. Ключевое отличие от наивного
+// resubmit'а — событие с уже записанным tx_hash НЕ переотправляется (это сменило бы
+// tx_hash и пометило бы уже-успешную on-chain tx как FAILED — S2). Вместо этого
+// reconcile'им существующую tx по её receipt'у.
 func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]*Message, error) {
 	pending := make([]*Message, 0, len(msgs))
+	// N9: Kafka at-least-once может переотправить тот же event_id в пределах одного
+	// flush-окна. Дедупим, чтобы [id,id] не попал в batch (контракт его и так
+	// скипнет, но грязно — и MarkCommitted([id,id]) трогал бы строку дважды).
+	seen := make(map[uuid.UUID]struct{}, len(msgs))
 	for _, m := range msgs {
+		if _, dup := seen[m.EventID]; dup {
+			f.log.Warn("intra-batch duplicate event_id skipped", "event_id", m.EventID, "aggregate", m.AggregateType)
+			continue
+		}
+		seen[m.EventID] = struct{}{}
+
 		ok, err := f.store.Exists(ctx, m.EventID)
 		if err != nil {
 			return nil, fmt.Errorf("store.exists %s: %w", m.EventID, err)
 		}
-		if ok {
-			status, serr := f.store.Status(ctx, m.EventID)
-			if serr != nil {
-				return nil, fmt.Errorf("store.status %s: %w", m.EventID, serr)
-			}
-			if status == "COMMITTED" || status == "FAILED" {
-				f.log.Info("skip terminal event", "event_id", m.EventID, "aggregate", m.AggregateType, "status", status)
-				continue
-			}
-			f.log.Warn("retrying non-terminal event", "event_id", m.EventID, "aggregate", m.AggregateType, "status", status)
-		} else {
+		if !ok {
+			// Новое событие: PENDING (tx_hash NULL) → отправляем.
 			if err := f.store.InsertPending(ctx, m.EventID, m.AggregateType); err != nil {
 				return nil, fmt.Errorf("insert pending %s: %w", m.EventID, err)
 			}
+			pending = append(pending, m)
+			continue
 		}
-		pending = append(pending, m)
+
+		status, txHash, err := f.store.StatusAndTx(ctx, m.EventID)
+		if err != nil {
+			return nil, fmt.Errorf("store.statusAndTx %s: %w", m.EventID, err)
+		}
+		switch {
+		case status == "COMMITTED":
+			f.log.Info("skip committed event", "event_id", m.EventID, "aggregate", m.AggregateType)
+		case txHash != "":
+			// Уже broadcast'нуто (crash-recovery S2 / receipt-timeout N1). НЕ resubmit:
+			// reconcile существующую tx, tx_hash остаётся стабильным.
+			terminal, rerr := reconcileReceipt(ctx, f.chain, f.store, []uuid.UUID{m.EventID}, txHash, f.log)
+			if rerr != nil {
+				return nil, fmt.Errorf("reconcile %s: %w", m.EventID, rerr)
+			}
+			if !terminal {
+				f.log.Info("redelivered event still mining — left for reconcile loop", "event_id", m.EventID, "tx", txHash)
+			}
+		case status == "FAILED":
+			// FAILED без tx_hash — tx никогда не отправлялась (например EstimateGas
+			// revert). Терминально, не ретраим.
+			f.log.Info("skip failed event without tx", "event_id", m.EventID, "aggregate", m.AggregateType)
+		default:
+			// PENDING без tx_hash — tx ещё не уходила, безопасно отправить.
+			f.log.Warn("resubmitting pending event without tx", "event_id", m.EventID, "aggregate", m.AggregateType, "status", status)
+			pending = append(pending, m)
+		}
 	}
 	return pending, nil
 }
