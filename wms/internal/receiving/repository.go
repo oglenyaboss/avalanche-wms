@@ -866,11 +866,13 @@ func (r *Repository) listProductIDsByCargoplaceTx(
 	cargoplaceID uuid.UUID,
 ) ([]uuid.UUID, error) {
 	const query = `
-		SELECT product_id
-		FROM wms_inventory.products
-		WHERE cargoplace_id = $1
-			AND status = 'RECEIVED'
-		ORDER BY product_id`
+		SELECT p.product_id
+		FROM wms_inventory.products p
+		JOIN wms_inventory.boxes b ON b.box_id = p.box_id
+		WHERE p.cargoplace_id = $1
+			AND p.status = 'RECEIVED'
+			AND b.status = 'CLOSED'
+		ORDER BY p.product_id`
 
 	rows, err := tx.Query(ctx, query, cargoplaceID)
 	if err != nil {
