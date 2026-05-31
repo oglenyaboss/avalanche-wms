@@ -349,6 +349,20 @@ services:
     networks:
       - app_network
 
+  k6:
+    image: grafana/k6:latest
+    profiles: [stress]
+    environment:
+      WMS_URL: http://wms-service:8080
+    volumes:
+      - ./tests/stress:/tests/stress:ro
+    command: run /tests/stress/01-smoke.js
+    networks:
+      - app_network
+    depends_on:
+      wms_app:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   kafka_data:

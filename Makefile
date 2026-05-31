@@ -97,3 +97,19 @@ connector-status:
 
 delete-connector:
 	@curl -X DELETE http://localhost:8083/connectors/outbox-connector
+
+stress-smoke: ## Smoke test (1 VU)
+	k6 run tests/stress/01-smoke.js
+
+stress-health: ## Health check load (up to 200 VUs)
+	k6 run tests/stress/02-health.js
+
+stress-auth: ## Auth endpoints load test
+	k6 run tests/stress/03-auth.js
+
+stress-receiving: ## Receiving gate flow (needs stress-seed.sql)
+	k6 run tests/stress/04-receiving-gate.js
+
+stress-full: ## Full outbound flow (needs seed + env vars)
+	@source <(bash tests/stress/setup/generate-stress-data.sh) && \
+	  k6 run tests/stress/07-full-flow.js

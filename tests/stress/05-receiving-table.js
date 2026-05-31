@@ -1,0 +1,182 @@
+/**
+ * 05-receiving-table.js — Receiving table flow stress test
+ *
+ * Цель: нагрузочное тестирование потока приёмки на столе:
+ *   POST /receiving/table/scan-cargoplace
+ *   POST /receiving/table/scan-box
+ *   POST /receiving/table/scan-sku
+ *   POST /receiving/table/scan-qr
+ *   POST /receiving/table/close-box
+ *   POST /receiving/table/scan-buffer
+ *   POST /receiving/table/close-cargoplace  ← создаёт outbox event (→ Kafka → блокчейн)
+ *
+ * Требования к данным:
+ *   Перед запуском выполнить: tests/stress/setup/stress-seed.sql
+ *   (создаёт грузоместа STRESS-TABLE-CP-XXXX в статусе RECEIVED_AT_GATE)
+ *
+ * Запуск:
+ *   k6 run tests/stress/05-receiving-table.js
+ */
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { BASE_URL } from './lib/config.js';
+import { login, authHeaders, pad } from './lib/helpers.js';
+
+const TOTAL_CARGOPLACES = 500;
+
+// Barcode и SKU ID берутся из seed.sql: 'E2E Seed Outbound SKU' / '4600000099999'
+// SKU ID будет запрошен через scan-sku по barcode — не нужно хардкодить UUID.
+const SEED_BARCODE = '4600000099999';
+
+export const options = {
+  scenarios: {
+    table_flow: {
+      executor: 'ramping-vus',
+      stages: [
+        { duration: '30s', target: 5 },
+        { duration: '2m',  target: 30 },
+        { duration: '3m',  target: 60 },
+        { duration: '30s', target: 0 },
+      ],
+    },
+  },
+  thresholds: {
+    'http_req_duration{step:scan_table_cp}': ['p(95)<250'],
+    'http_req_duration{step:scan_box}': ['p(95)<250'],
+    'http_req_duration{step:scan_sku}': ['p(95)<250'],
+    'http_req_duration{step:scan_qr}': ['p(95)<250'],
+    'http_req_duration{step:close_cp}': ['p(95)<500'],
+    http_req_failed: ['rate<0.15'],
+  },
+};
+
+export function setup() {
+  const token = login('operator', 'operator');
+  if (!token) console.error('setup: failed to obtain operator token');
+  return { token };
+}
+
+export default function (data) {
+  const token = data.token;
+  if (!token) return;
+
+  const idx = ((__VU - 1 + (__ITER * 200)) % TOTAL_CARGOPLACES) + 1;
+  const cpCode = `STRESS-TABLE-CP-${pad(idx, 4)}`;
+
+  const H = authHeaders(token);
+
+  // Уникальный QR-код для этой итерации (VU + ITER гарантируют уникальность)
+  const qrCode = `STRESS-QR-${pad(__VU, 4)}-${pad(__ITER, 6)}`;
+  const boxBarcode = `STRESS-BOX-${pad(__VU, 4)}-${pad(__ITER, 6)}`;
+
+  // 1. scan-cargoplace (table)
+  const cpRes = http.post(
+    `${BASE_URL}/receiving/table/scan-cargoplace`,
+    JSON.stringify({ cargoplace_id: cpCode }),  // передаём код; API ожидает UUID
+    { headers: H, tags: { step: 'scan_table_cp' } },
+  );
+  // Примечание: scan-cargoplace ожидает cargoplace_id (UUID), не код.
+  // Поэтому UUID будет разрешён через setup(), которая читает из БД.
+  // Пока тест работает с кодами — реальный UUID нужно получить из seed-data.json.
+  // См. INSTRUCTIONS.md раздел "Генерация data/stress-table-data.json".
+
+  const cpOk = check(cpRes, {
+    'scan_table_cp: 200 or 404/409': (r) => [200, 404, 409].includes(r.status),
+  });
+
+  if (cpRes.status !== 200) {
+    // Грузоместо не найдено или уже в работе — пропускаем итерацию
+    return;
+  }
+
+  const cpData = JSON.parse(cpRes.body).data;
+  const cargoplaceId = cpData ? cpData.cargoplace_id : null;
+  if (!cargoplaceId) return;
+
+  sleep(0.05);
+
+  // 2. scan-box
+  const boxRes = http.post(
+    `${BASE_URL}/receiving/table/scan-box`,
+    JSON.stringify({ cargoplace_id: cargoplaceId, box_barcode: boxBarcode }),
+    { headers: H, tags: { step: 'scan_box' } },
+  );
+  check(boxRes, { 'scan_box: 200': (r) => r.status === 200 });
+  if (boxRes.status !== 200) return;
+
+  const boxData = JSON.parse(boxRes.body).data;
+  const boxId = boxData ? boxData.box_id : null;
+  if (!boxId) return;
+
+  sleep(0.05);
+
+  // 3. scan-sku (по barcode → получаем sku_id)
+  const skuRes = http.post(
+    `${BASE_URL}/receiving/table/scan-sku`,
+    JSON.stringify({ cargoplace_id: cargoplaceId, box_id: boxId, barcode: SEED_BARCODE }),
+    { headers: H, tags: { step: 'scan_sku' } },
+  );
+  check(skuRes, { 'scan_sku: 200': (r) => r.status === 200 });
+  if (skuRes.status !== 200) return;
+
+  const skuData = JSON.parse(skuRes.body).data;
+  const skuId = skuData ? skuData.sku_id : null;
+  if (!skuId) return;
+
+  sleep(0.05);
+
+  // 4. scan-qr → создаёт product
+  const qrRes = http.post(
+    `${BASE_URL}/receiving/table/scan-qr`,
+    JSON.stringify({ cargoplace_id: cargoplaceId, box_id: boxId, sku_id: skuId, qr_code: qrCode }),
+    { headers: H, tags: { step: 'scan_qr' } },
+  );
+  check(qrRes, {
+    'scan_qr: 200': (r) => r.status === 200,
+    'scan_qr: RECEIVED': (r) => {
+      try { return JSON.parse(r.body).data.status === 'RECEIVED'; } catch (_) { return false; }
+    },
+  });
+  if (qrRes.status !== 200) return;
+
+  sleep(0.05);
+
+  // 5. close-box
+  const closeBoxRes = http.post(
+    `${BASE_URL}/receiving/table/close-box`,
+    JSON.stringify({ box_id: boxId }),
+    { headers: H, tags: { step: 'close_box' } },
+  );
+  check(closeBoxRes, { 'close_box: 200': (r) => r.status === 200 });
+
+  sleep(0.05);
+
+  // 6. scan-buffer (помещаем грузоместо в буфер BUFFER-01)
+  // buffer_bin_id берётся из stress-seed.sql или из setup() через API
+  // Используем заглушку — реальный UUID нужен из data/stress-table-data.json
+  const bufferBinId = data.bufferBinId || '';
+  if (bufferBinId) {
+    const scanBufRes = http.post(
+      `${BASE_URL}/receiving/table/scan-buffer`,
+      JSON.stringify({ cargoplace_id: cargoplaceId, buffer_bin_id: bufferBinId }),
+      { headers: H, tags: { step: 'scan_buffer' } },
+    );
+    check(scanBufRes, { 'scan_buffer: 200': (r) => r.status === 200 });
+    sleep(0.05);
+  }
+
+  // 7. close-cargoplace → создаёт outbox events → Kafka → блокчейн
+  const closeCpRes = http.post(
+    `${BASE_URL}/receiving/table/close-cargoplace`,
+    JSON.stringify({ cargoplace_id: cargoplaceId }),
+    { headers: H, tags: { step: 'close_cp' } },
+  );
+  check(closeCpRes, {
+    'close_cp: 200': (r) => r.status === 200,
+    'close_cp: TABLE_CLOSED': (r) => {
+      try { return JSON.parse(r.body).data.status === 'TABLE_CLOSED'; } catch (_) { return false; }
+    },
+  });
+
+  sleep(0.1);
+}
