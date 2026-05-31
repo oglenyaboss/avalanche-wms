@@ -1174,6 +1174,19 @@ paths:
                 success: false
                 data: null
                 error: { code: FORBIDDEN, message: Требуется роль администратора или оператора }
+        '409':
+          description: >-
+            `ORDER_NOT_NEW` — гонка конкурентных аллокаций: заказ уже вышел из статуса
+            `NEW` (редкий случай при параллельных запросах; см. assembly/repository.go
+            UpdateOrderStatus → RowsAffected()==0).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: ORDER_NOT_NEW, message: Заказ не в статусе NEW }
         '500':
           $ref: '#/components/responses/JSONInternal'
 

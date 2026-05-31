@@ -224,7 +224,7 @@ fsmOrder = []string{"receiving", "putaway", "picking", "shipping"}
 **Статусная машина строки:**
 
 ```
-PENDING ──InsertPending──► SENT ──receipt.Status=1──► COMMITTED  (терминально)
+PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  (терминально)
                             │
                             └──receipt.Status=0 / timeout / revert──► FAILED  (терминально)
 ```

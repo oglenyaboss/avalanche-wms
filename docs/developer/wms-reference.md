@@ -13,11 +13,11 @@
 | Схема БД (таблицы, колонки, enum, миграции) | [db/Database_ru_v2.md](../db/Database_ru_v2.md) |
 | Маппинг WMS → блокчейн, контракт данных | [integration/blockchain-mapping.md](../integration/blockchain-mapping.md), [integration/data-contract.md](../integration/data-contract.md), [integration/batch-mapping-approach.md](../integration/batch-mapping-approach.md) |
 | Обзор архитектуры | [architecture/system-overview.md](../architecture/system-overview.md) |
-| Контракт HTTP API (request/response по эндпоинтам) | [api/api-contract.md](../api/api-contract.md) — **см. предупреждение ниже** |
+| Контракт HTTP API (request/response по эндпоинтам) | [api/openapi.yaml](../api/openapi.yaml) — источник истины; [api/api-contract.md](../api/api-contract.md) — компаньон |
 | Конвенции кода/git, гайд по MR | [CONVENTIONS.md](../CONVENTIONS.md), [MR_GUIDE.md](../MR_GUIDE.md) |
 
-> [!WARNING] Про OpenAPI и контракт API
-> Канонический контракт — машиночитаемый `openapi.yaml` (генерируется отдельной задачей; если в вашем дереве его ещё нет — используйте источники ниже). Рукописный [api/api-contract.md](../api/api-contract.md) **частично устарел**: например, в нём перечислены несуществующие `GET /shipping/orders` и `POST /shipping/verify`, тогда как реальные эндпоинты отгрузки — `POST /shipping/scan-buffer`, `POST /shipping/scan-driver`, `POST /shipping/ship`. **Источник истины по маршрутам всегда — функции `RegisterRoutes` в каждом модуле** (`wms/internal/<module>/handler.go`) и таблицы эндпоинтов/DTO в этом документе. Этот документ намеренно содержит **verbatim DTO с json-тегами** (см. § 5) и не дублирует полный контракт ошибок/примеров — за ним идите в OpenAPI/`api-contract.md`.
+> [!NOTE] Про OpenAPI и контракт API
+> Источник истины по API — машиночитаемый [api/openapi.yaml](../api/openapi.yaml) (OpenAPI 3.1) и сгенерированный из него [api/api-contract.md](../api/api-contract.md). **Источник истины по маршрутам всегда — функции `RegisterRoutes` в каждом модуле** (`wms/internal/<module>/handler.go`). Этот документ намеренно содержит **verbatim DTO с json-тегами** (см. § 5); за полным контрактом ошибок/примеров идите в OpenAPI.
 
 ---
 
@@ -513,7 +513,7 @@ type UserRepository interface {
 - Ответы — конверт `{success,data,error}` (у receiving/putaway/assembly/shipping — **локальные копии** `envelope`/`apiErrObj` той же формы; у dispatches — своя `ApiError`, см. § 5.6).
 - `code` в ошибке — машиночитаемый ASCII; `message` — текст **на русском**.
 - gorilla/mux **не редиректит** trailing slash — маршруты регистрируются точным путём.
-- **Полный request/response контракт и коды ошибок** — в таблицах ниже плюс [api/api-contract.md](../api/api-contract.md) (с поправкой на устаревание). **Бизнес-смысл шагов** — в `flows/*`.
+- **Полный request/response контракт и коды ошибок** — в [api/openapi.yaml](../api/openapi.yaml) (источник истины) и таблицах ниже. **Бизнес-смысл шагов** — в `flows/*`.
 
 ### 5.1 `receiving` — приёмка (этапы 1–2)
 
@@ -826,7 +826,7 @@ Sentinel-ошибки (`errors.go`) → HTTP: `ErrBufferBinNotFound`/`ErrStorage
 
 Внутренние working-типы (не по HTTP): `AllocatedProduct`, `Task`.
 
-**Интерфейс `assemblyRepository`** (выборочная выдержка — **не полный интерфейс**; `service.go:20-41`, всего 19 методов). Здесь опущены реальные методы `GetOrderLinesByOrderID`, `GetAllocateProductsForSKU`, `GetSKUByID`, `GetBinSectionByID`, `GetPendingTaskByProductForUpdate`, `GetProductByIDForUpdate`, `GetShippingBufferBinByID` — для мок-конструкции сверяйтесь с исходником:
+**Интерфейс `assemblyRepository`** (выборочная выдержка — **не полный интерфейс**; `service.go:20-41`, всего 20 методов). Здесь опущены реальные методы `GetOrderLinesByOrderID`, `GetAllocateProductsForSKU`, `GetSKUByID`, `GetBinSectionByID`, `GetPendingTaskByProductForUpdate`, `GetProductByIDForUpdate`, `GetShippingBufferBinByID` — для мок-конструкции сверяйтесь с исходником:
 
 ```go
 WithTx(ctx context.Context, fn func(assemblyRepository) error) error
@@ -922,13 +922,13 @@ GetBufferBinForUpdate(ctx, binID uuid.UUID) (*BufferBinRecord, error)           
 ListReadyToShipProductsByBin(ctx, binID uuid.UUID) ([]ReadyToShipProduct, error)
 GetDispatchByCode(ctx, code string) (*DispatchRecord, error)
 GetDispatchForUpdate(ctx, dispatchID uuid.UUID) (*DispatchRecord, error)         // FOR UPDATE OF d
-UpdateDispatchToAtGate(ctx, dispatchID uuid.UUID) (*DispatchRecord, error)       // WHERE status='SCHEDULED'
+UpdateDispatchToAtGate(ctx, dispatchCode string) (*DispatchRecord, error)        // WHERE status='SCHEDULED'
 SelectProductsForShip(ctx, binID uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error)  // FOR UPDATE
-BatchUpdateProductsShipped(ctx, productIDs []uuid.UUID) (int, error)
+BatchUpdateProductsShipped(ctx, productIDs []uuid.UUID) error
 BatchInsertShippings(ctx, events []shippingEvent, dispatchID, operatorID uuid.UUID) error
 BatchInsertShippingOutbox(ctx, events []shippingEvent, dispatchID uuid.UUID) (int, error)
 UpdateOrdersShippedConditional(ctx, orderIDs []uuid.UUID) (completed, partial int, err error)  // two-statement FOR UPDATE
-CountReadyToShipProductsInBuffer(ctx, destinationID uuid.UUID) (int, error)      // по всей зоне destination
+CountReadyToShipProductsInBuffer(ctx, binID uuid.UUID) (int, error)              // по всей зоне destination, выведенной из bin
 UpdateDispatchDeparted(ctx, dispatchID uuid.UUID) error                         // WHERE status='AT_GATE'
 ```
 
@@ -1048,4 +1048,4 @@ Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrDispatchNotFo
 - **`dispatches` — белая ворона** по формату ошибок (503, инвертированные аргументы, 200 вместо 201, обязательный trailing slash, `data:null`).
 - **`User.PasswordHash` без `json:"-"`** — не маршалить `domain.User` напрямую в ответ.
 - **Роль `CUSTOMER` без эндпоинтов** — всегда 403 на складе.
-- **`api/api-contract.md` частично устарел** (особенно shipping) — источник истины по маршрутам — `RegisterRoutes`.
+- **Источник истины по API** — `api/openapi.yaml`; источник истины по маршрутам — `RegisterRoutes` в `wms/internal/<module>/handler.go`.

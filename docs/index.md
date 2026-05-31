@@ -18,7 +18,7 @@
 | CDC | Debezium (outbox → Kafka) |
 | Очереди | Apache Kafka (рабочий топик `wms.events.v1` + DLQ `wms.dlq.v1`; 4 per-aggregate топика — legacy/rollback) |
 | Мост в блокчейн | Ledger Adapter (Go) |
-| Блокчейн | Avalanche Subnet-EVM (permissioned) |
+| Блокчейн | Avalanche C-Chain (локально, dev) / Subnet-EVM (план); permissioned Allow Lists ещё не реализованы |
 | Контракт | BatchMappingWMS (Solidity, batch-операции) |
 
 ### Архитектурная схема (упрощённая)
@@ -111,7 +111,7 @@
 ## Ключевые принципы
 
 1. **Outbox pattern** — WMS пишет только в PostgreSQL. Debezium подхватывает outbox_events и публикует в Kafka. Нет двойной записи.
-2. **1 outbox event = 1 product** — aggregate_id всегда product_id. aggregate_type определяет Kafka topic.
-3. **Блокчейн = верификатор, не хранилище.** Контракт реализует FSM (None → Accepted → PutAway → Picked → Shipped) и ревертит при нарушении порядка.
+2. **1 outbox event = 1 product** — aggregate_id всегда product_id. aggregate_type едет в Kafka-заголовке и определяет, какой `batch*`-метод контракта вызывается (все события идут в один топик `wms.events.v1`).
+3. **Блокчейн = верификатор, не хранилище.** Контракт реализует FSM (None → Accepted → PutAway → Picked → Shipped). На пути адаптера (batch-функции) элемент с неверным статусом пропускается с событием `ItemTransitionFailed` — без revert всей транзакции; revert делают только per-item функции.
 4. **Идемпотентность на каждом уровне** — event_id уникален в outbox, onchain_events, и processedEventIds в контракте.
 5. **КПП не пишет в блокчейн** — товары (products) создаются только на столе приёмки.
