@@ -46,7 +46,12 @@ export function ProductPhase({
           boxBarcode={box.boxBarcode}
           productBarcode={productStep === 'qr' ? resolvedSku?.barcode : null}
         />
-        <Button variant="outline" type="button" onClick={onCloseBox}>
+        <Button
+          variant="outline"
+          type="button"
+          onClick={onCloseBox}
+          disabled={isScanningBarcode || isScanningQr}
+        >
           Принять коробку
         </Button>
       </div>

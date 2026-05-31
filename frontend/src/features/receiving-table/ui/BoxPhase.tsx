@@ -29,7 +29,15 @@ export function BoxPhase({
     <section className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <ContextSummary cargoplaceCode={cargoplace.cargoplaceCode} />
-        <Button variant="outline" type="button" onClick={onAcceptCargoplace}>
+        {/* Disabled while a box scan is in flight: a late BOX_OPENED response
+            would otherwise pull the operator into the product phase after they
+            confirmed the move to buffer. */}
+        <Button
+          variant="outline"
+          type="button"
+          onClick={onAcceptCargoplace}
+          disabled={isScanning}
+        >
           Принять грузоместо
         </Button>
       </div>

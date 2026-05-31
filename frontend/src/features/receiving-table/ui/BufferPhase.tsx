@@ -12,8 +12,8 @@ interface BufferPhaseProps {
   bufferPlaced: number | null
   summary: CloseCargoplaceSummary | null
   onScanBuffer: (value: string) => Promise<void> | void
+  onCloseCargoplace: () => void
   onFinish: () => void
-  onDone: () => void
   isScanning: boolean
   isClosing: boolean
   isBlocked: boolean
@@ -26,8 +26,8 @@ export function BufferPhase({
   bufferPlaced,
   summary,
   onScanBuffer,
+  onCloseCargoplace,
   onFinish,
-  onDone,
   isScanning,
   isClosing,
   isBlocked,
@@ -39,7 +39,7 @@ export function BufferPhase({
         <ContextSummary cargoplaceCode={cargoplace.cargoplaceCode} />
         <CargoplaceSummary summary={summary} />
         <div>
-          <Button type="button" onClick={onDone}>
+          <Button type="button" onClick={onFinish}>
             Понятно
           </Button>
         </div>
@@ -58,7 +58,7 @@ export function BufferPhase({
           </AlertDescription>
         </Alert>
         <div>
-          <Button type="button" onClick={onFinish} disabled={isClosing}>
+          <Button type="button" onClick={onCloseCargoplace} disabled={isClosing}>
             {isClosing ? 'Завершение...' : 'Завершить грузоместо'}
           </Button>
         </div>

@@ -23,6 +23,13 @@ interface ApiEnvelope<T> {
 
 // Non-2xx responses reject via axios. A 200 with success:false / null data
 // would otherwise crash the mappers on a null dereference — guard against it.
+//
+// Invariant: the WMS API always pairs an error envelope (success:false) with a
+// non-2xx HTTP status, so axios throws an AxiosError that errors.ts can classify
+// (including terminal codes). This guard only covers a contract violation
+// (200 + success:false); it throws a plain Error and the flow surfaces the
+// generic fallback message rather than terminal-resetting — acceptable because
+// that path is unreachable under the documented contract.
 function unwrap<T>(envelope: ApiEnvelope<T>): T {
   if (!envelope.success || envelope.data === null) {
     throw new Error(envelope.error?.message ?? 'Некорректный ответ сервера')

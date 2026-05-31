@@ -2,7 +2,6 @@ interface ContextSummaryProps {
   cargoplaceCode: string
   boxBarcode?: string | null
   productBarcode?: string | null
-  qrCode?: string | null
 }
 
 interface ChipProps {
@@ -27,13 +26,12 @@ function Chip({ label, value, tone }: ChipProps) {
   )
 }
 
-// The breadcrumb of what is currently in hand: cargoplace → box → product → QR.
+// The breadcrumb of what is currently in hand: cargoplace → box → product.
 // Items appear as they are scanned, mirroring the Figma context chips.
 export function ContextSummary({
   cargoplaceCode,
   boxBarcode,
   productBarcode,
-  qrCode,
 }: ContextSummaryProps) {
   return (
     <div className="flex flex-wrap gap-2">
@@ -42,7 +40,6 @@ export function ContextSummary({
       {productBarcode ? (
         <Chip label="Товар" value={productBarcode} tone="muted" />
       ) : null}
-      {qrCode ? <Chip label="Стикер" value={qrCode} tone="muted" /> : null}
     </div>
   )
 }

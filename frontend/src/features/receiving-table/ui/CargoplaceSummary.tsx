@@ -23,9 +23,12 @@ export function CargoplaceSummary({ summary }: CargoplaceSummaryProps) {
         <div className="flex flex-col gap-2">
           <h4 className="font-medium">Недостача по SKU</h4>
           <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
-            {summary.shortageBySku.map((row) => (
+            {/* The summary is static once the cargoplace is closed and never
+                reordered, and ShortageBySku carries no stable id, so the index
+                is an honest key here. */}
+            {summary.shortageBySku.map((row, index) => (
               <li
-                key={row.skuName}
+                key={index}
                 className="flex items-center justify-between gap-4 px-4 py-2"
               >
                 <span className="font-medium">{row.skuName}</span>

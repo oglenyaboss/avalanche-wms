@@ -277,6 +277,10 @@ export function tableReducer(
     }
 
     default: {
+      // Exhaustiveness guard: if a new TableAction variant is added without a
+      // matching case, this assignment fails to compile.
+      const _exhaustive: never = action
+      void _exhaustive
       return state
     }
   }

@@ -241,8 +241,9 @@ describe('tableReducer / buffer and finish', () => {
 })
 
 describe('tableReducer / errors & dialogs', () => {
-  it('SHOW_ERROR keeps the current phase and shipment context', () => {
-    const state = tableReducer(openBox(), {
+  it('SHOW_ERROR keeps the current phase and shipment context, clears success', () => {
+    const dirty = { ...openBox(), successMessage: 'previous success' }
+    const state = tableReducer(dirty, {
       type: 'SHOW_ERROR',
       message: 'duplicate QR',
     })
@@ -250,6 +251,7 @@ describe('tableReducer / errors & dialogs', () => {
     expect(state.phase).toBe('product')
     expect(state.cargoplace).not.toBeNull()
     expect(state.errorMessage).toBe('duplicate QR')
+    expect(state.successMessage).toBeNull()
   })
 
   it('SHOW_TERMINAL_ERROR drops back to the cargoplace scan', () => {

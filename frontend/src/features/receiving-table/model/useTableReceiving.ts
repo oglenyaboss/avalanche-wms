@@ -176,7 +176,7 @@ export function useTableReceiving() {
     }
   }
 
-  const finishCargoplace = async () => {
+  const submitCloseCargoplace = async () => {
     if (!state.cargoplace || closeCargoplaceMutation.isPending) {
       return
     }
@@ -199,7 +199,7 @@ export function useTableReceiving() {
     submitQr,
     confirmCloseBox,
     submitBuffer,
-    finishCargoplace,
+    submitCloseCargoplace,
     openConfirmCloseBox: () => dispatch({ type: 'OPEN_CONFIRM_CLOSE_BOX' }),
     cancelConfirmCloseBox: () => dispatch({ type: 'CANCEL_CONFIRM_CLOSE_BOX' }),
     openConfirmAcceptCargoplace: () =>

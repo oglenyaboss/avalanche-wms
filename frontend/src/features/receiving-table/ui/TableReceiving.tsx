@@ -62,8 +62,8 @@ export function TableReceiving() {
           bufferPlaced={state.bufferPlaced}
           summary={state.summary}
           onScanBuffer={table.submitBuffer}
-          onFinish={table.finishCargoplace}
-          onDone={table.finish}
+          onCloseCargoplace={table.submitCloseCargoplace}
+          onFinish={table.finish}
           isScanning={table.isScanningBuffer}
           isClosing={table.isClosingCargoplace}
           isBlocked={isErrorOpen}
