@@ -20,6 +20,7 @@ export const navigationItems: NavigationItem[] = [
   {
     label: 'Раскладка',
     title: 'Сценарий раскладки товаров по местам хранения',
+    to: routes.putaway,
   },
   {
     label: 'Сборка',
