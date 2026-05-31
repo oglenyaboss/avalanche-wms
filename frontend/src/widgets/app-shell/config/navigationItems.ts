@@ -1,3 +1,5 @@
+import { routes } from '@/shared/config'
+
 type NavigationItem = {
   label: string
   title: string
@@ -8,6 +10,7 @@ export const navigationItems: NavigationItem[] = [
   {
     label: 'Приемка на воротах',
     title: 'Сценарий приемки товара на воротах',
+    to: routes.receivingGate,
   },
   {
     label: 'Приемка на столах',

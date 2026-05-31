@@ -5,6 +5,7 @@ import { ProtectedRoute } from '@/app/providers/ProtectedRoute'
 import { HomePage } from '@/pages/home'
 import { LoginPage } from '@/pages/login'
 import { NotFoundPage } from '@/pages/not-found'
+import { ReceivingGatePage } from '@/pages/receiving-gate'
 import { routes } from '@/shared/config/routes'
 import { AppShell } from '@/widgets/app-shell'
 
@@ -28,6 +29,10 @@ const router = createBrowserRouter([
             path: routes.home,
             element: <HomePage />,
           },
+          {
+            path: routes.receivingGate,
+            element: <ReceivingGatePage />,
+          },
         ],
       },
     ],
@@ -41,4 +46,3 @@ const router = createBrowserRouter([
 export function AppRouter() {
   return <RouterProvider router={router} />
 }
-
