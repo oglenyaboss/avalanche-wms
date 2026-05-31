@@ -50,3 +50,11 @@ temp/
 # ── AI tools (local skills, config) ───────────────────
 .opencode/
 .claude/
+
+# ── Build output ────────────────────────────────────────
+/bin/
+
+# ── Local docs / research (kept locally, not tracked) ───
+docs/superpowers/
+docs/blockchain-wms-research/
+docs/load-testing/
