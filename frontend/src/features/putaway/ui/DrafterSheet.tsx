@@ -83,7 +83,7 @@ export function DrafterSheet({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            onClick={() => setPage(safePage - 1)}
             disabled={safePage === 0}
           >
             ← Назад
@@ -95,7 +95,7 @@ export function DrafterSheet({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            onClick={() => setPage(safePage + 1)}
             disabled={safePage >= pageCount - 1}
           >
             Вперёд →

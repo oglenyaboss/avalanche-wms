@@ -156,6 +156,8 @@ export function putawayReducer(
         ...state,
         storageStep: 'place',
         activeBin: { storageBinId: action.storageBinId },
+        // The success banner belongs to a bin; a new bin starts without one.
+        lastPlacement: null,
         errorMessage: null,
       }
     }
@@ -169,11 +171,16 @@ export function putawayReducer(
         ...state,
         storageStep: 'bin',
         activeBin: null,
+        lastPlacement: null,
         errorMessage: null,
       }
     }
 
     case 'PRODUCT_PLACED': {
+      if (state.phase !== 'storage') {
+        return state
+      }
+
       const alreadyPlaced = state.placedProductIds.includes(action.productId)
       const placedProductIds = alreadyPlaced
         ? state.placedProductIds

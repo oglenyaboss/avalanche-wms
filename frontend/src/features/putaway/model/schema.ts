@@ -23,6 +23,7 @@ export const bufferUuidSchema = z.object({
     .string()
     .trim()
     .min(1, 'Введите код')
+    .max(36, 'Ожидается UUID')
     .regex(UUID_PATTERN, 'Ожидается идентификатор ячейки буфера (UUID)'),
 })
 
@@ -31,6 +32,7 @@ export const storageBinUuidSchema = z.object({
     .string()
     .trim()
     .min(1, 'Введите код')
+    .max(36, 'Ожидается UUID')
     .regex(UUID_PATTERN, 'Ожидается идентификатор ячейки хранения (UUID)'),
 })
 

@@ -209,6 +209,41 @@ describe('putawayReducer / storage placement', () => {
     expect(state.storageStep).toBe('bin')
     expect(state.activeBin).toBeNull()
     expect(state.placedProductIds).toEqual(['p-1'])
+    // The success banner belongs to the old bin and must not linger.
+    expect(state.lastPlacement).toBeNull()
+  })
+
+  it('clears the previous placement banner when a new bin is scanned', () => {
+    const placed = putawayReducer(
+      putawayReducer(
+        putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' }),
+        { type: 'STORAGE_BIN_SCANNED', storageBinId: 'bin-1' },
+      ),
+      { type: 'PRODUCT_PLACED', productId: 'p-1', result: placement() },
+    )
+
+    const state = putawayReducer(
+      putawayReducer(placed, { type: 'CHANGE_BIN' }),
+      { type: 'STORAGE_BIN_SCANNED', storageBinId: 'bin-2' },
+    )
+
+    expect(state.activeBin).toEqual({ storageBinId: 'bin-2' })
+    expect(state.lastPlacement).toBeNull()
+  })
+
+  it('ignores a placement dispatched outside the storage phase', () => {
+    const inPick = putawayReducer(initialPutawayState, {
+      type: 'BUFFER_SCANNED',
+      result: bufferScan,
+    })
+
+    const state = putawayReducer(inPick, {
+      type: 'PRODUCT_PLACED',
+      productId: 'p-1',
+      result: placement(),
+    })
+
+    expect(state).toBe(inPick)
   })
 })
 

@@ -33,8 +33,8 @@ function binLabel(
   return `${activeBin.storageBinId.slice(0, 8)}…`
 }
 
-// Steps 4–5 of putaway: scan a storage bin, then place picked products into it
-// one at a time. The whole task is finished from either step.
+// Step 3 of putaway (two sub-steps): scan a storage bin, then place picked
+// products into it one at a time. The whole task is finished from either step.
 export function StoragePhase({
   buffer,
   cart,

@@ -2,7 +2,7 @@ import { useReducer } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
 import { scanBuffer, scanProduct, scanStorageBin } from '../api/putawayApi'
-import { getPutawayErrorMessage } from './errors'
+import { getPutawayErrorCode, getPutawayErrorMessage } from './errors'
 import { initialPutawayState, putawayReducer } from './putawayReducer'
 
 export function usePutaway() {
@@ -108,6 +108,11 @@ export function usePutaway() {
       })
       dispatch({ type: 'PRODUCT_PLACED', productId: product.productId, result })
     } catch (error) {
+      // A bad storage bin invalidates the whole active bin, not just this
+      // product — drop back to the bin scan so retries don't hammer a dead bin.
+      if (getPutawayErrorCode(error) === 'STORAGE_BIN_NOT_FOUND') {
+        dispatch({ type: 'CHANGE_BIN' })
+      }
       showError(getPutawayErrorMessage(error))
     }
   }
