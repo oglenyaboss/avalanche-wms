@@ -10,8 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
-	"wms/internal/auth"
-	"wms/internal/domain"
+	"wms/internal/platform/httputil"
 )
 
 type Handler struct {
@@ -96,7 +95,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 
 // ScanTTN processes the scanning of a TTN code, updating shipment status and returning shipment details.
 func (h *Handler) ScanTTN(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -119,7 +118,7 @@ func (h *Handler) ScanTTN(w http.ResponseWriter, r *http.Request) {
 
 // ScanCargoplace handles the HTTP request for scanning a cargoplace within a shipment.
 func (h *Handler) ScanCargoplace(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -148,7 +147,7 @@ func (h *Handler) ScanCargoplace(w http.ResponseWriter, r *http.Request) {
 
 // AcceptShipment handles the HTTP request for accepting a shipment at the receiving gate, finalizing the receiving process.
 func (h *Handler) AcceptShipment(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -178,7 +177,7 @@ func (h *Handler) AcceptShipment(w http.ResponseWriter, r *http.Request) {
 // ScanTableCargoplace processes the scanning of a cargoplace at the sorting table,
 // updating its status and returning details for further processing.
 func (h *Handler) ScanTableCargoplace(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -206,7 +205,7 @@ func (h *Handler) ScanTableCargoplace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ScanBox(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -234,7 +233,7 @@ func (h *Handler) ScanBox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ScanSKU(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -267,7 +266,7 @@ func (h *Handler) ScanSKU(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ScanQR(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -305,7 +304,7 @@ func (h *Handler) ScanQR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) CloseBox(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -334,7 +333,7 @@ func (h *Handler) CloseBox(w http.ResponseWriter, r *http.Request) {
 
 // ScanBuffer handles the scanning of a cargoplace into a buffer bin, validating the input and updating the system state accordingly.
 func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -369,7 +368,7 @@ func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
 // CloseCargoplace finalizes the receiving process for a cargoplace,
 // returning the received-vs-expected summary and closing the cargoplace.
 func (h *Handler) CloseCargoplace(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -475,20 +474,4 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("receiving.writeJSON encode: %v", err)
 	}
-}
-
-func requireOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	operatorID := auth.UserIDFromCtx(r.Context())
-	if operatorID == uuid.Nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Требуется авторизация")
-		return uuid.Nil, false
-	}
-
-	role := auth.UserRoleFromCtx(r.Context())
-	if role != domain.UserRoleOperator {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "Только оператор может выполнять это действие")
-		return uuid.Nil, false
-	}
-
-	return operatorID, true
 }

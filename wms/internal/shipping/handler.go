@@ -10,8 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
-	"wms/internal/auth"
-	"wms/internal/domain"
+	"wms/internal/platform/httputil"
 )
 
 // maxProductIDsPerRequest bounds the product_ids[] array a single ship request may carry,
@@ -44,7 +43,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 }
 
 func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -72,7 +71,7 @@ func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ScanDriver(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -94,7 +93,7 @@ func (h *Handler) ScanDriver(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Ship(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -209,20 +208,4 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("shipping.writeJSON encode: %v", err)
 	}
-}
-
-func requireOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	operatorID := auth.UserIDFromCtx(r.Context())
-	if operatorID == uuid.Nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Требуется авторизация")
-		return uuid.Nil, false
-	}
-
-	role := auth.UserRoleFromCtx(r.Context())
-	if role != domain.UserRoleOperator {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "Только оператор может выполнять это действие")
-		return uuid.Nil, false
-	}
-
-	return operatorID, true
 }

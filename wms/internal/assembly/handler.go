@@ -10,9 +10,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
-	"wms/internal/auth"
 	"wms/internal/domain"
 	"wms/internal/ledger"
+	"wms/internal/platform/httputil"
 )
 
 type Handler struct {
@@ -33,7 +33,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 // Allocate - ищет новые заказы (NEW) для магазина (destinationID)
 // и выводит количество собранных заказов, количество готовых товаров и проблемные товары (номер заказа и характеристика товара, включая количество)
 func (h *Handler) Allocate(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireOperator(w, r); !ok {
+	if _, ok := httputil.RequireAdminOrOperator(w, r); !ok {
 		return
 	}
 
@@ -61,7 +61,7 @@ func (h *Handler) Allocate(w http.ResponseWriter, r *http.Request) {
 
 // GetTasks - возвращает задачи для оператора (какие товары нужно взять)
 func (h *Handler) GetTasks(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -114,7 +114,7 @@ func (h *Handler) GetTasks(w http.ResponseWriter, r *http.Request) {
 // После этого меняется статус задачи - Done, статус товара - Assembled
 // создается outbox-event, товар добавляется в корзину оператора
 func (h *Handler) Pick(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -142,7 +142,7 @@ func (h *Handler) Pick(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ScanShippingBuffer(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := requireOperator(w, r)
+	operatorID, ok := httputil.RequireOperator(w, r)
 	if !ok {
 		return
 	}
@@ -214,22 +214,6 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("assembly.writeJSON encode: %v", err)
 	}
-}
-
-func requireOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	operatorID := auth.UserIDFromCtx(r.Context())
-	if operatorID == uuid.Nil {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Требуется авторизация")
-		return uuid.Nil, false
-	}
-
-	role := auth.UserRoleFromCtx(r.Context())
-	if role != domain.UserRoleOperator {
-		writeError(w, http.StatusForbidden, "FORBIDDEN", "Только оператор может выполнять это действие")
-		return uuid.Nil, false
-	}
-
-	return operatorID, true
 }
 
 func mapServiceError(err error) (status int, code, message string) {

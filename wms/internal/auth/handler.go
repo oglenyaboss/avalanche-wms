@@ -163,8 +163,7 @@ func Middleware(jwtSecret []byte) func(http.Handler) http.Handler {
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), ctxUserID, userID)
-			ctx = context.WithValue(ctx, ctxUserRole, claims.Role)
+			ctx := ContextWithIdentity(r.Context(), userID, domain.UserRole(claims.Role))
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
