@@ -1,4 +1,5 @@
-.PHONY: help up down build logs lint test tidy vendor init migrate seed e2e-test-outbound
+.PHONY: help up down build logs lint test tidy vendor init migrate seed e2e-test-outbound \
+        stress stress-logs stress-smoke stress-health stress-auth stress-receiving stress-full
 
 COMPOSE := docker compose
 
@@ -98,18 +99,29 @@ connector-status:
 delete-connector:
 	@curl -X DELETE http://localhost:8083/connectors/outbox-connector
 
-stress-smoke: ## Smoke test (1 VU)
+stress: ## Run all stress tests 01–07 in Docker (seeds DB automatically)
+	$(COMPOSE) --profile stress build k6
+	$(COMPOSE) --profile stress up -d
+	@echo ""
+	@echo "Stress tests running in background."
+	@echo "Follow progress : make stress-logs"
+	@echo "Stop container  : docker compose --profile stress stop k6"
+
+stress-logs: ## Tail k6 stress test output
+	$(COMPOSE) logs -f k6
+
+stress-smoke: ## Smoke test (1 VU, local k6 required)
 	k6 run tests/stress/01-smoke.js
 
-stress-health: ## Health check load (up to 200 VUs)
+stress-health: ## Health check load (local k6 required)
 	k6 run tests/stress/02-health.js
 
-stress-auth: ## Auth endpoints load test
+stress-auth: ## Auth endpoints load test (local k6 required)
 	k6 run tests/stress/03-auth.js
 
-stress-receiving: ## Receiving gate flow (needs stress-seed.sql)
+stress-receiving: ## Receiving gate flow (local k6, needs stress-seed.sql)
 	k6 run tests/stress/04-receiving-gate.js
 
-stress-full: ## Full outbound flow (needs seed + env vars)
+stress-full: ## Full outbound flow (local k6, needs seed + env vars)
 	@source <(bash tests/stress/setup/generate-stress-data.sh) && \
 	  k6 run tests/stress/07-full-flow.js

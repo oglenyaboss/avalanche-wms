@@ -16,6 +16,7 @@
  */
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import exec from 'k6/execution';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders } from './lib/helpers.js';
 
@@ -41,28 +42,38 @@ export const options = {
 };
 
 export function setup() {
-  const token = login('operator', 'operator');
-  if (!token) {
-    console.error('setup: failed to obtain operator token');
-    return { token: '', destinationId: '', shippingBinId: '' };
+  // Проверяем обязательные env-переменные перед стартом VU.
+  const missing = [];
+  if (!__ENV.DESTINATION_ID) missing.push('DESTINATION_ID');
+  if (!__ENV.SHIPPING_BIN_ID) missing.push('SHIPPING_BIN_ID');
+
+  if (missing.length > 0) {
+    const msg =
+      '\n\n[06-assembly] ABORT: обязательные env-переменные не заданы:\n' +
+      missing.map((k) => `  - ${k}`).join('\n') +
+      '\n\nВыполните перед запуском:\n' +
+      '  source <(bash tests/stress/setup/generate-stress-data.sh)\n' +
+      'или передайте явно:\n' +
+      '  k6 run -e DESTINATION_ID=<uuid> -e SHIPPING_BIN_ID=<uuid> \\\n' +
+      '         tests/stress/06-assembly.js\n';
+    exec.test.abort(msg);
   }
 
-  // Разрешаем destination_id и shipping bin_id из known seed values
-  // В production-сценарии эти UUID читаются из data/stress-assembly-data.json
-  // (генерируется скриптом setup/generate-stress-data.sh)
+  const token = login('operator', 'operator');
+  if (!token) {
+    exec.test.abort('setup: не удалось получить токен оператора.');
+  }
   return {
     token,
-    destinationId: __ENV.DESTINATION_ID || '',
-    shippingBinId: __ENV.SHIPPING_BIN_ID || '',
+    destinationId: __ENV.DESTINATION_ID,
+    shippingBinId: __ENV.SHIPPING_BIN_ID,
   };
 }
 
 export default function (data) {
   const { token, destinationId, shippingBinId } = data;
-  if (!token || !destinationId) {
-    console.warn(`VU${__VU}: missing token or destination_id — set DESTINATION_ID env var or run generate-stress-data.sh`);
-    return;
-  }
+  // setup() гарантирует токен и env-переменные; сюда они приходят корректными.
+  if (!token) return;
 
   const H = authHeaders(token);
 

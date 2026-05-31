@@ -19,6 +19,7 @@
  */
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import exec from 'k6/execution';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
 
@@ -52,12 +53,25 @@ export const options = {
 
 export function setup() {
   const token = login('operator', 'operator');
-  if (!token) console.error('setup: failed to obtain operator token');
-  return { token };
+  if (!token) {
+    exec.test.abort('setup: не удалось получить токен оператора. Проверьте WMS_URL и учётные данные.');
+  }
+
+  // Резолвим UUID буфера приёмки через env-переменную.
+  // Если не задана — тест всё равно запустится, но пропустит шаг scan-buffer
+  // (это допустимо: close-cargoplace создаёт outbox event независимо от буфера).
+  const bufferBinId = __ENV.RECEIVING_BIN_ID || '';
+  if (!bufferBinId) {
+    console.warn(
+      '[05-receiving-table] RECEIVING_BIN_ID не задан — шаг scan-buffer будет пропущен.\n' +
+      'Для полного теста: source <(bash tests/stress/setup/generate-stress-data.sh)',
+    );
+  }
+  return { token, bufferBinId };
 }
 
 export default function (data) {
-  const token = data.token;
+  const { token, bufferBinId } = data;
   if (!token) return;
 
   const idx = ((__VU - 1 + (__ITER * 200)) % TOTAL_CARGOPLACES) + 1;
@@ -152,9 +166,6 @@ export default function (data) {
   sleep(0.05);
 
   // 6. scan-buffer (помещаем грузоместо в буфер BUFFER-01)
-  // buffer_bin_id берётся из stress-seed.sql или из setup() через API
-  // Используем заглушку — реальный UUID нужен из data/stress-table-data.json
-  const bufferBinId = data.bufferBinId || '';
   if (bufferBinId) {
     const scanBufRes = http.post(
       `${BASE_URL}/receiving/table/scan-buffer`,

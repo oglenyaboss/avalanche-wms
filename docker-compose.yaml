@@ -350,17 +350,27 @@ services:
       - app_network
 
   k6:
-    image: grafana/k6:latest
+    build:
+      context: ./tests/stress
+      dockerfile: Dockerfile
+    container_name: k6-stress
     profiles: [stress]
+    restart: "no"
     environment:
       WMS_URL: http://wms-service:8080
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      DB_NAME: ${DB_NAME:-wms_blockchain_db}
     volumes:
       - ./tests/stress:/tests/stress:ro
-    command: run /tests/stress/01-smoke.js
     networks:
       - app_network
     depends_on:
       wms_app:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
 volumes:

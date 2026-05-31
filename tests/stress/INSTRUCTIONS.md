@@ -173,7 +173,34 @@ stress-full: ## Full outbound flow (needs seed + env vars)
 
 ---
 
-## Запуск тестов (без make)
+## Запуск всех тестов одной командой (рекомендуется)
+
+```bash
+# Собрать образ k6-stress и запустить все тесты (01–07) в фоне:
+docker compose --profile stress up -d
+
+# — или через make:
+make stress
+```
+
+Команда автоматически:
+- Собирает образ `k6-stress` (grafana/k6 + postgresql-client)
+- Запускает весь стек, если он ещё не поднят
+- Ждёт готовности WMS (healthcheck) и PostgreSQL
+- Очищает и засевает stress-данные
+- Разрешает UUID ячеек/рейсов из БД
+- Запускает тесты 01–07 последовательно
+
+Наблюдать за прогрессом:
+```bash
+docker compose logs -f k6
+# — или:
+make stress-logs
+```
+
+---
+
+## Запуск отдельных тестов (локальная установка k6)
 
 ```bash
 # 1. Быстрая проверка (не нужен seed)
@@ -203,6 +230,37 @@ k6 run tests/stress/07-full-flow.js
 Кастомный URL (если WMS не на localhost:8081):
 ```bash
 WMS_URL=http://your-host:8081 k6 run tests/stress/01-smoke.js
+```
+
+---
+
+## Известные проблемы и исправления
+
+### Исправлено: 04-receiving-gate.js — 0% успеха scan-cargoplace
+
+**Симптом:** scan-ttn возвращает 200, но все вызовы scan-cargoplace завершаются с ошибкой
+(`http_req_failed rate ≈ 80%`).
+
+**Причина:** Сервис `receiving.Service.ScanCargoplace` требует, чтобы поставка была в статусе
+`GATE_IN_PROGRESS`. Метод `ScanTTN` переводит поставку из `CREATED → GATE_IN_PROGRESS`.
+Изначально `stress-seed.sql` создавал поставки со статусом `'EXPECTED'`, который сервис не
+распознаёт как допустимый стартовый статус — переход не происходил, поставка оставалась в
+`'EXPECTED'`, и scan-cargoplace всегда возвращал `SHIPMENT_NOT_IN_PROGRESS`.
+
+**Исправление:** В `tests/stress/setup/stress-seed.sql` статус inbound_shipments изменён
+с `'EXPECTED'` на `'CREATED'`. Грузоместа по-прежнему создаются со статусом `'EXPECTED'`
+(это правильно, именно его ожидает `UpdateCargoplaceReceivedAtGate` при переходе в
+`RECEIVED_AT_GATE`).
+
+**После применения исправления:**
+```bash
+# Сбросить и пересеять данные
+docker exec -i postgres_db psql -U root -d wms_blockchain_db \
+  < tests/stress/setup/stress-cleanup.sql
+docker exec -i postgres_db psql -U root -d wms_blockchain_db \
+  < tests/stress/setup/stress-seed.sql
+# Запустить тест
+k6 run tests/stress/04-receiving-gate.js
 ```
 
 ---

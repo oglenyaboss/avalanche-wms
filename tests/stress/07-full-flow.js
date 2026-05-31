@@ -35,6 +35,7 @@
  */
 import http from 'k6/http';
 import { check, sleep, group } from 'k6';
+import exec from 'k6/execution';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
 
@@ -61,33 +62,52 @@ export const options = {
 };
 
 export function setup() {
+  // Проверяем обязательные env-переменные ДО старта VU.
+  // Если хотя бы одна не задана — тест прерывается немедленно с понятным сообщением.
+  const required = {
+    RECEIVING_BIN_ID: __ENV.RECEIVING_BIN_ID,
+    STORAGE_BIN_ID:   __ENV.STORAGE_BIN_ID,
+    DESTINATION_ID:   __ENV.DESTINATION_ID,
+    SHIPPING_BIN_ID:  __ENV.SHIPPING_BIN_ID,
+    DISPATCH_CODE:    __ENV.DISPATCH_CODE,
+  };
+  const missing = Object.entries(required)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+
+  if (missing.length > 0) {
+    const msg =
+      '\n\n[07-full-flow] ABORT: обязательные env-переменные не заданы:\n' +
+      missing.map((k) => `  - ${k}`).join('\n') +
+      '\n\nВыполните перед запуском:\n' +
+      '  source <(bash tests/stress/setup/generate-stress-data.sh)\n' +
+      'или передайте переменные явно:\n' +
+      '  k6 run -e RECEIVING_BIN_ID=<uuid> -e STORAGE_BIN_ID=<uuid> \\\n' +
+      '         -e DESTINATION_ID=<uuid> -e SHIPPING_BIN_ID=<uuid> \\\n' +
+      '         -e DISPATCH_CODE=STRESS-DSP-0001 \\\n' +
+      '         tests/stress/07-full-flow.js\n';
+    exec.test.abort(msg);
+  }
+
   const token = login('operator', 'operator');
   if (!token) {
-    console.error('setup: cannot obtain operator token');
-    return {};
+    exec.test.abort('setup: не удалось получить токен оператора. Проверьте WMS_URL и учётные данные.');
   }
   return {
     token,
-    receivingBinId: __ENV.RECEIVING_BIN_ID || '',
-    storageBinId:   __ENV.STORAGE_BIN_ID   || '',
-    destinationId:  __ENV.DESTINATION_ID   || '',
-    shippingBinId:  __ENV.SHIPPING_BIN_ID  || '',
-    dispatchCode:   __ENV.DISPATCH_CODE    || '',
+    receivingBinId: __ENV.RECEIVING_BIN_ID,
+    storageBinId:   __ENV.STORAGE_BIN_ID,
+    destinationId:  __ENV.DESTINATION_ID,
+    shippingBinId:  __ENV.SHIPPING_BIN_ID,
+    dispatchCode:   __ENV.DISPATCH_CODE,
   };
 }
 
 export default function (data) {
   const { token, receivingBinId, storageBinId, destinationId, shippingBinId, dispatchCode } = data;
 
+  // setup() уже проверил env-переменные и токен; сюда они приходят гарантированно.
   if (!token) return;
-
-  if (!receivingBinId || !storageBinId || !destinationId || !shippingBinId || !dispatchCode) {
-    console.warn(
-      `VU${__VU}: missing env vars (RECEIVING_BIN_ID / STORAGE_BIN_ID / ` +
-      `DESTINATION_ID / SHIPPING_BIN_ID / DISPATCH_CODE). See file header.`,
-    );
-    return;
-  }
 
   const H = authHeaders(token);
   const suffix = `${pad(__VU, 4)}-${pad(__ITER, 6)}`;

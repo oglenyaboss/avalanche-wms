@@ -17,7 +17,9 @@ BEGIN;
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- 1. Входящие поставки для теста 04-receiving-gate.js
---    STRESS-TTN-0001 … STRESS-TTN-0500 в статусе EXPECTED
+--    STRESS-TTN-0001 … STRESS-TTN-0500 в статусе CREATED
+--    (сервис знает только CREATED / GATE_IN_PROGRESS / GATE_CLOSED;
+--     scan-ttn переводит CREATED → GATE_IN_PROGRESS, что нужно для scan-cargoplace)
 -- ────────────────────────────────────────────────────────────────────────────
 INSERT INTO wms_inventory.inbound_shipments
   (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
@@ -25,7 +27,7 @@ SELECT
   gen_random_uuid(),
   w.warehouse_id,
   'STRESS-TTN-' || LPAD(gs.i::text, 4, '0'),
-  'EXPECTED',
+  'CREATED',
   now(),
   now()
 FROM wms_inventory.warehouses w
