@@ -4,21 +4,24 @@
  * Цель: end-to-end нагрузочный тест всего исходящего потока:
  *   Receiving table → Putaway → Assembly → Shipping
  *
- * Каждый VU прогоняет один продукт через весь цикл, включая:
+ * Каждая итерация прогоняет один продукт через весь цикл, включая:
  *   - Создание продукта через scan-qr
  *   - Помещение в хранение через putaway
  *   - Сборку и отгрузку
  *   - Outbox events → Kafka → Blockchain (асинхронно, не ждём)
  *
+ * Модель нагрузки: closed-model (shared-iterations).
+ * Каждая итерация получает уникальный UUID грузоместа через exec.scenario.iterationInTest,
+ * что гарантирует отсутствие коллизий и «409 уже закрыто» в рамках одного прогона.
+ *
  * Требования:
  *   - tests/stress/setup/stress-seed.sql выполнен
- *   - Переменные окружения из setup/generate-stress-data.sh установлены:
+ *   - Переменные окружения:
  *       RECEIVING_BIN_ID   — UUID ячейки BUFFER-01
  *       STORAGE_BIN_ID     — UUID ячейки A-01-01
- *       DESTINATION_ID     — UUID магазина (SHOP-7 или SHOP-5)
- *       SHIPPING_BIN_ID    — UUID буфера отгрузки для этого магазина
- *       DISPATCH_CODE      — коды рейсов через запятую (STRESS-FLOW-DSP-0001,...,STRESS-FLOW-DSP-0010)
- *                           Допускается также передать один код (обратная совместимость).
+ *       DESTINATION_ID     — UUID магазина SHOP-5
+ *       SHIPPING_BIN_ID    — UUID буфера отгрузки для SHOP-5
+ *       DISPATCH_CODE      — коды рейсов через запятую (STRESS-FLOW-DSP-0001,...,0010)
  *
  * Запуск:
  *   source <(bash tests/stress/setup/generate-stress-data.sh)
@@ -36,9 +39,7 @@ import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
 
-// UUID грузомест STRESS-FLOW-CP-0001..0500 (0-indexed, порядок по cargoplace_code).
-// Отдельный пул от теста 05 (STRESS-TABLE-CP-*), чтобы тест 07 не получал
-// уже закрытые (TABLE_CLOSED) грузоместа.
+// UUID грузомест STRESS-FLOW-CP-0001..2000 (0-indexed, порядок по cargoplace_code).
 // Файл генерируется run-all.sh перед запуском теста.
 const CP_UUIDS = new SharedArray('flow_cargoplaces', () =>
   JSON.parse(open('/tmp/stress-flow-cps.json')));
@@ -46,29 +47,24 @@ const CP_UUIDS = new SharedArray('flow_cargoplaces', () =>
 export const options = {
   scenarios: {
     full_flow: {
-      executor: 'ramping-vus',
-      stages: [
-        { duration: '30s', target: 3 },
-        { duration: '3m',  target: 15 },
-        { duration: '2m',  target: 30 },
-        { duration: '1m',  target: 0 },
-      ],
+      // closed-model: ровно 2000 итераций, каждая — уникальное грузоместо.
+      executor: 'shared-iterations',
+      vus: 30,
+      iterations: 2000,
+      maxDuration: '15m',
     },
   },
   thresholds: {
-    // Суммарное время одного полного цикла приёмки-отгрузки
     'group_duration{group:::receiving_table}': ['p(95)<1500'],
-    'group_duration{group:::putaway}': ['p(95)<500'],
-    'group_duration{group:::assembly}': ['p(95)<1000'],
-    'group_duration{group:::shipping}': ['p(95)<500'],
-    http_req_failed: ['rate<0.15'],
+    'group_duration{group:::putaway}':         ['p(95)<500'],
+    'group_duration{group:::assembly}':        ['p(95)<1000'],
+    'group_duration{group:::shipping}':        ['p(95)<500'],
+    // Каждое грузоместо — одна итерация, повторов нет → ошибочных запросов минимум.
+    http_req_failed: ['rate<0.05'],
   },
 };
 
 export function setup() {
-  // Проверяем обязательные env-переменные ДО старта VU.
-  // Если хотя бы одна не задана — тест прерывается немедленно с понятным сообщением.
-  // DISPATCH_CODE принимает один код ИЛИ коды через запятую (напр. "STRESS-FLOW-DSP-0001,...,0010").
   const required = {
     RECEIVING_BIN_ID: __ENV.RECEIVING_BIN_ID,
     STORAGE_BIN_ID:   __ENV.STORAGE_BIN_ID,
@@ -100,8 +96,6 @@ export function setup() {
   }
 
   // Разбираем коды рейсов (один или несколько через запятую).
-  // Множество кодов позволяет VU-шникам равномерно распределяться по рейсам
-  // и снизить число 409 DISPATCH_ALREADY_AT_GATE на scan-driver.
   const dispatchCodes = __ENV.DISPATCH_CODE
     .split(',')
     .map((c) => c.trim())
@@ -119,17 +113,14 @@ export function setup() {
 
 export default function (data) {
   const { token, receivingBinId, storageBinId, destinationId, shippingBinId, dispatchCodes } = data;
-
-  // setup() уже проверил env-переменные и токен; сюда они приходят гарантированно.
   if (!token) return;
 
-  // Выбираем код рейса с ротацией по VU и итерации, чтобы VU-шники распределялись
-  // по всем доступным рейсам и сводили к минимуму 409 DISPATCH_ALREADY_AT_GATE.
-  const dispatchCode = dispatchCodes[
-    ((__VU - 1 + __ITER * 30) % dispatchCodes.length)
-  ];
+  // Ротация кода рейса по глобальному счётчику итерации.
+  // С 10 кодами и 2000 итерациями каждый код получает ~200 попыток scan-driver;
+  // первая успешная переводит рейс в AT_GATE, остальные получат 409 (ожидаемо).
+  const dispatchCode = dispatchCodes[exec.scenario.iterationInTest % dispatchCodes.length];
 
-  // 404 = ресурс не найден; 409 = конфликт (закрытое грузоместо, закрытый рейс);
+  // 404 = ресурс не найден; 409 = конфликт (закрытое грузоместо, рейс уже AT_GATE);
   // 422 = нет NEW-заказов или STORED-товаров.
   http.setResponseCallback(http.expectedStatuses(
     { min: 200, max: 299 },
@@ -140,9 +131,10 @@ export default function (data) {
 
   const H = authHeaders(token);
   const suffix = `${pad(__VU, 4)}-${pad(__ITER, 6)}`;
-  // Множитель = пиковый maxVUs (30): каждый round сдвигается на 30 позиций,
-  // все 500 грузомест покрываются за ceil(500/30)=17 итераций без пробелов.
-  const cpIdx = ((__VU - 1 + __ITER * 30) % 500); // 0-indexed → CP_UUIDS[0..499]
+
+  // exec.scenario.iterationInTest: глобальный уникальный индекс 0..1999.
+  // Каждая итерация получает своё грузоместо без коллизий.
+  const cpIdx = exec.scenario.iterationInTest;
   const cargoplaceId = CP_UUIDS[cpIdx] || '';
 
   if (!cargoplaceId) {
@@ -226,14 +218,12 @@ export default function (data) {
 
   // ── БЛОК 2: Putaway ──────────────────────────────────────────────────────
   group('putaway', () => {
-    // scan-buffer (read-only: показывает продукты в буфере)
     http.post(
       `${BASE_URL}/putaway/scan-buffer`,
       JSON.stringify({ buffer_bin_id: receivingBinId }),
       { headers: H },
     );
 
-    // scan-product
     const scanProdRes = http.post(
       `${BASE_URL}/putaway/scan-product`,
       JSON.stringify({ product_id: productId, buffer_bin_id: receivingBinId }),
@@ -259,7 +249,6 @@ export default function (data) {
 
   // ── БЛОК 3: Assembly ─────────────────────────────────────────────────────
   group('assembly', () => {
-    // allocate
     const allocRes = http.post(
       `${BASE_URL}/assembly/allocate`,
       JSON.stringify({ destination_id: destinationId }),
@@ -268,12 +257,10 @@ export default function (data) {
     check(allocRes, { 'assembly: allocate 200': (r) => r.status === 200 });
     if (allocRes.status !== 200) return;
 
-    // Если нет NEW-заказов или STORED-товаров — выходим без вызова scan-shipping-buffer.
-    // Аналогично тесту 06 (строка if (!allocData || allocData.allocated_orders === 0) return).
+    // Если нет NEW-заказов или STORED-товаров — выходим без scan-shipping-buffer.
     const allocData = JSON.parse(allocRes.body).data;
     if (!allocData || allocData.allocated_orders === 0) return;
 
-    // tasks
     const tasksRes = http.get(
       `${BASE_URL}/assembly/tasks?destination_id=${destinationId}`,
       { headers: H },
@@ -283,10 +270,8 @@ export default function (data) {
     const tasks = (tasksBody && tasksBody.tasks) ? tasksBody.tasks : [];
     if (tasks.length === 0) return;
 
-    // pick each task; запоминаем подобранные product_id для отгрузки.
-    // Замечание: allocate выбирает ЛЮБЫЕ STORED-товары для данного destination,
+    // allocate выбирает ЛЮБЫЕ STORED-товары для данного destination,
     // не обязательно тот productId, что создан в блоке receiving_table этой итерации.
-    // Поэтому отгружать нужно именно эти product_id, а не productId из receiving.
     for (const task of tasks) {
       if (!task.product_id) continue;
       const pickRes = http.post(
@@ -303,9 +288,8 @@ export default function (data) {
       sleep(0.02);
     }
 
-    if (pickedProductIds.length === 0) return; // pick не сработал — пропускаем scan-buffer
+    if (pickedProductIds.length === 0) return;
 
-    // scan-shipping-buffer → перекладывает подобранные товары в буфер отгрузки
     const shipBufRes = http.post(
       `${BASE_URL}/assembly/scan-shipping-buffer`,
       JSON.stringify({ buffer_bin_id: shippingBinId }),
@@ -317,24 +301,18 @@ export default function (data) {
   sleep(0.05);
 
   // ── БЛОК 4: Shipping ─────────────────────────────────────────────────────
-  // Отгружаем только если assembly успешно поместил товары в буфер.
   if (pickedProductIds.length === 0) {
     sleep(0.2);
     return;
   }
 
   group('shipping', () => {
-    // scan-buffer (read-only: проверяет содержимое буфера)
     http.post(
       `${BASE_URL}/shipping/scan-buffer`,
       JSON.stringify({ buffer_bin_id: shippingBinId }),
       { headers: H },
     );
 
-    // scan-driver → AT_GATE.
-    // Каждый рейс может быть переведён в AT_GATE только одним VU (первым для данного кода).
-    // Остальные VU получат 409 DISPATCH_ALREADY_AT_GATE — это ожидаемо при concurrent тесте.
-    // Ротация dispatch_code по VU/ITER снижает число 409 относительно варианта с 1 кодом.
     if (!dispatchCode) return;
     const driverRes = http.post(
       `${BASE_URL}/shipping/scan-driver`,
@@ -347,10 +325,7 @@ export default function (data) {
     const dispatchId = driverData ? driverData.dispatch_id : null;
     if (!dispatchId) return;
 
-    // ship → outbox events → Kafka → blockchain (async).
-    // Отгружаем именно подобранные в assembly товары (pickedProductIds),
-    // а не productId из receiving: allocate назначает любые STORED-товары на заказ,
-    // не обязательно тот, что создан в этой итерации.
+    // Отгружаем именно подобранные в assembly товары (pickedProductIds).
     const shipRes = http.post(
       `${BASE_URL}/shipping/ship`,
       JSON.stringify({

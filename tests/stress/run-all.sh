@@ -1,13 +1,15 @@
 #!/bin/sh
-# run-all.sh — последовательный запуск всех нагрузочных тестов (01–07).
+# run-all.sh — последовательный запуск всех нагрузочных тестов (01–08).
 #
 # Запускается внутри Docker-контейнера k6 (профиль stress).
 # Шаги:
 #   1. Очистка предыдущих stress-данных (допустим сбой — первый прогон)
 #   2. Засев данных (stress-seed.sql)
-#   3. Разрешение UUID ячеек и рейсов через psql
-#   4. Последовательный запуск тестов 01–07
-#   5. Итоговый отчёт
+#   3. Генерация JSON-файлов UUID грузомест и продуктов для SharedArray
+#   4. Разрешение UUID ячеек и рейсов через psql
+#   5. Последовательный запуск тестов 01–08
+#   6. Мониторинг blockchain pipeline после теста 08
+#   7. Итоговый отчёт
 
 DB_HOST="${DB_HOST:-postgres}"
 DB_PORT="${DB_PORT:-5432}"
@@ -42,10 +44,11 @@ psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
      -f /tests/stress/setup/stress-seed.sql > /dev/null \
     || { echo "[SEED] FATAL: stress-seed.sql завершился с ошибкой." >&2; exit 1; }
 
-# ── 3. Генерация JSON с UUID грузомест ───────────────────────────────────────
+# ── 3. Генерация JSON с UUID грузомест и продуктов ───────────────────────────
 # Тест 05 использует STRESS-TABLE-CP-* (stress-table-cps.json).
-# Тест 07 использует STRESS-FLOW-CP-*  (stress-flow-cps.json) — отдельный пул,
-# чтобы тест 07 не получал уже закрытые (TABLE_CLOSED) грузоместа из теста 05.
+# Тест 07 использует STRESS-FLOW-CP-*  (stress-flow-cps.json).
+# Тест 08 использует STRESS-TPS-QR-*  (stress-tps-products.json).
+
 echo "[SEED] Генерация /tmp/stress-table-cps.json (тест 05)..."
 psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
     -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code), '[]')
@@ -76,6 +79,21 @@ if [ "${FLOW_CP_COUNT:-0}" -eq 0 ]; then
 fi
 echo "[SEED] /tmp/stress-flow-cps.json: ${FLOW_CP_COUNT} UUID готово"
 
+echo "[SEED] Генерация /tmp/stress-tps-products.json (тест 08)..."
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+    -tAc "SELECT COALESCE(json_agg(product_id::text ORDER BY qr_code), '[]')
+          FROM wms_inventory.products
+          WHERE qr_code LIKE 'STRESS-TPS-QR-%'" \
+    | tr -d '[:space:]' > /tmp/stress-tps-products.json
+
+TPS_PROD_COUNT=$(psql_q "SELECT count(*) FROM wms_inventory.products
+                         WHERE qr_code LIKE 'STRESS-TPS-QR-%'")
+if [ "${TPS_PROD_COUNT:-0}" -eq 0 ]; then
+    echo "[SEED] FATAL: продукты STRESS-TPS-QR-* не найдены после засева." >&2
+    exit 1
+fi
+echo "[SEED] /tmp/stress-tps-products.json: ${TPS_PROD_COUNT} UUID готово"
+
 # ── 4. Разрешение UUID ячеек и рейсов ────────────────────────────────────────
 echo "[SEED] Разрешение UUID ячеек и рейсов..."
 
@@ -91,6 +109,7 @@ STORAGE_BIN_ID=$(psql_q "
   WHERE b.code = 'A-01-01' AND w.name = 'Склад Москва-Север'
   LIMIT 1")
 
+# SHOP-7: для теста 06
 DESTINATION_ID=$(psql_q "
   SELECT d.destination_id FROM wms_inventory.destinations d
   JOIN wms_inventory.warehouses w ON w.warehouse_id = d.warehouse_id
@@ -110,7 +129,7 @@ DISPATCH_CODE=$(psql_q "
   ORDER BY d.dispatch_code
   LIMIT 1")
 
-# Тест 07 использует отдельный пул: SHOP-5 (чтобы не конкурировать с тестом 06 за заказы SHOP-7).
+# SHOP-5: для теста 07 (изолированный пул, не конкурирует с тестом 06)
 DESTINATION_ID_07=$(psql_q "
   SELECT d.destination_id FROM wms_inventory.destinations d
   JOIN wms_inventory.warehouses w ON w.warehouse_id = d.warehouse_id
@@ -148,7 +167,7 @@ echo "  DESTINATION_ID_07 = ${DESTINATION_ID_07} (SHOP-5, тест 07)"
 echo "  SHIPPING_BIN_ID_07= ${SHIPPING_BIN_ID_07}"
 echo "  DISPATCH_CODE_07  = ${DISPATCH_CODE_07}"
 
-# ── 4. Функция запуска одного теста ──────────────────────────────────────────
+# ── 5. Функция запуска одного теста ──────────────────────────────────────────
 # Принимает имя файла как $1, остальные аргументы передаются в k6.
 # Не прерывает прогон при превышении порогов — собирает счётчик сбоев.
 FAILED=0
@@ -168,7 +187,7 @@ run_test() {
     fi
 }
 
-# ── 5. Прогон сценариев ───────────────────────────────────────────────────────
+# ── 6. Прогон сценариев 01–07 ─────────────────────────────────────────────────
 
 run_test "01-smoke.js"
 
@@ -192,13 +211,88 @@ run_test "07-full-flow.js" \
     -e "SHIPPING_BIN_ID=${SHIPPING_BIN_ID_07}" \
     -e "DISPATCH_CODE=${DISPATCH_CODE_07}"
 
-# ── 6. Итог ───────────────────────────────────────────────────────────────────
+# ── 7. Blockchain TPS: тест 08 + мониторинг pipeline ─────────────────────────
+# Тест 08 генерирует 5000 putaway-событий через WMS API (синхронная часть).
+# После завершения теста run-all.sh ждёт 60s и измеряет, сколько событий
+# прошло через весь pipeline (Debezium → Kafka → ledger-adapter → blockchain).
+echo ""
+echo "══════════════════════════════════════════"
+echo "  Blockchain TPS — подготовка мониторинга"
+echo "══════════════════════════════════════════"
+
+OUTBOX_BEFORE=$(psql_q "SELECT count(*) FROM public.outbox_events")
+ONCHAIN_COMMITTED_BEFORE=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status = 'COMMITTED'")
+TIME_BEFORE=$(date +%s)
+
+echo "  Baseline: outbox_events=${OUTBOX_BEFORE}, onchain_COMMITTED=${ONCHAIN_COMMITTED_BEFORE}"
+
+run_test "08-blockchain-tps.js" \
+    -e "RECEIVING_BIN_ID=${RECEIVING_BIN_ID}" \
+    -e "STORAGE_BIN_ID=${STORAGE_BIN_ID}"
+
+TIME_AFTER_TEST=$(date +%s)
+TEST_DURATION=$((TIME_AFTER_TEST - TIME_BEFORE))
+OUTBOX_AFTER=$(psql_q "SELECT count(*) FROM public.outbox_events")
+OUTBOX_DELTA=$((OUTBOX_AFTER - OUTBOX_BEFORE))
+WMS_EPS=$(echo "scale=1; if (${TEST_DURATION} > 0) ${OUTBOX_DELTA} / ${TEST_DURATION} else 0" \
+    | bc 2>/dev/null || echo "n/a")
+
+echo ""
+echo "══════════════════════════════════════════"
+echo "  Blockchain pipeline: результаты"
+echo "══════════════════════════════════════════"
+echo ""
+echo "  [WMS — синхронная часть]"
+echo "    outbox_events создано : ${OUTBOX_DELTA}"
+echo "    время теста 08        : ${TEST_DURATION}s"
+echo "    WMS event rate        : ${WMS_EPS} events/s"
+echo ""
+echo "  Ожидание async pipeline (60s)..."
+echo "  (Debezium CDC → Kafka → ledger-adapter → Subnet-EVM contract)"
+sleep 60
+
+ONCHAIN_COMMITTED_AFTER=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status = 'COMMITTED'")
+ONCHAIN_PENDING=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status IN ('PENDING', 'SENT')")
+ONCHAIN_FAILED=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status = 'FAILED'")
+OUTBOX_BACKLOG=$(psql_q "
+  SELECT count(*) FROM public.outbox_events oe
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.onchain_events oc WHERE oc.event_id = oe.event_id
+  )")
+ONCHAIN_DELTA=$((ONCHAIN_COMMITTED_AFTER - ONCHAIN_COMMITTED_BEFORE))
+TIME_ELAPSED=$(( $(date +%s) - TIME_BEFORE ))
+CHAIN_EPS=$(echo "scale=1; if (${TIME_ELAPSED} > 0) ${ONCHAIN_DELTA} / ${TIME_ELAPSED} else 0" \
+    | bc 2>/dev/null || echo "n/a")
+
+echo ""
+echo "  [Blockchain — асинхронная часть, +60s после теста]"
+echo "    onchain COMMITTED     : +${ONCHAIN_DELTA} (всего ${ONCHAIN_COMMITTED_AFTER})"
+echo "    blockchain commit rate: ${CHAIN_EPS} events/s (за ${TIME_ELAPSED}s)"
+echo "    onchain PENDING/SENT  : ${ONCHAIN_PENDING}"
+echo "    onchain FAILED        : ${ONCHAIN_FAILED}"
+echo "    outbox backlog        : ${OUTBOX_BACKLOG} (не обработаны Debezium/Kafka)"
+echo ""
+if [ "${ONCHAIN_DELTA}" -gt 0 ]; then
+    echo "  ✓ Blockchain pipeline активен: ${ONCHAIN_DELTA} событий подтверждено"
+elif [ "${OUTBOX_BACKLOG}" -gt 0 ]; then
+    echo "  ✗ Blockchain pipeline не обработал события за ${TIME_ELAPSED}s"
+    echo "    Проверьте:"
+    echo "      1. Debezium-коннектор запущен (docker ps | grep debezium)"
+    echo "      2. PRIVATE_KEY задан в .env (не нулевой ключ)"
+    echo "      3. CONTRACT_ADDR задан в .env"
+    echo "      4. RPC_URL доступен из контейнера ledger-adapter"
+else
+    echo "  ─ Blockchain pipeline: нет новых событий для обработки"
+fi
+echo "══════════════════════════════════════════"
+
+# ── 8. Итог ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=========================================="
 if [ "${FAILED}" -eq 0 ]; then
-    echo "  Все 7 тестов пройдены успешно."
+    echo "  Все 8 тестов пройдены успешно."
 else
-    echo "  Завершено: ${FAILED} из 7 тестов не прошли пороговые значения."
+    echo "  Завершено: ${FAILED} из 8 тестов не прошли пороговые значения."
 fi
 echo "=========================================="
 

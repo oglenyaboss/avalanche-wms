@@ -10,9 +10,13 @@
  *   POST /receiving/table/scan-buffer
  *   POST /receiving/table/close-cargoplace  ← создаёт outbox event (→ Kafka → блокчейн)
  *
+ * Модель нагрузки: closed-model (shared-iterations).
+ * Каждая итерация получает уникальный UUID грузоместа через exec.scenario.iterationInTest,
+ * что гарантирует отсутствие коллизий и «409 уже закрыто» в рамках одного прогона.
+ *
  * Требования к данным:
  *   Перед запуском выполнить: tests/stress/setup/stress-seed.sql
- *   (создаёт грузоместа STRESS-TABLE-CP-XXXX в статусе RECEIVED_AT_GATE)
+ *   (создаёт грузоместа STRESS-TABLE-CP-0001..2000 в статусе RECEIVED_AT_GATE)
  *
  * Запуск:
  *   k6 run tests/stress/05-receiving-table.js
@@ -24,40 +28,32 @@ import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
 
-const TOTAL_CARGOPLACES = 500;
-
-// Barcode и SKU ID берутся из seed.sql: 'E2E Seed Outbound SKU' / '4600000099999'
-// SKU ID будет запрошен через scan-sku по barcode — не нужно хардкодить UUID.
+const TOTAL_CARGOPLACES = 2000;
 const SEED_BARCODE = '4600000099999';
 
-// UUID грузомест STRESS-TABLE-CP-0001..0500 (в том же порядке, что и cargoplace_code).
+// UUID грузомест STRESS-TABLE-CP-0001..2000 (в том же порядке, что и cargoplace_code).
 // Файл генерируется run-all.sh перед запуском теста.
-// Для локального запуска: psql -tAc "SELECT COALESCE(json_agg(cargoplace_id::text
-//   ORDER BY cargoplace_code), '[]') FROM wms_inventory.cargoplaces
-//   WHERE cargoplace_code LIKE 'STRESS-TABLE-CP-%'" | tr -d '[:space:]'
-//   > /tmp/stress-table-cps.json
 const CP_UUIDS = new SharedArray('table_cargoplaces', () =>
   JSON.parse(open('/tmp/stress-table-cps.json')));
 
 export const options = {
   scenarios: {
     table_flow: {
-      executor: 'ramping-vus',
-      stages: [
-        { duration: '30s', target: 5 },
-        { duration: '2m',  target: 30 },
-        { duration: '3m',  target: 60 },
-        { duration: '30s', target: 0 },
-      ],
+      // closed-model: ровно TOTAL_CARGOPLACES итераций, каждая — уникальное грузоместо.
+      executor: 'shared-iterations',
+      vus: 60,
+      iterations: TOTAL_CARGOPLACES,
+      maxDuration: '8m',
     },
   },
   thresholds: {
     'http_req_duration{step:scan_table_cp}': ['p(95)<250'],
-    'http_req_duration{step:scan_box}': ['p(95)<250'],
-    'http_req_duration{step:scan_sku}': ['p(95)<250'],
-    'http_req_duration{step:scan_qr}': ['p(95)<250'],
-    'http_req_duration{step:close_cp}': ['p(95)<500'],
-    http_req_failed: ['rate<0.15'],
+    'http_req_duration{step:scan_box}':      ['p(95)<250'],
+    'http_req_duration{step:scan_sku}':      ['p(95)<250'],
+    'http_req_duration{step:scan_qr}':       ['p(95)<250'],
+    'http_req_duration{step:close_cp}':      ['p(95)<500'],
+    // При shared-iterations каждое грузоместо обрабатывается ровно один раз.
+    http_req_failed: ['rate<0.02'],
   },
 };
 
@@ -67,9 +63,6 @@ export function setup() {
     exec.test.abort('setup: не удалось получить токен оператора. Проверьте WMS_URL и учётные данные.');
   }
 
-  // Резолвим UUID буфера приёмки через env-переменную.
-  // Если не задана — тест всё равно запустится, но пропустит шаг scan-buffer
-  // (это допустимо: close-cargoplace создаёт outbox event независимо от буфера).
   const bufferBinId = __ENV.RECEIVING_BIN_ID || '';
   if (!bufferBinId) {
     console.warn(
@@ -84,23 +77,23 @@ export default function (data) {
   const { token, bufferBinId } = data;
   if (!token) return;
 
-  // 404 = грузоместо не найдено; 409 = грузоместо уже закрыто (нормально после обработки всех 500).
+  // 404 = грузоместо не найдено; 409 = гонка (два VU взяли одно грузоместо) — редко.
   http.setResponseCallback(http.expectedStatuses(
     { min: 200, max: 299 },
     404,
     409,
   ));
 
-  // UUID грузоместа для этого VU/ITER (0-indexed в CP_UUIDS).
-  // Множитель = пиковый maxVUs (60): каждый round сдвигается на 60 позиций,
-  // все 500 грузомест покрываются за ceil(500/60)=9 итераций без пробелов.
-  const cpIdx = ((__VU - 1 + (__ITER * 60)) % TOTAL_CARGOPLACES);
+  // exec.scenario.iterationInTest: глобальный уникальный индекс 0 … TOTAL_CARGOPLACES-1.
+  // Каждая итерация получает уникальный UUID без коллизий.
+  const cpIdx = exec.scenario.iterationInTest;
   const cargoplaceId = CP_UUIDS[cpIdx];
-  if (!cargoplaceId) return; // данные не засеяны
+  if (!cargoplaceId) {
+    console.warn(`VU${__VU}: no cargoplace UUID at index ${cpIdx} — check stress-seed.sql`);
+    return;
+  }
 
   const H = authHeaders(token);
-
-  // Уникальный QR-код для этой итерации (VU + ITER гарантируют уникальность)
   const qrCode = `STRESS-QR-${pad(__VU, 4)}-${pad(__ITER, 6)}`;
   const boxBarcode = `STRESS-BOX-${pad(__VU, 4)}-${pad(__ITER, 6)}`;
 
@@ -111,14 +104,11 @@ export default function (data) {
     { headers: H, tags: { step: 'scan_table_cp' } },
   );
 
-  const cpOk = check(cpRes, {
-    'scan_table_cp: 200 or 404/409': (r) => [200, 404, 409].includes(r.status),
+  check(cpRes, {
+    'scan_table_cp: 200': (r) => r.status === 200,
   });
 
-  if (cpRes.status !== 200) {
-    // Грузоместо не найдено или уже в работе — пропускаем итерацию
-    return;
-  }
+  if (cpRes.status !== 200) return;
 
   sleep(0.05);
 

@@ -3,45 +3,45 @@
  *
  * Цель: нагрузочное тестирование потока КПП-приёмки:
  *   POST /receiving/gate/scan-ttn
- *   POST /receiving/gate/scan-cargoplace  (×N для каждого грузоместа)
- *   POST /receiving/gate/accept-shipment
+ *   POST /receiving/gate/scan-cargoplace  (×2 из 3)
+ *   POST /receiving/gate/accept-shipment  (закрывает приёмку явно)
+ *
+ * Модель нагрузки: closed-model (shared-iterations).
+ * Каждая итерация получает уникальный TTN через exec.scenario.iterationInTest,
+ * что гарантирует отсутствие повторов и «409 уже закрыто» за пределами одного прогона.
  *
  * Требования к данным:
  *   Перед запуском выполнить: tests/stress/setup/stress-seed.sql
- *   (создаёт STRESS-TTN-0001 … STRESS-TTN-0500, по 3 грузоместа каждая)
- *
- * Каждый VU берёт TTN по формуле: ((__VU - 1) + __ITER * maxVUs) % TOTAL_SHIPMENTS
- * Если поставка уже закрыта (409), VU логирует предупреждение и переходит дальше.
+ *   (создаёт STRESS-TTN-0001 … STRESS-TTN-2000, по 3 грузоместа каждая)
  *
  * Запуск:
  *   k6 run tests/stress/04-receiving-gate.js
  */
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { BASE_URL, THRESHOLDS_STRICT } from './lib/config.js';
+import exec from 'k6/execution';
+import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
 
-const TOTAL_SHIPMENTS = 500;  // должно совпадать с числом в stress-seed.sql
-const CARGOPLACES_PER_SHIPMENT = 3;
+const TOTAL_SHIPMENTS = 2000;  // должно совпадать с числом в stress-seed.sql
 
 export const options = {
   scenarios: {
     ramp: {
-      executor: 'ramping-vus',
-      stages: [
-        { duration: '30s', target: 10 },
-        { duration: '2m',  target: 50 },
-        { duration: '3m',  target: 100 },
-        { duration: '1m',  target: 0 },
-      ],
+      // closed-model: ровно TOTAL_SHIPMENTS итераций, каждая — уникальный TTN.
+      // Тест завершается естественно, когда все сущности обработаны.
+      executor: 'shared-iterations',
+      vus: 50,
+      iterations: TOTAL_SHIPMENTS,
+      maxDuration: '8m',
     },
   },
   thresholds: {
     'http_req_duration{step:scan_ttn}': ['p(95)<250', 'p(99)<600'],
-    'http_req_duration{step:scan_cp}': ['p(95)<250', 'p(99)<600'],
-    'http_req_duration{step:accept}': ['p(95)<250', 'p(99)<600'],
-    // Допустимые ошибки: ~409 SHIPMENT_ALREADY_CLOSED при повторном прогоне с теми же данными
-    http_req_failed: ['rate<0.15'],
+    'http_req_duration{step:scan_cp}':  ['p(95)<250', 'p(99)<600'],
+    'http_req_duration{step:accept}':   ['p(95)<250', 'p(99)<600'],
+    // При shared-iterations каждый TTN используется ровно один раз → ошибок почти нет.
+    http_req_failed: ['rate<0.02'],
   },
 };
 
@@ -57,18 +57,16 @@ export default function (data) {
   const token = data.token;
   if (!token) return;
 
-  // 404 = данные не засеяны; 409 = поставка уже закрыта (нормально после обработки всех 500).
-  // Без этого callback-а k6 считает 4xx в http_req_failed и валит порог на длинных прогонах.
+  // 404 = данные не засеяны; 409 = гонка (два VU взяли один TTN) — редко.
   http.setResponseCallback(http.expectedStatuses(
     { min: 200, max: 299 },
     404,
     409,
   ));
 
-  // Уникальный индекс поставки для этого VU + итерации.
-  // Множитель = пиковый maxVUs (100), чтобы каждый новый round охватывал
-  // следующий блок из 100 поставок без пересечений внутри одного round.
-  const idx = ((__VU - 1 + (__ITER * 100)) % TOTAL_SHIPMENTS) + 1;
+  // exec.scenario.iterationInTest: глобальный уникальный счётчик 0 … TOTAL_SHIPMENTS-1.
+  // Каждая итерация получает свой TTN без повторов и без формулы __VU × __ITER.
+  const idx = exec.scenario.iterationInTest + 1; // 1-indexed → STRESS-TTN-0001..2000
   const ttnCode = `STRESS-TTN-${pad(idx, 4)}`;
 
   const JSON_H = authHeaders(token);
@@ -85,7 +83,6 @@ export default function (data) {
   });
 
   if (!ttnOk) {
-    // 404 — данные не засеяны; 409 — поставка уже обработана в предыдущем запуске
     if (ttnRes.status === 404) {
       console.warn(`VU${__VU}: TTN ${ttnCode} not found — run stress-seed.sql first`);
     }
@@ -100,8 +97,11 @@ export default function (data) {
 
   sleep(0.05);
 
-  // 2. scan-cargoplace для каждого грузоместа
-  for (const cp of cargoplaces) {
+  // 2. scan-cargoplace для первых N-1 грузомест.
+  //    Сканирование ВСЕХ грузомест вызывает авто-закрытие поставки (GATE_CLOSED),
+  //    поэтому оставляем последнее грузоместо для явного accept-shipment.
+  const cpToScan = cargoplaces.length > 1 ? cargoplaces.slice(0, -1) : cargoplaces;
+  for (const cp of cpToScan) {
     const cpRes = http.post(
       `${BASE_URL}/receiving/gate/scan-cargoplace`,
       JSON.stringify({ shipment_id: shipmentId, cargoplace_code: cp.cargoplace_code }),
@@ -113,15 +113,20 @@ export default function (data) {
     sleep(0.02);
   }
 
-  // 3. accept-shipment
+  // 3. accept-shipment — явное закрытие приёмки (поставка переходит в GATE_CLOSED).
+  //    Если у поставки только 1 грузоместо и мы уже отсканировали его выше,
+  //    авто-закрытие могло произойти → accept вернёт 409; это допустимо.
   const acceptRes = http.post(
     `${BASE_URL}/receiving/gate/accept-shipment`,
     JSON.stringify({ shipment_id: shipmentId }),
     { headers: JSON_H, tags: { step: 'accept' } },
   );
   check(acceptRes, {
-    'accept: 200': (r) => r.status === 200,
-    'accept: GATE_CLOSED': (r) => {
+    // 200 = явное закрытие; 409 = авто-закрытие уже произошло (последнее CP auto-closed).
+    // Оба исхода означают, что поставка успешно закрыта.
+    'accept: shipment closed (200 or 409)': (r) => r.status === 200 || r.status === 409,
+    'accept: GATE_CLOSED in body (if 200)': (r) => {
+      if (r.status !== 200) return true; // 409 → auto-closed, пропускаем body-check
       try { return JSON.parse(r.body).data.status === 'GATE_CLOSED'; } catch (_) { return false; }
     },
   });
