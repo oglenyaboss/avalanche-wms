@@ -9,8 +9,20 @@ export function GateReceiving() {
   const { state } = gate
   const isErrorOpen = state.errorMessage !== null
 
+  // Persistent live region: the success/close message, or the running gate
+  // progress so each scan is announced to screen-reader users.
+  const announcement =
+    state.successMessage ??
+    (state.shipment
+      ? `Принято ${state.shipment.progress.received} из ${state.shipment.progress.total}`
+      : '')
+
   return (
     <div className="mx-auto w-full max-w-2xl">
+      <div role="status" aria-live="polite" className="sr-only">
+        {announcement}
+      </div>
+
       {state.phase === 'shipment' && state.shipment ? (
         <ShipmentReceiving
           shipment={state.shipment}
@@ -24,6 +36,7 @@ export function GateReceiving() {
           onScan={gate.submitTtn}
           isScanning={gate.isScanningTtn}
           successMessage={state.successMessage}
+          isBlocked={isErrorOpen}
         />
       )}
 

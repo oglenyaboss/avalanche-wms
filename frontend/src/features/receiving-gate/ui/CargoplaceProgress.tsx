@@ -9,7 +9,7 @@ const toneClassName: Record<
   string
 > = {
   pending: 'text-muted-foreground',
-  received: 'text-emerald-600',
+  received: 'text-emerald-700', // 4.5:1 on white; emerald-600 fails WCAG AA
   missing: 'text-destructive',
   neutral: 'text-foreground',
 }

@@ -24,6 +24,7 @@ export function ScanCargoplaceForm({
   })
   const code = useWatch({ control: form.control, name: 'code' })
   const { setFocus } = form
+  const error = form.formState.errors.code
 
   // Keep the scanner input focused so places can be scanned hands-free:
   // on mount, after each scan clears it, and once the error dialog closes.
@@ -54,13 +55,19 @@ export function ScanCargoplaceForm({
           autoComplete="off"
           enterKeyHint="send"
           placeholder="Данные со штрих-кода"
-          aria-invalid={Boolean(form.formState.errors.code)}
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? 'cargoplace-code-error' : undefined}
           {...form.register('code')}
         />
         <Button type="submit" disabled={!code.trim() || isScanning}>
           {isScanning ? 'Подождите...' : 'Подтвердить'}
         </Button>
       </Field>
+      {error ? (
+        <p id="cargoplace-code-error" className="text-sm text-destructive">
+          {error.message}
+        </p>
+      ) : null}
       <p className="text-sm text-muted-foreground">
         В случае неполадки сканирования, введите ШК вручную
       </p>

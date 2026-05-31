@@ -11,10 +11,20 @@ import { apiClient } from '@/shared/api'
 
 // ── Wire shapes (snake_case, as returned by the WMS API) ────────────────────
 
-interface SuccessEnvelope<T> {
-  success: true
-  data: T
-  error: null
+interface ApiEnvelope<T> {
+  success: boolean
+  data: T | null
+  error: { code: string; message: string } | null
+}
+
+// Non-2xx responses reject via axios. A 200 with success:false / null data
+// would otherwise crash the mappers on a null dereference — guard against it.
+function unwrap<T>(envelope: ApiEnvelope<T>): T {
+  if (!envelope.success || envelope.data === null) {
+    throw new Error(envelope.error?.message ?? 'Некорректный ответ сервера')
+  }
+
+  return envelope.data
 }
 
 interface CargoplaceViewResponse {
@@ -86,12 +96,12 @@ function mapOpenedShipment(result: ScanTtnResultResponse): OpenedShipment {
 // ── Requests ─────────────────────────────────────────────────────────────────
 
 export async function scanTtn(ttnCode: string): Promise<OpenedShipment> {
-  const { data } = await apiClient.post<SuccessEnvelope<ScanTtnResultResponse>>(
+  const { data } = await apiClient.post<ApiEnvelope<ScanTtnResultResponse>>(
     '/receiving/gate/scan-ttn',
     { ttn_code: ttnCode },
   )
 
-  return mapOpenedShipment(data.data)
+  return mapOpenedShipment(unwrap(data))
 }
 
 export interface ScanGateCargoplaceInput {
@@ -104,13 +114,13 @@ export async function scanGateCargoplace({
   cargoplaceCode,
 }: ScanGateCargoplaceInput): Promise<CargoplaceScanResult> {
   const { data } = await apiClient.post<
-    SuccessEnvelope<ScanGateCargoplaceResultResponse>
+    ApiEnvelope<ScanGateCargoplaceResultResponse>
   >('/receiving/gate/scan-cargoplace', {
     shipment_id: shipmentId,
     cargoplace_code: cargoplaceCode,
   })
 
-  const result = data.data
+  const result = unwrap(data)
 
   return {
     cargoplace: {
@@ -127,10 +137,10 @@ export async function acceptShipment(
   shipmentId: string,
 ): Promise<ShipmentCloseResult> {
   const { data } = await apiClient.post<
-    SuccessEnvelope<AcceptShipmentResultResponse>
+    ApiEnvelope<AcceptShipmentResultResponse>
   >('/receiving/gate/accept-shipment', { shipment_id: shipmentId })
 
-  const result = data.data
+  const result = unwrap(data)
 
   return {
     shipmentId: result.shipment_id,

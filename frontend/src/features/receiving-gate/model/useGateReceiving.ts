@@ -29,6 +29,10 @@ export function useGateReceiving() {
   })
 
   const submitTtn = async (code: string) => {
+    if (scanTtnMutation.isPending) {
+      return
+    }
+
     try {
       const shipment = await scanTtnMutation.mutateAsync(code)
       dispatch({ type: 'TTN_OPENED', shipment })
@@ -38,7 +42,9 @@ export function useGateReceiving() {
   }
 
   const submitCargoplace = async (code: string) => {
-    if (!state.shipment) {
+    // Guard against scanner re-entrancy: a keyboard-wedge scanner fires the
+    // form submit on Enter, bypassing the disabled button.
+    if (!state.shipment || scanCargoplaceMutation.isPending) {
       return
     }
 
@@ -59,7 +65,7 @@ export function useGateReceiving() {
   }
 
   const confirmClose = async () => {
-    if (!state.shipment) {
+    if (!state.shipment || acceptShipmentMutation.isPending) {
       return
     }
 
@@ -69,10 +75,14 @@ export function useGateReceiving() {
       )
       dispatch({ type: 'SHIPMENT_CLOSED', result })
     } catch (error) {
-      dispatch({
-        type: 'SHOW_TERMINAL_ERROR',
-        message: getReceivingErrorMessage(error),
-      })
+      // Only a genuinely dead shipment resets the flow; a transient 5xx/network
+      // error keeps the active shipment so the operator can retry.
+      const message = getReceivingErrorMessage(error)
+      dispatch(
+        isTerminalShipmentError(error)
+          ? { type: 'SHOW_TERMINAL_ERROR', message }
+          : { type: 'SHOW_ERROR', message },
+      )
     }
   }
 
@@ -84,7 +94,6 @@ export function useGateReceiving() {
     openConfirmClose: () => dispatch({ type: 'OPEN_CONFIRM_CLOSE' }),
     cancelConfirmClose: () => dispatch({ type: 'CANCEL_CONFIRM_CLOSE' }),
     dismissError: () => dispatch({ type: 'DISMISS_ERROR' }),
-    clearSuccess: () => dispatch({ type: 'CLEAR_SUCCESS' }),
     isScanningTtn: scanTtnMutation.isPending,
     isScanningCargoplace: scanCargoplaceMutation.isPending,
     isClosing: acceptShipmentMutation.isPending,

@@ -33,7 +33,6 @@ export type GateAction =
   | { type: 'OPEN_CONFIRM_CLOSE' }
   | { type: 'CANCEL_CONFIRM_CLOSE' }
   | { type: 'RESET' }
-  | { type: 'CLEAR_SUCCESS' }
 
 export const initialGateState: GateState = {
   phase: 'ttn',
@@ -146,10 +145,6 @@ export function gateReducer(state: GateState, action: GateAction): GateState {
 
     case 'CANCEL_CONFIRM_CLOSE': {
       return { ...state, confirmCloseOpen: false }
-    }
-
-    case 'CLEAR_SUCCESS': {
-      return { ...state, successMessage: null }
     }
 
     case 'RESET': {
