@@ -5,6 +5,7 @@ import { ProtectedRoute } from '@/app/providers/ProtectedRoute'
 import { HomePage } from '@/pages/home'
 import { LoginPage } from '@/pages/login'
 import { NotFoundPage } from '@/pages/not-found'
+import { PutawayPage } from '@/pages/putaway'
 import { ReceivingGatePage } from '@/pages/receiving-gate'
 import { ReceivingTablePage } from '@/pages/receiving-table'
 import { routes } from '@/shared/config/routes'
@@ -37,6 +38,10 @@ const router = createBrowserRouter([
           {
             path: routes.receivingTable,
             element: <ReceivingTablePage />,
+          },
+          {
+            path: routes.putaway,
+            element: <PutawayPage />,
           },
         ],
       },
