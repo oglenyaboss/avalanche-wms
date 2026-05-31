@@ -20,6 +20,7 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import exec from 'k6/execution';
+import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
 
@@ -28,6 +29,15 @@ const TOTAL_CARGOPLACES = 500;
 // Barcode и SKU ID берутся из seed.sql: 'E2E Seed Outbound SKU' / '4600000099999'
 // SKU ID будет запрошен через scan-sku по barcode — не нужно хардкодить UUID.
 const SEED_BARCODE = '4600000099999';
+
+// UUID грузомест STRESS-TABLE-CP-0001..0500 (в том же порядке, что и cargoplace_code).
+// Файл генерируется run-all.sh перед запуском теста.
+// Для локального запуска: psql -tAc "SELECT COALESCE(json_agg(cargoplace_id::text
+//   ORDER BY cargoplace_code), '[]') FROM wms_inventory.cargoplaces
+//   WHERE cargoplace_code LIKE 'STRESS-TABLE-CP-%'" | tr -d '[:space:]'
+//   > /tmp/stress-table-cps.json
+const CP_UUIDS = new SharedArray('table_cargoplaces', () =>
+  JSON.parse(open('/tmp/stress-table-cps.json')));
 
 export const options = {
   scenarios: {
@@ -74,8 +84,10 @@ export default function (data) {
   const { token, bufferBinId } = data;
   if (!token) return;
 
-  const idx = ((__VU - 1 + (__ITER * 200)) % TOTAL_CARGOPLACES) + 1;
-  const cpCode = `STRESS-TABLE-CP-${pad(idx, 4)}`;
+  // UUID грузоместа для этого VU/ITER (0-indexed в CP_UUIDS)
+  const cpIdx = ((__VU - 1 + (__ITER * 200)) % TOTAL_CARGOPLACES);
+  const cargoplaceId = CP_UUIDS[cpIdx];
+  if (!cargoplaceId) return; // данные не засеяны
 
   const H = authHeaders(token);
 
@@ -86,13 +98,9 @@ export default function (data) {
   // 1. scan-cargoplace (table)
   const cpRes = http.post(
     `${BASE_URL}/receiving/table/scan-cargoplace`,
-    JSON.stringify({ cargoplace_id: cpCode }),  // передаём код; API ожидает UUID
+    JSON.stringify({ cargoplace_id: cargoplaceId }),
     { headers: H, tags: { step: 'scan_table_cp' } },
   );
-  // Примечание: scan-cargoplace ожидает cargoplace_id (UUID), не код.
-  // Поэтому UUID будет разрешён через setup(), которая читает из БД.
-  // Пока тест работает с кодами — реальный UUID нужно получить из seed-data.json.
-  // См. INSTRUCTIONS.md раздел "Генерация data/stress-table-data.json".
 
   const cpOk = check(cpRes, {
     'scan_table_cp: 200 or 404/409': (r) => [200, 404, 409].includes(r.status),
@@ -102,10 +110,6 @@ export default function (data) {
     // Грузоместо не найдено или уже в работе — пропускаем итерацию
     return;
   }
-
-  const cpData = JSON.parse(cpRes.body).data;
-  const cargoplaceId = cpData ? cpData.cargoplace_id : null;
-  if (!cargoplaceId) return;
 
   sleep(0.05);
 

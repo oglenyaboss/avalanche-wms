@@ -36,8 +36,14 @@
 import http from 'k6/http';
 import { check, sleep, group } from 'k6';
 import exec from 'k6/execution';
+import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
+
+// UUID грузомест STRESS-TABLE-CP-0001..0500 (0-indexed, порядок по cargoplace_code).
+// Файл генерируется run-all.sh перед запуском теста.
+const CP_UUIDS = new SharedArray('table_cargoplaces', () =>
+  JSON.parse(open('/tmp/stress-table-cps.json')));
 
 export const options = {
   scenarios: {
@@ -111,14 +117,11 @@ export default function (data) {
 
   const H = authHeaders(token);
   const suffix = `${pad(__VU, 4)}-${pad(__ITER, 6)}`;
-  const cpIdx = ((__VU - 1 + __ITER * 200) % 500) + 1;
-  const cargoplaceId = data[`cp_${cpIdx}`] || ''; // UUID из stress-table-data.json
+  const cpIdx = ((__VU - 1 + __ITER * 200) % 500); // 0-indexed → CP_UUIDS[0..499]
+  const cargoplaceId = CP_UUIDS[cpIdx] || '';
 
   if (!cargoplaceId) {
-    // Если UUID грузоместа не передан в setup() — тест пропускает receiving шаг
-    // и сразу проверяет putaway (нужен product в RECEIVED статусе из другого теста)
-    // Полный поток без data/stress-full-flow-data.json невозможен.
-    console.warn(`VU${__VU}: no cargoplace UUID for index ${cpIdx} — run generate-stress-data.sh`);
+    console.warn(`VU${__VU}: no cargoplace UUID at index ${cpIdx} — check stress-seed.sql`);
     return;
   }
 

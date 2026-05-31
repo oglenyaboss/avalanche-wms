@@ -45,9 +45,9 @@ export const options = {
   },
 };
 
-// setup() запускается один раз и возвращает данные для всех VU
+// setup() проверяет доступность /auth/login до старта VU.
+// refreshLoad получает токен самостоятельно — shared-данные не нужны.
 export function setup() {
-  // Получаем refresh-токен для сценария refresh_stress
   const res = http.post(
     `${BASE_URL}/auth/login`,
     JSON.stringify({ username: 'operator', password: 'operator' }),
@@ -55,10 +55,8 @@ export function setup() {
   );
   if (res.status !== 200) {
     console.error(`setup: login failed with status ${res.status}: ${res.body}`);
-    return { refreshToken: '' };
   }
-  const body = JSON.parse(res.body);
-  return { refreshToken: body.refresh_token || '' };
+  return {};
 }
 
 // Нагрузка на login
@@ -78,15 +76,30 @@ export function loginLoad() {
   sleep(0.5);
 }
 
-// Нагрузка на refresh
-export function refreshLoad(data) {
-  if (!data.refreshToken) {
-    console.warn('refreshLoad: no refresh token, skipping');
+// Нагрузка на refresh.
+// Каждый VU получает собственный refresh-токен через login — нельзя делить
+// один токен на 30 VU: первый VU его потребляет, остальные получают 401.
+export function refreshLoad() {
+  // Шаг 1: login → получаем свежую пару токенов
+  const loginRes = http.post(
+    `${BASE_URL}/auth/login`,
+    JSON.stringify({ username: 'operator', password: 'operator' }),
+    { headers: JSON_HEADERS },
+  );
+  if (loginRes.status !== 200) {
+    console.warn(`VU${__VU}: refreshLoad login failed (${loginRes.status})`);
     return;
   }
+  let refreshToken = '';
+  try { refreshToken = JSON.parse(loginRes.body).refresh_token || ''; } catch (_) { /* */ }
+  if (!refreshToken) return;
+
+  sleep(0.05);
+
+  // Шаг 2: refresh → получаем новый access_token
   const res = http.post(
     `${BASE_URL}/auth/refresh`,
-    JSON.stringify({ refresh_token: data.refreshToken }),
+    JSON.stringify({ refresh_token: refreshToken }),
     { headers: JSON_HEADERS, tags: { endpoint: 'refresh' } },
   );
   check(res, {

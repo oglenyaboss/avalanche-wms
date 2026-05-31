@@ -41,7 +41,25 @@ echo "[SEED] Засев данных (stress-seed.sql)..."
 psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
      -f /tests/stress/setup/stress-seed.sql > /dev/null
 
-# ── 3. Разрешение UUID ────────────────────────────────────────────────────────
+# ── 3. Генерация JSON с UUID грузомест для тестов 05 и 07 ────────────────────
+# Тесты 05 и 07 передают cargoplace_id как UUID; строковый код API не принимает.
+# Файл: JSON-массив UUID, индекс 0 = STRESS-TABLE-CP-0001, 499 = CP-0500.
+echo "[SEED] Генерация /tmp/stress-table-cps.json..."
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+    -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code), '[]')
+          FROM wms_inventory.cargoplaces
+          WHERE cargoplace_code LIKE 'STRESS-TABLE-CP-%'" \
+    | tr -d '[:space:]' > /tmp/stress-table-cps.json
+
+CP_COUNT=$(psql_q "SELECT count(*) FROM wms_inventory.cargoplaces
+                   WHERE cargoplace_code LIKE 'STRESS-TABLE-CP-%'")
+if [ "${CP_COUNT:-0}" -eq 0 ]; then
+    echo "[SEED] FATAL: грузоместа STRESS-TABLE-CP-* не найдены после засева." >&2
+    exit 1
+fi
+echo "[SEED] /tmp/stress-table-cps.json: ${CP_COUNT} UUID готово"
+
+# ── 4. Разрешение UUID ячеек и рейсов ────────────────────────────────────────
 echo "[SEED] Разрешение UUID ячеек и рейсов..."
 
 RECEIVING_BIN_ID=$(psql_q "

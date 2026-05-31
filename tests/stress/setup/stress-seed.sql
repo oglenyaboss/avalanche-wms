@@ -16,6 +16,21 @@
 BEGIN;
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- 0. Пользователь admin (нужен для 01-smoke.js и 03-auth.js)
+--    В deploy/seed.sql он отсутствует; создаём здесь идемпотентно.
+-- ────────────────────────────────────────────────────────────────────────────
+INSERT INTO public.users (user_id, username, password_hash, role, is_active, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  'admin',
+  crypt('admin', gen_salt('bf')),
+  'ADMIN',
+  true,
+  now(),
+  now()
+ON CONFLICT (username) DO NOTHING;
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- 1. Входящие поставки для теста 04-receiving-gate.js
 --    STRESS-TTN-0001 … STRESS-TTN-0500 в статусе CREATED
 --    (сервис знает только CREATED / GATE_IN_PROGRESS / GATE_CLOSED;
