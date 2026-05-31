@@ -1,813 +1,230 @@
 # API-контракт WMS
 
-**Версия:** 1.0
-**Дата:** 2026-03-31
-**Базовый URL:** `http://localhost:8080/api/v1`
+**Версия:** 2.0
+**Дата:** 2026-05-31
+**Базовый URL:** `http://localhost:8081`
 
-Все эндпоинты WMS-монолита. Каждый endpoint описан с request body, response, ошибками и побочными эффектами. Эндпоинты извлечены из flow-документации — реализация пока в TODO.
+Краткий человекочитаемый компаньон к машинной спецификации. **Источник истины —**
+[`openapi.yaml`](openapi.yaml) (OpenAPI 3.1, написан вручную по коду
+`RegisterRoutes`/`main.go`). Интерактивный просмотр — [`swagger-ui.html`](swagger-ui.html).
 
----
-
-## Формат ответов
-
-Все ответы используют единый конверт:
-
-```json
-{
-  "success": true,
-  "data": { ... },
-  "error": null
-}
-```
-
-При ошибке:
-
-```json
-{
-  "success": false,
-  "data": null,
-  "error": {
-    "code": "CARGOPLACE_NOT_IN_SHIPMENT",
-    "message": "Грузоместо не принадлежит данной поставке"
-  }
-}
-```
-
-HTTP-коды: `200` — успех, `400` — ошибка валидации, `404` — не найдено, `409` — конфликт состояния, `500` — внутренняя ошибка.
+> Этот файл переписан с нуля: предыдущая версия содержала несуществующие эндпоинты
+> (`GET /shipping/orders`, `POST /shipping/verify`), неверный базовый URL
+> (`:8080/api/v1`) и устаревшие поля (`assembly_task_id`). Сверяйтесь только с
+> `openapi.yaml`.
 
 ---
 
-## 1. Приёмка на КПП (Receiving Gate)
+## Как пользоваться
 
-### POST /receiving/gate/scan-ttn
-
-Начало приёмки поставки. Оператор сканирует штрихкод ТТН.
-
-**Request:**
-```json
-{
-  "ttn_code": "TTN-2026-001234"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "shipment_id": "uuid",
-    "ttn_code": "TTN-2026-001234",
-    "status": "GATE_IN_PROGRESS",
-    "cargoplaces": [
-      {
-        "cargoplace_id": "uuid",
-        "cargoplace_code": "CP-001",
-        "status": "EXPECTED"
-      },
-      {
-        "cargoplace_id": "uuid",
-        "cargoplace_code": "CP-002",
-        "status": "EXPECTED"
-      }
-    ],
-    "total_cargoplaces": 10,
-    "received_cargoplaces": 0
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `TTN_NOT_FOUND` | 404 | TTN не найден в БД |
-| `SHIPMENT_ALREADY_CLOSED` | 409 | Поставка уже закрыта (GATE_CLOSED) |
-
-**Побочные эффекты:**
-- UPDATE `inbound_shipments.status` → GATE_IN_PROGRESS
-- INSERT `receiving_gate` (action=SCAN_TTN)
+| Артефакт | Назначение |
+|----------|-----------|
+| [`openapi.yaml`](openapi.yaml) | Полная машинная спецификация: тела, схемы, ошибки, примеры. Импортируйте в codegen/Postman. |
+| [`swagger-ui.html`](swagger-ui.html) | Интерактивный UI. Открыть напрямую или раздать `python3 -m http.server 8088` из `docs/api/`. |
+| Этот файл | Обзорная таблица эндпоинтов + ключевые соглашения. |
 
 ---
 
-### POST /receiving/gate/scan-cargoplace
+## Три формата ответов (не путать)
 
-Сканирование одного грузоместа в рамках поставки.
+В системе сосуществуют **три разных формата** — это граница между модулями, а не баг.
+Клиент обязан разбирать все три.
 
-**Request:**
+### 1. Бизнес-модули — JSON-конверт
+
+`receiving`, `putaway`, `assembly`, `shipping`, `dispatches`. `Content-Type: application/json`.
+
 ```json
-{
-  "shipment_id": "uuid",
-  "cargoplace_code": "CP-001"
-}
+// Успех
+{ "success": true, "data": { /* ... */ }, "error": null }
+
+// Ошибка
+{ "success": false, "data": null, "error": { "code": "INVALID_REQUEST", "message": "Невалидный JSON в теле запроса" } }
 ```
 
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "cargoplace_id": "uuid",
-    "cargoplace_code": "CP-001",
-    "status": "RECEIVED_AT_GATE",
-    "received_at_gate_at": "2026-03-31T10:15:00Z",
-    "progress": {
-      "total": 10,
-      "received": 3,
-      "remaining": 7
-    }
-  }
-}
+`code` — машинный ASCII, `message` — русский текст. HTTP-коды: `200` успех,
+`400` валидация, `401` нет/невалидный JWT, `403` роль не разрешена, `404` не найдено,
+`409` конфликт состояния, `500` внутренняя (а в `dispatches` — `503`).
+
+### 2. Модуль `auth` — простой текст
+
+`/auth/login`, `/auth/refresh`, `/auth/register`. Ошибки идут через `http.Error` —
+`Content-Type: text/plain`, тело — голая строка с завершающим `\n`.
+
+```text
+unauthorized
 ```
 
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `SHIPMENT_NOT_FOUND` | 404 | Поставка с указанным `shipment_id` не найдена |
-| `CARGOPLACE_NOT_IN_SHIPMENT` | 400 | Грузоместо не принадлежит этой TTN |
-| `CARGOPLACE_ALREADY_RECEIVED` | 409 | Грузоместо уже отсканировано |
-| `SHIPMENT_NOT_IN_PROGRESS` | 409 | Поставка не в статусе GATE_IN_PROGRESS |
+| Статус | Тело |
+|--------|------|
+| 400 | `invalid request body` |
+| 401 | `unauthorized` |
+| 403 | `forbidden` |
+| 409 | `user already exists` (только register) |
+| 500 | `internal server error` |
 
-**Побочные эффекты:**
-- UPDATE `cargoplaces.status` → RECEIVED_AT_GATE, `received_at_gate_at` = now()
-- INSERT `receiving_gate` (action=SCAN_CARGOPLACE)
-- Если это последнее ожидаемое грузоместо, поставка автоматически закрывается в той же транзакции
+Успешные ответы `auth` — **сырой JSON без конверта** (`{access_token, refresh_token}`
+или `{id, username}`).
+
+### 3. `GET /health` — голый JSON-объект
+
+Ни конверт, ни текст. `{ "status": "ok"|"degraded", "checks": {...}, "time": "..." }`.
+`200` при `ok`, `503` при `degraded`.
 
 ---
 
-### POST /receiving/gate/accept-shipment
+## Аутентификация и RBAC
 
-Завершение приёмки поставки. Неотсканированные грузоместа помечаются как NOT_RECEIVED.
+- Заголовок: `Authorization: Bearer <access_token>` (JWT HS256, claims `user_id`,
+  `role`, `type="access"`, `iat`, `exp`).
+- Публичные (без токена): `POST /auth/login`, `POST /auth/refresh`, `GET /health`.
+- Все остальные требуют валидный JWT (`auth.Middleware` на subrouter'ах).
+- RBAC-гейты поверх JWT:
 
-**Request:**
-```json
-{
-  "shipment_id": "uuid"
-}
-```
+| Гейт | Кто проходит | Где |
+|------|--------------|-----|
+| ADMIN-only | только `ADMIN` | `POST /auth/register` |
+| `RequireAdminOrOperator` | `ADMIN` или `OPERATOR` | `POST /assembly/allocate` (issue #39) |
+| `RequireOperator` | только `OPERATOR` | все остальные защищённые эндпоинты |
 
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "shipment_id": "uuid",
-    "status": "GATE_CLOSED",
-    "summary": {
-      "total": 10,
-      "received": 7,
-      "not_received": 3
-    }
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `SHIPMENT_NOT_FOUND` | 404 | Поставка с указанным `shipment_id` не найдена |
-| `SHIPMENT_NOT_IN_PROGRESS` | 409 | Поставка не в статусе GATE_IN_PROGRESS |
-
-**Побочные эффекты:**
-- UPDATE неотсканированные `cargoplaces.status` → NOT_RECEIVED
-- UPDATE `inbound_shipments.status` → GATE_CLOSED
-- INSERT `receiving_gate` (action=SHIPMENT_ACCEPTED)
-- Outbox events: **нет** (товары ещё не существуют)
+`ADMIN`, вызывающий OPERATOR-only эндпоинт, получает `403`. Сообщения 401/403 в
+бизнес-модулях — на русском (`Требуется авторизация`, `Только оператор может выполнять
+это действие`).
 
 ---
 
-## 2. Приёмка на столе (Receiving Table)
+## Строгий разбор тела
 
-### POST /receiving/table/scan-cargoplace
-
-Открытие грузоместа для приёмки на столе.
-
-**Request:**
-```json
-{
-  "cargoplace_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "cargoplace_id": "uuid",
-    "cargoplace_code": "CP-001",
-    "status": "TABLE_IN_PROGRESS",
-    "expected_skus": [
-      {
-        "sku_id": "uuid",
-        "sku_name": "Ноутбук Lenovo X1",
-        "expected_qty": 5
-      }
-    ],
-    "total_expected": 12
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `CARGOPLACE_NOT_RECEIVED_AT_GATE` | 409 | Статус != RECEIVED_AT_GATE |
-
-**Побочные эффекты:**
-- UPDATE `cargoplaces.status` → TABLE_IN_PROGRESS
-- INSERT `receiving_table` (action=SCAN_CARGOPLACE — опционально для лога)
+Все тела декодируются с `json.Decoder.DisallowUnknownFields()`. **Любое лишнее поле в
+теле → `400`.** В `openapi.yaml` каждая схема запроса помечена
+`additionalProperties: false`.
 
 ---
 
-### POST /receiving/table/scan-box
+## Сводка эндпоинтов
 
-Сканирование штрихкода коробки внутри грузоместа.
+Всего **27 операций** на 26 путях (на `/dispatches/` висят GET и POST). RBAC указан
+после auth-гейта. Полные тела, ошибки и примеры — в [`openapi.yaml`](openapi.yaml).
 
-**Request:**
-```json
-{
-  "cargoplace_id": "uuid",
-  "box_barcode": "BOX-A-001"
-}
-```
+### System
 
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "box_id": "uuid",
-    "box_barcode": "BOX-A-001",
-    "status": "OPEN"
-  }
-}
-```
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| GET | `/health` | — (публичный) | Health-check (postgres/kafka/ledger). Особый формат, `200`/`503`. |
 
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `CARGOPLACE_NOT_IN_PROGRESS` | 409 | Грузоместо не открыто (status != TABLE_IN_PROGRESS) |
+### Auth (ошибки — простой текст)
 
-**Побочные эффекты:**
-- INSERT `boxes` (status=OPEN) или UPDATE если повторный скан
-- INSERT `receiving_table` (action=SCAN_BOX)
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| POST | `/auth/login` | — (публичный) | Вход → пара JWT (сырой JSON). |
+| POST | `/auth/refresh` | — (публичный) | Обновление access по refresh (сырой JSON). |
+| POST | `/auth/register` | Bearer + **ADMIN** | Создать пользователя. `201`, тело `{id, username}`. |
 
----
+### Receiving — КПП (gate)
 
-### POST /receiving/table/scan-sku
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| POST | `/receiving/gate/scan-ttn` | OPERATOR | Начать приёмку по ТТН → `GATE_IN_PROGRESS`. |
+| POST | `/receiving/gate/scan-cargoplace` | OPERATOR | Грузоместо → `RECEIVED_AT_GATE` (+ авто-закрытие). |
+| POST | `/receiving/gate/accept-shipment` | OPERATOR | Закрыть КПП → `GATE_CLOSED`, остальное `NOT_RECEIVED`. |
 
-Сканирование штрихкода товара для определения SKU.
+### Receiving — стол (table)
 
-**Request:**
-```json
-{
-  "cargoplace_id": "uuid",
-  "box_id": "uuid",
-  "barcode": "4607036430014"
-}
-```
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| POST | `/receiving/table/scan-cargoplace` | OPERATOR | Грузоместо → `TABLE_IN_PROGRESS`, манифест SKU. |
+| POST | `/receiving/table/scan-box` | OPERATOR | Upsert коробки. |
+| POST | `/receiving/table/scan-sku` | OPERATOR | Резолв SKU по штрихкоду (товар не создаётся). |
+| POST | `/receiving/table/scan-qr` | OPERATOR | Создать товар (`RECEIVED`) с уникальным QR. |
+| POST | `/receiving/table/close-box` | OPERATOR | Коробка → `CLOSED`. |
+| POST | `/receiving/table/scan-buffer` | OPERATOR | Товары из `CLOSED` коробок → буфер. |
+| POST | `/receiving/table/close-cargoplace` | OPERATOR | Грузоместо → `TABLE_CLOSED` + **outbox** (`receiving`). |
 
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "sku_id": "uuid",
-    "sku_name": "Ноутбук Lenovo X1",
-    "barcode": "4607036430014",
-    "message": "Наклейте QR на товар"
-  }
-}
-```
+### Putaway
 
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `BARCODE_NOT_FOUND` | 404 | Штрихкод не зарегистрирован в sku_barcodes |
-| `BOX_NOT_OPEN` | 409 | Коробка не открыта |
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| POST | `/putaway/scan-buffer` | OPERATOR | Получить `RECEIVED` товары из буфера (read-only). |
+| POST | `/putaway/scan-product` | OPERATOR | Проверить товар + `cart_size` (read-only). |
+| POST | `/putaway/scan-storage-bin` | OPERATOR | Разместить (`STORED`) + **outbox** (`putaway`). Chain-gate. |
 
-**Побочные эффекты:**
-- INSERT `receiving_table` (action=SCAN_SKU, sku_id)
+### Assembly
 
----
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| POST | `/assembly/allocate` | **ADMIN или OPERATOR** | Аллокация на заказы; недостача → `insufficient_orders` (всё ещё `200`). |
+| GET | `/assembly/tasks` | OPERATOR | Список задач сборки (query: `destination_id`*, `operator_id`, `status`). |
+| POST | `/assembly/pick` | OPERATOR | Пик: товар → `ASSEMBLED`, задача → `DONE`, **outbox** (`picking`). Chain-gate. |
+| POST | `/assembly/scan-shipping-buffer` | OPERATOR | Собранное → `READY_TO_SHIP` в буфер отгрузки. |
 
-### POST /receiving/table/scan-qr
+### Dispatches (внутренние ошибки → `503`)
 
-Сканирование наклеенного QR-кода. **Создаёт product.**
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| GET | `/dispatches/` | OPERATOR | Список рейсов (**слэш обязателен**; `data` может быть `null`). |
+| POST | `/dispatches/` | OPERATOR | Создать рейс. **`200` (не `201`)**, `data.dispatch`. |
+| GET | `/dispatches/{dispatch_id}` | OPERATOR | Рейс по ID; `data.dispatch`. |
 
-**Request:**
-```json
-{
-  "cargoplace_id": "uuid",
-  "box_id": "uuid",
-  "sku_id": "uuid",
-  "qr_code": "WMS-QR-2026-00001234"
-}
-```
+### Shipping
 
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "product_id": "uuid",
-    "sku_id": "uuid",
-    "sku_name": "Ноутбук Lenovo X1",
-    "qr_code": "WMS-QR-2026-00001234",
-    "status": "RECEIVED",
-    "progress": {
-      "received_in_cargoplace": 5,
-      "expected_in_cargoplace": 12
-    }
-  }
-}
-```
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| POST | `/shipping/scan-buffer` | OPERATOR | Осмотр буфера отгрузки (read-only). |
+| POST | `/shipping/scan-driver` | OPERATOR | Рейс → `AT_GATE` (идемпотентно). |
+| POST | `/shipping/ship` | OPERATOR | Отгрузка (bulk/spot) + **outbox** (`shipping`); рейс → `DEPARTED`. |
 
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `QR_ALREADY_EXISTS` | 409 | QR-код уже зарегистрирован |
-| `SKU_NOT_FOUND` | 404 | SKU не найден |
-
-**Побочные эффекты:**
-- INSERT `products` (sku_id, shipment_id, cargoplace_id, box_id, qr_code, status=RECEIVED)
-- INSERT `receiving_table` (action=SCAN_QR, product_id)
+\* `destination_id` — обязательный query-параметр.
 
 ---
 
-### POST /receiving/table/close-box
+## Подводные камни (закреплено кодом и e2e)
 
-Завершение работы с коробкой.
-
-**Request:**
-```json
-{
-  "box_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "box_id": "uuid",
-    "status": "CLOSED",
-    "products_in_box": 3
-  }
-}
-```
-
-**Побочные эффекты:**
-- UPDATE `boxes.status` → CLOSED
-- INSERT `receiving_table` (action=CLOSE_BOX)
+- **`/dispatches/` — завершающий слэш обязателен.** gorilla/mux не редиректит;
+  `GET /dispatches` (без слэша) не матчится.
+- **`POST /dispatches/` возвращает `200`, а не `201`**, и оборачивает результат в
+  `data.dispatch`. У `GET /dispatches/{id}` — та же обёртка.
+- **`/dispatches` 404 → `message` это строка-сентинел** (`DESTINATION_NOT_FOUND` /
+  `DISPATCH_NOT_FOUND`), а не фраза. `code` при этом `NOT_FOUND`.
+- **`/putaway/scan-storage-bin`: BUFFER/SHIPPING_BUFFER-ячейка → `404
+  STORAGE_BIN_NOT_FOUND`** (не 400). Контринтуитивно.
+- **`/assembly/allocate` никогда не отдаёт ошибку при нехватке остатка** — частичная
+  аллокация это `200` с заполненным `insufficient_orders`.
+- **`product_ids` — это JSON-массив** в `/putaway/scan-storage-bin` и `/shipping/ship`
+  (максимум 200 элементов). В `ship` пустой/отсутствующий → bulk-режим.
+- **`/shipping/ship` `buffer_remaining` считается по всей SHIPPING_BUFFER-зоне пункта
+  назначения**, не по одной ячейке. Рейс отбывает только когда зона пуста.
+- **`progress.not_received` всегда `0`** в ответе `gate/scan-cargoplace`; симметрично
+  `summary.remaining` всегда `0` в `gate/accept-shipment`.
+- **Только `close-cargoplace`, `scan-storage-bin`, `pick`, `ship` пишут в
+  `public.outbox_events`** — это точки интеграции с блокчейном. `aggregate_type` для
+  стадии сборки — **`picking`**, не `assembly`.
 
 ---
 
-### POST /receiving/table/scan-buffer
+## Outbox / блокчейн (сводка)
 
-Сканирование ячейки буфера приёмки. Все products грузоместа размещаются в буфер.
+| Эндпоинт | `aggregate_type` | `event_type` | Переход товара |
+|----------|------------------|--------------|----------------|
+| `receiving/table/close-cargoplace` | `receiving` | `wms.receiving.v1` | товары созданы со статусом `RECEIVED` |
+| `putaway/scan-storage-bin` | `putaway` | `wms.putaway.v1` | `RECEIVED → STORED` |
+| `assembly/pick` | `picking` | `wms.picking.v1` | `ALLOCATED → ASSEMBLED` |
+| `shipping/ship` | `shipping` | `wms.shipping.v1` | `READY_TO_SHIP → SHIPPED` |
 
-**Request:**
-```json
-{
-  "cargoplace_id": "uuid",
-  "buffer_bin_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "buffer_bin_id": "uuid",
-    "buffer_code": "T1-BUF",
-    "products_placed": 10
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `BIN_NOT_FOUND` | 404 | Ячейка не существует |
-| `BIN_NOT_BUFFER` | 400 | Ячейка не является буфером приёмки |
-
-**Побочные эффекты:**
-- UPDATE `products.bin_id` = buffer_bin_id WHERE cargoplace_id AND status=RECEIVED
-- INSERT `receiving_table` (action=SCAN_BUFFER)
+`aggregate_id` всегда `= product_id` (1 событие = 1 товар). Детали маршрута событий —
+[`../integration/blockchain-mapping.md`](../integration/blockchain-mapping.md),
+[`../integration/data-contract.md`](../integration/data-contract.md),
+[`../integration/batch-mapping-approach.md`](../integration/batch-mapping-approach.md).
 
 ---
 
-### POST /receiving/table/close-cargoplace
-
-Завершение работы с грузоместом. Создаёт outbox events.
-
-**Request:**
-```json
-{
-  "cargoplace_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "cargoplace_id": "uuid",
-    "status": "TABLE_CLOSED",
-    "summary": {
-      "products_received": 10,
-      "products_expected": 12,
-      "shortage": 2,
-      "shortage_by_sku": [
-        { "sku_name": "Ноутбук Lenovo X1", "expected": 5, "received": 4, "shortage": 1 },
-        { "sku_name": "Мышь Logitech MX3", "expected": 3, "received": 2, "shortage": 1 }
-      ]
-    },
-    "outbox_events_created": 10
-  }
-}
-```
-
-**Побочные эффекты (в одной транзакции):**
-- UPDATE `cargoplaces.status` → TABLE_CLOSED
-- INSERT `receiving_table` (action=CLOSE_CARGO)
-- INSERT `outbox_events` × N (по 1 на product, aggregate_type='receiving')
-- **Блокчейн:** события → Kafka → batchAccept → None → Accepted
-
----
-
-## 3. Раскладка (Putaway)
-
-### POST /putaway/scan-buffer
-
-Сканирование ячейки буфера. Показывает товары, доступные для раскладки.
-
-**Request:**
-```json
-{
-  "buffer_bin_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "buffer_bin_id": "uuid",
-    "buffer_code": "T1-BUF",
-    "products": [
-      {
-        "product_id": "uuid",
-        "sku_name": "Ноутбук Lenovo X1",
-        "qr_code": "WMS-QR-2026-00001234",
-        "status": "RECEIVED"
-      }
-    ],
-    "total_products": 15
-  }
-}
-```
-
-**Побочные эффекты:** нет (только чтение).
-
----
-
-### POST /putaway/scan-product
-
-Сканирование товара для добавления в «корзину» раскладки.
-
-**Request:**
-```json
-{
-  "product_id": "uuid",
-  "buffer_bin_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "product_id": "uuid",
-    "sku_name": "Ноутбук Lenovo X1",
-    "qr_code": "WMS-QR-2026-00001234",
-    "cart_size": 3
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `PRODUCT_NOT_IN_BUFFER` | 409 | product.bin_id != buffer_bin_id |
-| `PRODUCT_NOT_RECEIVED` | 409 | product.status != RECEIVED |
-
-**Побочные эффекты:** товар добавлен в сессию раскладки (in-memory или временная таблица).
-
----
-
-### POST /putaway/scan-storage-bin
-
-Сканирование ячейки хранения. Размещает все товары из «корзины».
-
-**Request:**
-```json
-{
-  "product_ids": ["uuid-1", "uuid-2", "uuid-3"],
-  "storage_bin_id": "uuid"
-}
-```
-
-> `storage_bin_id` — любая ячейка с `bins.section IS DISTINCT FROM 'BUFFER'`.
-> Размещение в буферную ячейку запрещено (см. соглашение `bins.section` в `docs/db/Database_ru_v2.md`).
-> Никакого whitelist по «типам» ячеек нет — словарь `section` открыт.
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "storage_bin_id": "uuid",
-    "storage_bin_code": "M2-A-03",
-    "products_placed": 3,
-    "outbox_events_created": 3
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `BIN_NOT_FOUND` | 404 | Ячейка не существует |
-| `PRODUCT_NOT_RECEIVED` | 409 | Один из товаров не в статусе RECEIVED |
-
-**Побочные эффекты (в одной транзакции):**
-- UPDATE `products` SET bin_id = storage_bin_id, status = STORED (для каждого product)
-- INSERT `putaways` (product_id, from_bin_id, bin_id, operator_id)
-- INSERT `outbox_events` × N (aggregate_type='putaway')
-- **Блокчейн:** события → Kafka → batchPutAway → Accepted → PutAway
-
----
-
-## 4. Сборка (Assembly)
-
-### POST /assembly/allocate
-
-Аллокация: система назначает конкретные products на заказ.
-
-**Request:**
-```json
-{
-  "order_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "order_id": "uuid",
-    "status": "ALLOCATED",
-    "tasks": [
-      {
-        "assembly_task_id": "bigint",
-        "product_id": "uuid",
-        "sku_name": "Ноутбук Lenovo X1",
-        "from_bin_code": "M2-A-03",
-        "section": "A"
-      }
-    ],
-    "total_tasks": 5
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `ORDER_NOT_NEW` | 409 | Заказ уже аллоцирован |
-| `INSUFFICIENT_STOCK` | 409 | Не хватает товаров в статусе STORED |
-
-**Побочные эффекты:**
-- UPDATE `products` SET status = ALLOCATED, order_id = order_id
-- INSERT `assembly_tasks` (order_id, product_id, sku_id, from_bin_id, status=PENDING)
-- UPDATE `orders.status` → ALLOCATED
-- Outbox events: **нет** (аллокация не пишет в блокчейн)
-
----
-
-### GET /assembly/tasks
-
-Получение списка задач сборки для заказа.
-
-**Query params:** `?order_id=uuid`
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "order_id": "uuid",
-    "tasks": [
-      {
-        "assembly_task_id": "bigint",
-        "product_id": "uuid",
-        "sku_name": "Ноутбук Lenovo X1",
-        "qr_code": "WMS-QR-2026-00001234",
-        "from_bin_code": "M2-A-03",
-        "section": "A",
-        "status": "PENDING"
-      }
-    ],
-    "total": 5,
-    "done": 2,
-    "remaining": 3
-  }
-}
-```
-
----
-
-### POST /assembly/pick
-
-Подбор одного товара. Создаёт outbox event.
-
-**Request:**
-```json
-{
-  "assembly_task_id": "bigint"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "assembly_task_id": "bigint",
-    "product_id": "uuid",
-    "status": "DONE",
-    "progress": {
-      "total": 5,
-      "done": 3,
-      "remaining": 2
-    },
-    "order_status": "ALLOCATED"
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `TASK_NOT_PENDING` | 409 | Задача уже выполнена или отменена |
-
-**Побочные эффекты (в одной транзакции):**
-- UPDATE `assembly_tasks` SET status = DONE, onchain_status = PENDING_ONCHAIN
-- UPDATE `products.status` → ASSEMBLED
-- INSERT `outbox_events` (aggregate_type='picking')
-- UPDATE `orders.status` → ALLOCATED или ASSEMBLED (если все tasks DONE)
-- **Блокчейн:** событие → Kafka → batchPick → PutAway → Picked
-
----
-
-## 5. Отгрузка (Shipping)
-
-### GET /shipping/orders
-
-Список заказов, готовых к отгрузке.
-
-**Query params:** `?status=ASSEMBLED`
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "orders": [
-      {
-        "order_id": "uuid",
-        "external_order_no": "ORD-2026-5678",
-        "status": "ASSEMBLED",
-        "products_count": 5
-      }
-    ]
-  }
-}
-```
-
----
-
-### POST /shipping/verify
-
-Верификация товара при отгрузке (сканирование QR).
-
-**Request:**
-```json
-{
-  "order_id": "uuid",
-  "product_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "product_id": "uuid",
-    "verified": true,
-    "progress": {
-      "total": 5,
-      "verified": 3,
-      "remaining": 2
-    }
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `PRODUCT_NOT_IN_ORDER` | 400 | Товар не принадлежит заказу |
-| `PRODUCT_NOT_ASSEMBLED` | 409 | Товар не в статусе ASSEMBLED |
-
----
-
-### POST /shipping/ship
-
-Отгрузка заказа. Создаёт outbox events для каждого товара.
-
-**Request:**
-```json
-{
-  "order_id": "uuid",
-  "dispatch_id": "uuid"
-}
-```
-
-**Response (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "order_id": "uuid",
-    "status": "SHIPPED",
-    "dispatch_id": "uuid",
-    "products_shipped": 5,
-    "outbox_events_created": 5
-  }
-}
-```
-
-**Ошибки:**
-| Код | HTTP | Когда |
-|-----|------|-------|
-| `ORDER_NOT_ASSEMBLED` | 409 | Заказ не в статусе ASSEMBLED |
-| `DISPATCH_ID_REQUIRED` | 400 | Не указан исходящий рейс |
-
-**Побочные эффекты (в одной транзакции):**
-- UPDATE `products.status` → SHIPPED (для всех products заказа)
-- INSERT `shippings` (product_id, dispatch_id, operator_id) × N
-- UPDATE `orders.status` → SHIPPED
-- INSERT `outbox_events` × N (aggregate_type='shipping')
-- **Блокчейн:** события → Kafka → batchShip → Picked → Shipped
-
-> **Примечание:** `vehicle_number` теперь хранится в `wms_inventory.outbound_dispatches`. Для отчётов, требующих номер ТС, используйте JOIN:
-> ```sql
-> SELECT s.*, d.vehicle_number
-> FROM wms_ops.shippings s
-> JOIN wms_inventory.outbound_dispatches d ON s.dispatch_id = d.dispatch_id;
-> ```
-
----
-
-## Сводка всех эндпоинтов
-
-| Метод | Путь | Этап | Outbox | Блокчейн |
-|-------|------|------|--------|----------|
-| POST | /receiving/gate/scan-ttn | КПП | — | — |
-| POST | /receiving/gate/scan-cargoplace | КПП | — | — |
-| POST | /receiving/gate/accept-shipment | КПП | — | — |
-| POST | /receiving/table/scan-cargoplace | Стол | — | — |
-| POST | /receiving/table/scan-box | Стол | — | — |
-| POST | /receiving/table/scan-sku | Стол | — | — |
-| POST | /receiving/table/scan-qr | Стол | — | — |
-| POST | /receiving/table/scan-buffer | Стол | — | — |
-| POST | /receiving/table/close-box | Стол | — | — |
-| POST | /receiving/table/close-cargoplace | Стол | receiving | batchAccept |
-| POST | /putaway/scan-buffer | Раскладка | — | — |
-| POST | /putaway/scan-product | Раскладка | — | — |
-| POST | /putaway/scan-storage-bin | Раскладка | putaway | batchPutAway |
-| POST | /assembly/allocate | Сборка | — | — |
-| GET | /assembly/tasks | Сборка | — | — |
-| POST | /assembly/pick | Сборка | picking | batchPick |
-| GET | /shipping/orders | Отгрузка | — | — |
-| POST | /shipping/verify | Отгрузка | — | — |
-| POST | /shipping/ship | Отгрузка | shipping | batchShip |
+## Связанная документация
+
+- **Бизнес-процесс:** [сквозной путь товара](../business-process/end-to-end-flow.md),
+  [диаграммы потоков данных](../business-process/data-flow-diagrams.md)
+- **Flow по этапам:** [КПП](../flows/receiving-gate-flow.md),
+  [стол](../flows/receiving-table-flow.md), [раскладка](../flows/putaway-flow.md),
+  [сборка](../flows/assembly-flow.md), [отгрузка](../flows/shipping-flow.md)
+- **Модель данных:** [жизненные циклы сущностей](../data-model/entity-lifecycle.md),
+  [ER-диаграмма](../data-model/er-diagram.md), [схема БД](../db/Database_ru_v2.md)
+- **Архитектура и процесс:** [обзор системы](../architecture/system-overview.md),
+  [конвенции](../CONVENTIONS.md), [гайд по MR](../MR_GUIDE.md)

@@ -1,0 +1,2775 @@
+openapi: 3.1.0
+
+info:
+  title: WMS API
+  version: 1.0.0
+  description: |
+    REST API склад­ской системы (WMS-монолит на Go). Покрывает пять этапов жизненного
+    цикла товара: **Приёмка на КПП → Приёмка на столе → Раскладка → Сборка → Отгрузка**,
+    плюс управление исходящими рейсами (dispatches) и аутентификацию.
+
+    ## Два стиля ответов об ошибках
+
+    В системе сосуществуют **два разных формата ошибок** — это не баг, а граница между
+    модулем аутентификации и бизнес-модулями. Клиент обязан уметь разбирать оба:
+
+    1. **Модуль `auth` (`/auth/*`)** — ошибки в виде **простого текста** (`text/plain`),
+       тело — голая строка вроде `unauthorized` (через `http.Error`, с завершающим `\n`).
+       Конверт `{success,data,error}` здесь **не используется**.
+    2. **Бизнес-модули** (`receiving`, `putaway`, `assembly`, `shipping`, `dispatches`) —
+       единый **JSON-конверт** (`application/json`):
+       `{"success": false, "data": null, "error": {"code": "...", "message": "..."}}`.
+       `message` — на русском, `code` — машинно-читаемый ASCII.
+    3. **`GET /health`** — отдельный формат: голый JSON-объект `{status, checks, time}`
+       (без конверта), `200` если `ok`, `503` если `degraded`.
+
+    ## Аутентификация
+
+    Все эндпоинты, кроме `/auth/login`, `/auth/refresh`, `/health`, требуют заголовок
+    `Authorization: Bearer <access_token>` (JWT, HS256). Бизнес-модули дополнительно
+    проверяют роль через RBAC-гейты (см. описание каждой операции). Большинство
+    операций доступны **только роли `OPERATOR`**; исключения — `POST /auth/register`
+    (только `ADMIN`) и `POST /assembly/allocate` (`ADMIN` или `OPERATOR`, issue #39).
+
+    ## Строгий разбор тела (DisallowUnknownFields)
+
+    Все тела запросов декодируются с `json.Decoder.DisallowUnknownFields()`. **Любое
+    лишнее поле в теле приводит к `400`.** Поэтому каждая схема запроса помечена
+    `additionalProperties: false`.
+
+    ## Связанная документация
+
+    - Сквозной путь товара: `../business-process/end-to-end-flow.md`
+    - Диаграммы потоков данных (DFD): `../business-process/data-flow-diagrams.md`
+    - Flow по этапам: `../flows/receiving-gate-flow.md`, `../flows/receiving-table-flow.md`,
+      `../flows/putaway-flow.md`, `../flows/assembly-flow.md`, `../flows/shipping-flow.md`
+    - Модель данных: `../data-model/entity-lifecycle.md`, `../data-model/er-diagram.md`,
+      `../db/Database_ru_v2.md`
+    - Интеграция с блокчейном: `../integration/blockchain-mapping.md`,
+      `../integration/data-contract.md`, `../integration/batch-mapping-approach.md`
+    - Архитектура: `../architecture/system-overview.md`, `../CONVENTIONS.md`, `../MR_GUIDE.md`
+
+servers:
+  - url: http://localhost:8081
+    description: Локальная разработка / e2e (WMS_URL по умолчанию)
+
+tags:
+  - name: Auth
+    description: Аутентификация и регистрация пользователей. Ошибки — простой текст (text/plain).
+  - name: Receiving
+    description: Приёмка на КПП и на столе. RBAC — только OPERATOR.
+  - name: Putaway
+    description: Раскладка из буфера в ячейки хранения. RBAC — только OPERATOR.
+  - name: Assembly
+    description: Аллокация, подбор и сборка заказов. RBAC — OPERATOR (кроме /allocate — ADMIN или OPERATOR).
+  - name: Dispatches
+    description: Управление плановыми исходящими рейсами (CRUD). RBAC — только OPERATOR.
+  - name: Shipping
+    description: Отгрузка товаров на рейс. RBAC — только OPERATOR.
+  - name: System
+    description: Служебные эндпоинты (health-check).
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ──────────────────────────────────────────────────────────────────────────
+  # SYSTEM
+  # ──────────────────────────────────────────────────────────────────────────
+  /health:
+    get:
+      tags: [System]
+      summary: Health-check сервиса
+      description: |
+        Проверяет PostgreSQL, Kafka и ledger-adapter. **Особый формат ответа:** голый
+        JSON-объект `{status, checks, time}` без конверта `{success,data,error}`.
+        Возвращает `200` при `status="ok"` и `503` при `status="degraded"`.
+        Используется wait-стратегией testcontainers и `waitForHTTP` в e2e.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Все зависимости живы.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                checks:
+                  postgres: ok
+                  kafka: ok
+                  ledger_adapter: ok
+                time: '2026-05-31T10:00:00Z'
+        '503':
+          description: Хотя бы одна зависимость недоступна (degraded).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: degraded
+                checks:
+                  postgres: ok
+                  kafka: ok
+                  ledger_adapter: 'Get "http://ledger-adapter:9090/health": dial tcp: connection refused'
+                time: '2026-05-31T10:00:00Z'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # AUTH (plain-text errors)
+  # ──────────────────────────────────────────────────────────────────────────
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Вход по логину/паролю
+      description: |
+        Публичный эндпоинт. Возвращает пару JWT (access + refresh). Тело успешного
+        ответа — **сырой JSON без конверта** (`TokenPair`). Ошибки — **простой текст**.
+        Только метод POST.
+      operationId: authLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: operator
+              password: operator
+      responses:
+        '200':
+          description: Успешная аутентификация. Сырой JSON без конверта.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+              example:
+                access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                refresh_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        '400':
+          $ref: '#/components/responses/AuthPlainTextBadRequest'
+        '401':
+          $ref: '#/components/responses/AuthPlainTextUnauthorized'
+        '500':
+          $ref: '#/components/responses/AuthPlainTextInternal'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Обновление access-токена по refresh-токену
+      description: |
+        Публичный эндпоинт. Принимает refresh-токен (`type=refresh`), возвращает
+        новую пару токенов. Ротации/отзыва нет — старый refresh-токен валиден до
+        истечения `exp`. Роль в новый access-токен подтягивается из БД пользователя.
+        Ошибки — простой текст.
+      operationId: authRefresh
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+            example:
+              refresh_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+      responses:
+        '200':
+          description: Новая пара токенов. Сырой JSON без конверта.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/AuthPlainTextBadRequest'
+        '401':
+          $ref: '#/components/responses/AuthPlainTextUnauthorized'
+        '500':
+          $ref: '#/components/responses/AuthPlainTextInternal'
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Регистрация пользователя (только ADMIN)
+      description: |
+        **Требует `Authorization: Bearer <access_token>` с ролью `ADMIN`.** Проверка
+        двойная: сначала по claim роли в JWT, затем повторная сверка с БД (актёр должен
+        быть `is_active=true` и `role=ADMIN`). Пароль — 6..72 байт включительно. `role` —
+        одно из `ADMIN`, `OPERATOR`, `CUSTOMER`. Ошибки — **простой текст**.
+      operationId: authRegister
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              username: op-1a2b3c4d
+              password: e2e-pass-123
+              role: OPERATOR
+      responses:
+        '201':
+          description: Пользователь создан (`is_active=true`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+              example:
+                id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                username: op-1a2b3c4d
+        '400':
+          $ref: '#/components/responses/AuthPlainTextBadRequest'
+        '401':
+          $ref: '#/components/responses/AuthPlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/AuthPlainTextForbidden'
+        '409':
+          description: Пользователь с таким username уже существует. Простой текст.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                user already exists
+        '500':
+          $ref: '#/components/responses/AuthPlainTextInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # RECEIVING — GATE
+  # ──────────────────────────────────────────────────────────────────────────
+  /receiving/gate/scan-ttn:
+    post:
+      tags: [Receiving]
+      summary: Начать приёмку поставки по коду ТТН
+      description: |
+        RBAC: только `OPERATOR`. Если поставка в статусе `CREATED`, переводит её в
+        `GATE_IN_PROGRESS`. Возвращает список грузомест. Пишет лог `SCAN_TTN`.
+        См. `../flows/receiving-gate-flow.md`.
+      operationId: receivingScanTTN
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanTTNRequest'
+            example:
+              ttn_code: TTN-GATE-1a2b3c4d
+      responses:
+        '200':
+          description: Поставка открыта для приёмки.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanTTNResult'
+              example:
+                success: true
+                data:
+                  shipment_id: 11111111-1111-1111-1111-111111111111
+                  ttn_code: TTN-GATE-1a2b3c4d
+                  status: GATE_IN_PROGRESS
+                  cargoplaces:
+                    - cargoplace_id: 22222222-2222-2222-2222-222222222222
+                      cargoplace_code: CP-GATE-A-1a2b3c4d
+                      status: EXPECTED
+                  total_cargoplaces: 2
+                  received_cargoplaces: 0
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`TTN_NOT_FOUND` — поставка с таким ТТН не найдена.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: TTN_NOT_FOUND, message: Поставка с таким ТТН не найдена }
+        '409':
+          description: '`SHIPMENT_ALREADY_CLOSED` — поставка уже в статусе GATE_CLOSED.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: SHIPMENT_ALREADY_CLOSED, message: Приёмка по поставке уже завершена }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/gate/scan-cargoplace:
+    post:
+      tags: [Receiving]
+      summary: Отметить грузоместо принятым на КПП
+      description: |
+        RBAC: только `OPERATOR`. Переводит грузоместо `EXPECTED → RECEIVED_AT_GATE`.
+        Если принято последнее — авто-закрытие поставки в `GATE_CLOSED`.
+        Примечание: `progress.not_received` в этом ответе всегда `0`.
+      operationId: receivingScanGateCargoplace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanGateCargoplaceRequest'
+            example:
+              shipment_id: 11111111-1111-1111-1111-111111111111
+              cargoplace_code: CP-GATE-A-1a2b3c4d
+      responses:
+        '200':
+          description: Грузоместо принято.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanGateCargoplaceResult'
+              example:
+                success: true
+                data:
+                  cargoplace_id: 22222222-2222-2222-2222-222222222222
+                  cargoplace_code: CP-GATE-A-1a2b3c4d
+                  status: RECEIVED_AT_GATE
+                  received_at_gate_at: '2026-05-31T10:15:00Z'
+                  progress: { total: 2, received: 1, remaining: 1, not_received: 0 }
+                error: null
+        '400':
+          description: |
+            `INVALID_REQUEST` (битый JSON / не-UUID / невалидный cargoplace_code) или
+            `CARGOPLACE_NOT_IN_SHIPMENT` (код грузоместа не найден в этой поставке).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: CARGOPLACE_NOT_IN_SHIPMENT, message: Грузоместо не принадлежит данной поставке }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`SHIPMENT_NOT_FOUND` — поставка не найдена.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: SHIPMENT_NOT_FOUND, message: Поставка не найдена }
+        '409':
+          description: |
+            `SHIPMENT_NOT_IN_PROGRESS` (поставка не в GATE_IN_PROGRESS) или
+            `CARGOPLACE_ALREADY_RECEIVED` (грузоместо уже принято).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: CARGOPLACE_ALREADY_RECEIVED, message: Грузоместо уже принято на КПП }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/gate/accept-shipment:
+    post:
+      tags: [Receiving]
+      summary: Закрыть приёмку поставки на КПП
+      description: |
+        RBAC: только `OPERATOR`. Помечает все оставшиеся `EXPECTED` грузоместа как
+        `NOT_RECEIVED`, переводит поставку в `GATE_CLOSED`.
+        Примечание: `summary.remaining` в этом ответе всегда `0`.
+      operationId: receivingAcceptShipment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptShipmentRequest'
+            example:
+              shipment_id: 11111111-1111-1111-1111-111111111111
+      responses:
+        '200':
+          description: Приёмка закрыта.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/AcceptShipmentResult'
+              example:
+                success: true
+                data:
+                  shipment_id: 11111111-1111-1111-1111-111111111111
+                  status: GATE_CLOSED
+                  summary: { total: 2, received: 1, remaining: 0, not_received: 1 }
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`SHIPMENT_NOT_FOUND` — поставка не найдена.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: SHIPMENT_NOT_FOUND, message: Поставка не найдена }
+        '409':
+          description: '`SHIPMENT_NOT_IN_PROGRESS` — поставка не в GATE_IN_PROGRESS.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: SHIPMENT_NOT_IN_PROGRESS, message: Приёмка по поставке не начата }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # RECEIVING — TABLE
+  # ──────────────────────────────────────────────────────────────────────────
+  /receiving/table/scan-cargoplace:
+    post:
+      tags: [Receiving]
+      summary: Начать обработку грузоместа на столе
+      description: |
+        RBAC: только `OPERATOR`. Переводит грузоместо `RECEIVED_AT_GATE → TABLE_IN_PROGRESS`,
+        возвращает ожидаемый манифест SKU. См. `../flows/receiving-table-flow.md`.
+      operationId: receivingScanTableCargoplace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanTableCargoplaceRequest'
+            example:
+              cargoplace_id: 22222222-2222-2222-2222-222222222222
+      responses:
+        '200':
+          description: Грузоместо открыто на столе.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanTableCargoplaceResult'
+              example:
+                success: true
+                data:
+                  cargoplace_id: 22222222-2222-2222-2222-222222222222
+                  cargoplace_code: CP-GATE-A-1a2b3c4d
+                  status: TABLE_IN_PROGRESS
+                  expected_skus:
+                    - sku_id: 33333333-3333-3333-3333-333333333333
+                      sku_name: Ноутбук Lenovo X1
+                      expected_qty: 10
+                  total_expected: 10
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`CARGOPLACE_NOT_FOUND` — грузоместо не найдено.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: CARGOPLACE_NOT_FOUND, message: Грузоместо не найдено }
+        '409':
+          description: '`CARGOPLACE_NOT_RECEIVED_AT_GATE` — грузоместо не в статусе RECEIVED_AT_GATE.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: CARGOPLACE_NOT_RECEIVED_AT_GATE, message: Грузоместо не принято на КПП }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/table/scan-box:
+    post:
+      tags: [Receiving]
+      summary: Идентифицировать или создать коробку в грузоместе
+      description: 'RBAC: только `OPERATOR`. Upsert коробки. Существующая `CLOSED` коробка отклоняется.'
+      operationId: receivingScanBox
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanBoxRequest'
+            example:
+              cargoplace_id: 22222222-2222-2222-2222-222222222222
+              box_barcode: BOX-E2E-1a2b3c4d
+      responses:
+        '200':
+          description: Коробка идентифицирована/создана.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanBoxResult'
+              example:
+                success: true
+                data:
+                  box_id: 44444444-4444-4444-4444-444444444444
+                  box_barcode: BOX-E2E-1a2b3c4d
+                  status: OPEN
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`CARGOPLACE_NOT_FOUND` — грузоместо не найдено.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: |
+            `CARGOPLACE_NOT_IN_PROGRESS` (грузоместо не в TABLE_IN_PROGRESS) или
+            `BOX_NOT_OPEN` (коробка с таким штрихкодом уже CLOSED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: BOX_NOT_OPEN, message: Коробка уже закрыта }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/table/scan-sku:
+    post:
+      tags: [Receiving]
+      summary: Идентифицировать SKU по штрихкоду (без создания товара)
+      description: |
+        RBAC: только `OPERATOR`. Резолвит штрихкод в SKU. **Товар не создаётся.**
+        Возвращает захардкоженное сообщение `Наклейте QR на товар`.
+      operationId: receivingScanSKU
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanSKURequest'
+            example:
+              cargoplace_id: 22222222-2222-2222-2222-222222222222
+              box_id: 44444444-4444-4444-4444-444444444444
+              barcode: '4600000099999'
+      responses:
+        '200':
+          description: SKU идентифицирован.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanSKUResult'
+              example:
+                success: true
+                data:
+                  sku_id: 33333333-3333-3333-3333-333333333333
+                  sku_name: Ноутбук Lenovo X1
+                  barcode: '4600000099999'
+                  message: Наклейте QR на товар
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` или `BOX_NOT_IN_CARGOPLACE` (box.cargoplace_id ≠ запросу).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`CARGOPLACE_NOT_FOUND`, `BOX_NOT_FOUND` или `BARCODE_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: BARCODE_NOT_FOUND, message: Штрихкод не зарегистрирован }
+        '409':
+          description: '`CARGOPLACE_NOT_IN_PROGRESS` или `BOX_NOT_OPEN`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/table/scan-qr:
+    post:
+      tags: [Receiving]
+      summary: Зарегистрировать QR-код товара (создаёт товар)
+      description: |
+        RBAC: только `OPERATOR`. Создаёт строку `products` со статусом `RECEIVED` и
+        уникальным QR. Дубликат QR → `409 QR_ALREADY_EXISTS`.
+      operationId: receivingScanQR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanQRRequest'
+            example:
+              cargoplace_id: 22222222-2222-2222-2222-222222222222
+              box_id: 44444444-4444-4444-4444-444444444444
+              sku_id: 33333333-3333-3333-3333-333333333333
+              qr_code: QR-E2E-1a2b3c4d
+      responses:
+        '200':
+          description: Товар создан (status=RECEIVED).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanQRResult'
+              example:
+                success: true
+                data:
+                  product_id: 55555555-5555-5555-5555-555555555555
+                  sku_id: 33333333-3333-3333-3333-333333333333
+                  sku_name: Ноутбук Lenovo X1
+                  qr_code: QR-E2E-1a2b3c4d
+                  status: RECEIVED
+                  progress: { received_in_cargoplace: 5, expected_in_cargoplace: 10 }
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` или `BOX_NOT_IN_CARGOPLACE`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`CARGOPLACE_NOT_FOUND`, `BOX_NOT_FOUND` или `SKU_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`CARGOPLACE_NOT_IN_PROGRESS`, `BOX_NOT_OPEN` или `QR_ALREADY_EXISTS`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: QR_ALREADY_EXISTS, message: QR-код уже зарегистрирован }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/table/close-box:
+    post:
+      tags: [Receiving]
+      summary: Закрыть коробку
+      description: 'RBAC: только `OPERATOR`. Переводит коробку `OPEN → CLOSED`.'
+      operationId: receivingCloseBox
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloseBoxRequest'
+            example:
+              box_id: 44444444-4444-4444-4444-444444444444
+      responses:
+        '200':
+          description: Коробка закрыта.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/CloseBoxResult'
+              example:
+                success: true
+                data:
+                  box_id: 44444444-4444-4444-4444-444444444444
+                  status: CLOSED
+                  products_in_box: 7
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`BOX_NOT_FOUND` — коробка не найдена.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`BOX_NOT_OPEN` (уже закрыта) или `CARGOPLACE_NOT_IN_PROGRESS`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/table/scan-buffer:
+    post:
+      tags: [Receiving]
+      summary: Переместить товары из закрытых коробок в буферную ячейку
+      description: |
+        RBAC: только `OPERATOR`. Переносит все `RECEIVED` товары из `CLOSED` коробок
+        грузоместа в буфер. Если перемещено 0 — лог не пишется, ответ всё равно `200`
+        с `products_placed: 0`. Ячейка должна иметь `section="BUFFER"`.
+      operationId: receivingScanBuffer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanBufferReceivingRequest'
+            example:
+              cargoplace_id: 22222222-2222-2222-2222-222222222222
+              buffer_bin_id: 66666666-6666-6666-6666-666666666666
+      responses:
+        '200':
+          description: Товары перемещены в буфер.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanBufferReceivingResult'
+              example:
+                success: true
+                data:
+                  buffer_bin_id: 66666666-6666-6666-6666-666666666666
+                  buffer_code: BUF-01
+                  products_placed: 14
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` или `BIN_NOT_BUFFER` (section ячейки ≠ BUFFER).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: BIN_NOT_BUFFER, message: Ячейка не является буферной }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`BIN_NOT_FOUND` или `CARGOPLACE_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`CARGOPLACE_NOT_IN_PROGRESS` — грузоместо не в TABLE_IN_PROGRESS.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/table/close-cargoplace:
+    post:
+      tags: [Receiving]
+      summary: Завершить обработку грузоместа (создаёт outbox-события)
+      description: |
+        RBAC: только `OPERATOR`. Переводит грузоместо в `TABLE_CLOSED` и создаёт по
+        одному `outbox_events` на каждый `RECEIVED` товар в `CLOSED` коробках
+        (`aggregate_type=receiving`, `event_type=wms.receiving.v1`). Идемпотентность —
+        через guard статуса: повтор → `409 CARGOPLACE_NOT_IN_PROGRESS`.
+        См. `../integration/blockchain-mapping.md`.
+      operationId: receivingCloseCargoplace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloseCargoplaceRequest'
+            example:
+              cargoplace_id: 22222222-2222-2222-2222-222222222222
+      responses:
+        '200':
+          description: Грузоместо закрыто, outbox-события созданы.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/CloseCargoplaceResult'
+              example:
+                success: true
+                data:
+                  cargoplace_id: 22222222-2222-2222-2222-222222222222
+                  status: TABLE_CLOSED
+                  summary:
+                    products_received: 18
+                    products_expected: 20
+                    shortage: 2
+                    shortage_by_sku:
+                      - sku_name: Ноутбук Lenovo X1
+                        expected: 5
+                        received: 3
+                        shortage: 2
+                  outbox_events_created: 18
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`CARGOPLACE_NOT_FOUND` — грузоместо не найдено.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`CARGOPLACE_NOT_IN_PROGRESS` — грузоместо не в TABLE_IN_PROGRESS (в т.ч. повторный вызов).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: CARGOPLACE_NOT_IN_PROGRESS, message: Грузоместо не в обработке на столе }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # PUTAWAY
+  # ──────────────────────────────────────────────────────────────────────────
+  /putaway/scan-buffer:
+    post:
+      tags: [Putaway]
+      summary: Получить RECEIVED товары из буферной ячейки
+      description: 'RBAC: только `OPERATOR` (ADMIN получает 403). Только чтение. См. `../flows/putaway-flow.md`.'
+      operationId: putawayScanBuffer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutawayScanBufferRequest'
+            example:
+              buffer_bin_id: 66666666-6666-6666-6666-666666666666
+      responses:
+        '200':
+          description: Список товаров в буфере.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/PutawayScanBufferResponse'
+              example:
+                success: true
+                data:
+                  buffer_bin_id: 66666666-6666-6666-6666-666666666666
+                  buffer_code: BUF-01
+                  products:
+                    - product_id: 55555555-5555-5555-5555-555555555555
+                      sku_name: Ноутбук Lenovo X1
+                      qr_code: QR-E2E-1a2b3c4d
+                      status: RECEIVED
+                  total_products: 1
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`BUFFER_BIN_NOT_FOUND` — буферная ячейка не найдена (или section≠BUFFER).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: BUFFER_BIN_NOT_FOUND, message: Буферная ячейка не найдена }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /putaway/scan-product:
+    post:
+      tags: [Putaway]
+      summary: Проверить товар в буфере и получить размер корзины
+      description: |
+        RBAC: только `OPERATOR`. Только чтение. `cart_size` — количество `RECEIVED`
+        товаров в буфере (из БД, не in-memory).
+      operationId: putawayScanProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutawayScanProductRequest'
+            example:
+              product_id: 55555555-5555-5555-5555-555555555555
+              buffer_bin_id: 66666666-6666-6666-6666-666666666666
+      responses:
+        '200':
+          description: Товар подтверждён.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/PutawayScanProductResponse'
+              example:
+                success: true
+                data:
+                  product_id: 55555555-5555-5555-5555-555555555555
+                  sku_name: Ноутбук Lenovo X1
+                  qr_code: QR-E2E-1a2b3c4d
+                  cart_size: 3
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`BUFFER_BIN_NOT_FOUND` или `PRODUCT_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: |
+            `PRODUCT_NOT_IN_BUFFER` (bin_id товара ≠ buffer_bin_id) или
+            `PRODUCT_NOT_RECEIVED` (статус ≠ RECEIVED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PRODUCT_NOT_IN_BUFFER, message: Товар не в буферной ячейке }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /putaway/scan-storage-bin:
+    post:
+      tags: [Putaway]
+      summary: Разместить партию товаров в ячейке хранения
+      description: |
+        RBAC: только `OPERATOR`. Единственный мутирующий эндпоинт раскладки.
+        Переводит товары `RECEIVED → STORED`, пишет `wms_ops.putaways` и outbox-события
+        (`aggregate_type=putaway`, `event_type=wms.putaway.v1`). Перед транзакцией —
+        chain-gate: `FAILED` on-chain receiving-событие → `409 CHAIN_EVENT_REJECTED`.
+        `product_ids` — непустой, максимум 200 элементов.
+      operationId: putawayScanStorageBin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanStorageBinRequest'
+            example:
+              product_ids:
+                - 55555555-5555-5555-5555-555555555555
+              storage_bin_id: 77777777-7777-7777-7777-777777777777
+      responses:
+        '200':
+          description: Товары размещены.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanStorageBinResponse'
+              example:
+                success: true
+                data:
+                  storage_bin_id: 77777777-7777-7777-7777-777777777777
+                  storage_bin_code: M2-A-03
+                  products_placed: 3
+                  outbox_events_created: 3
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — битый JSON, пустой/слишком большой (>200) product_ids, не-UUID.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: |
+            `STORAGE_BIN_NOT_FOUND` (ячейка не найдена / является BUFFER или SHIPPING_BUFFER /
+            volume=0 — отдаётся именно 404, не 400) или `PRODUCT_NOT_FOUND`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: STORAGE_BIN_NOT_FOUND, message: Ячейка хранения не найдена }
+        '409':
+          description: |
+            `PRODUCT_NOT_IN_BUFFER`, `PRODUCT_NOT_RECEIVED` или
+            `CHAIN_EVENT_REJECTED` (FAILED on-chain receiving-событие).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: CHAIN_EVENT_REJECTED, message: Событие отклонено блокчейном }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # ASSEMBLY
+  # ──────────────────────────────────────────────────────────────────────────
+  /assembly/allocate:
+    post:
+      tags: [Assembly]
+      summary: Аллоцировать товары на заказы пункта назначения
+      description: |
+        **RBAC: `ADMIN` или `OPERATOR`** (issue #39 — единственная операция, доступная
+        ADMIN, кроме `/auth/register`). Аллоцирует `STORED` товары на `NEW` заказы
+        пункта назначения (all-or-nothing на заказ), создаёт `assembly_tasks` (PENDING).
+        Недоаллоцированные заказы возвращаются в `insufficient_orders` — это **не ошибка**,
+        ответ всегда `200`. См. `../flows/assembly-flow.md`.
+      operationId: assemblyAllocate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AllocateRequest'
+            example:
+              destination_id: 88888888-8888-8888-8888-888888888888
+      responses:
+        '200':
+          description: Аллокация выполнена (возможно частично — см. insufficient_orders).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/AllocateResponse'
+              examples:
+                full:
+                  summary: Полная аллокация
+                  value:
+                    success: true
+                    data: { allocated_orders: 1, allocated_products: 3, insufficient_orders: [] }
+                    error: null
+                shortage:
+                  summary: Нехватка остатка
+                  value:
+                    success: true
+                    data:
+                      allocated_orders: 0
+                      allocated_products: 0
+                      insufficient_orders:
+                        - order_id: 99999999-9999-9999-9999-999999999999
+                          missing_skus:
+                            - sku_id: 33333333-3333-3333-3333-333333333333
+                              sku_name: E2E MP SKU 1a2b3c4d
+                              missing_qty: 2
+                    error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: '`FORBIDDEN` — роль не ADMIN и не OPERATOR (например CUSTOMER).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Требуется роль администратора или оператора }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /assembly/tasks:
+    get:
+      tags: [Assembly]
+      summary: Получить список задач сборки
+      description: |
+        RBAC: только `OPERATOR`. Только чтение. Фильтр `operator_id` (опционально):
+        возвращает задачи `operator_id IS NULL OR operator_id = $`. Задачи отсортированы
+        по `section, code` ячейки.
+      operationId: assemblyGetTasks
+      parameters:
+        - name: destination_id
+          in: query
+          required: true
+          description: UUID пункта назначения. Обязателен.
+          schema:
+            type: string
+            format: uuid
+        - name: operator_id
+          in: query
+          required: false
+          description: Опциональный UUID оператора. Если опущен — фильтр по оператору не применяется.
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          required: false
+          description: 'Статус задачи. По умолчанию `PENDING`.'
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/TaskStatus'
+              - default: PENDING
+      responses:
+        '200':
+          description: Список задач (может быть пустым массивом).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/TaskResponse'
+              example:
+                success: true
+                data:
+                  tasks:
+                    - task_id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+                      product_id: 55555555-5555-5555-5555-555555555555
+                      qr_code: QR-E2E-1a2b3c4d
+                      sku_name: Ноутбук Lenovo X1
+                      from_bin_code: M2-A-03
+                      from_bin_section: A
+                      order_no: EXT-ORDER-001
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — отсутствует/невалиден destination_id, невалиден operator_id или неизвестный status.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /assembly/pick:
+    post:
+      tags: [Assembly]
+      summary: Подобрать товар (зафиксировать пик)
+      description: |
+        RBAC: только `OPERATOR`. Помечает задачу `DONE`, товар `ASSEMBLED`, пишет
+        outbox-событие (`aggregate_type=picking`, `event_type=wms.picking.v1`).
+        Перед транзакцией — chain-gate по putaway-стадии: `FAILED` → `409 CHAIN_EVENT_REJECTED`.
+        `cart_size` — кол-во ASSEMBLED товаров оператора с DONE-задачами.
+      operationId: assemblyPick
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PickRequest'
+            example:
+              product_id: 55555555-5555-5555-5555-555555555555
+      responses:
+        '200':
+          description: Товар подобран.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/PickResponse'
+              example:
+                success: true
+                data: { product_id: 55555555-5555-5555-5555-555555555555, cart_size: 1 }
+                error: null
+        '400':
+          $ref: '#/components/responses/JSONBadRequest'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '409':
+          description: |
+            `CHAIN_EVENT_REJECTED` (FAILED putaway on-chain), `NO_TASK_FOR_PRODUCT`
+            (нет PENDING-задачи) или `PRODUCT_NOT_ALLOCATED` (статус ≠ ALLOCATED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: NO_TASK_FOR_PRODUCT, message: Нет задачи сборки для этого товара }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /assembly/scan-shipping-buffer:
+    post:
+      tags: [Assembly]
+      summary: Переместить собранные товары в буфер отгрузки
+      description: |
+        RBAC: только `OPERATOR`. Переносит все `ASSEMBLED` товары оператора (с DONE-задачами)
+        в SHIPPING_BUFFER-ячейку (`READY_TO_SHIP`). Заказы, у которых все товары
+        `READY_TO_SHIP`, переводятся в `ASSEMBLED`.
+      operationId: assemblyScanShippingBuffer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssemblyScanShippingBufferRequest'
+            example:
+              buffer_bin_id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+      responses:
+        '200':
+          description: Товары перемещены в буфер отгрузки.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanShippingBufferResponse'
+              example:
+                success: true
+                data: { buffer_bin_id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, products_placed: 4, orders_assembled: 1 }
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` или `BIN_NOT_SHIPPING_BUFFER` (section ≠ SHIPPING_BUFFER).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: BIN_NOT_SHIPPING_BUFFER, message: Ячейка не является буфером отгрузки }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`DESTINATION_NOT_FOUND` — у SHIPPING_BUFFER-ячейки нет destination_id.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`CART_EMPTY` — нет ASSEMBLED товаров оператора для перемещения.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: CART_EMPTY, message: Корзина пуста }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # DISPATCHES
+  # ──────────────────────────────────────────────────────────────────────────
+  /dispatches/:
+    get:
+      tags: [Dispatches]
+      summary: Список исходящих рейсов
+      description: |
+        RBAC: только `OPERATOR`. **Завершающий слэш обязателен** (gorilla/mux не
+        редиректит). Все фильтры опциональны. Внутренние ошибки отдают `503`.
+        Внимание: при пустом результате `data` может быть `null`, а не `[]`.
+      operationId: dispatchesList
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/OutboundDispatchStatus'
+        - name: destination_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: warehouse_id
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 'Массив рейсов в `data` (или `null` при пустом результате).'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OutboundDispatch'
+              example:
+                success: true
+                data:
+                  - dispatch_id: cccccccc-cccc-cccc-cccc-cccccccccccc
+                    dispatch_code: DSP-2026-0531-001
+                    warehouse_id: 1
+                    destination_id: 88888888-8888-8888-8888-888888888888
+                    vehicle_number: А123ВС77
+                    driver_name: Иванов Иван
+                    driver_phone: '+79001234567'
+                    status: SCHEDULED
+                    scheduled_at: '2026-06-01T10:00:00Z'
+                    arrived_at: null
+                    departed_at: null
+                    created_at: '2026-05-31T09:00:00Z'
+                    updated_at: '2026-05-31T09:00:00Z'
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — невалидный destination_id или warehouse_id.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '503':
+          $ref: '#/components/responses/JSONServiceUnavailable'
+    post:
+      tags: [Dispatches]
+      summary: Создать исходящий рейс
+      description: |
+        RBAC: только `OPERATOR`. **Завершающий слэш обязателен.** `dispatch_code`
+        генерируется автоматически в формате `DSP-YYYY-MMDD-NNN` под advisory-локом.
+        **Возвращает `200` (не `201`)**, `data` обёрнута в ключ `dispatch`.
+      operationId: dispatchesCreate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewDispatchQuery'
+            example:
+              destination_id: 88888888-8888-8888-8888-888888888888
+              vehicle_number: А123ВС77
+              driver_name: Иванов Иван
+              driver_phone: '+79001234567'
+              scheduled_at: '2026-06-01T10:00:00Z'
+      responses:
+        '200':
+          description: 'Рейс создан. `data.dispatch` — объект OutboundDispatch.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        required: [dispatch]
+                        properties:
+                          dispatch:
+                            $ref: '#/components/schemas/OutboundDispatch'
+              example:
+                success: true
+                data:
+                  dispatch:
+                    dispatch_id: cccccccc-cccc-cccc-cccc-cccccccccccc
+                    dispatch_code: DSP-2026-0531-001
+                    warehouse_id: 1
+                    destination_id: 88888888-8888-8888-8888-888888888888
+                    vehicle_number: А123ВС77
+                    driver_name: Иванов Иван
+                    driver_phone: '+79001234567'
+                    status: SCHEDULED
+                    scheduled_at: '2026-06-01T10:00:00Z'
+                    arrived_at: null
+                    departed_at: null
+                    created_at: '2026-05-31T09:00:00Z'
+                    updated_at: '2026-05-31T09:00:00Z'
+                error: null
+        '400':
+          description: |
+            `INVALID_REQUEST` — битый JSON / лишнее поле, пустой `driver_name` или
+            `vehicle_number`, либо `scheduled_at` более чем на 1 минуту в прошлом.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_REQUEST, message: 'Invalid request body: you need to pass a driver_name' }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: |
+            `NOT_FOUND` — destination_id не найден в `wms_inventory.destinations`.
+            Внимание: `message` здесь — строка-сентинел `DESTINATION_NOT_FOUND`, не фраза.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: NOT_FOUND, message: DESTINATION_NOT_FOUND }
+        '503':
+          $ref: '#/components/responses/JSONServiceUnavailable'
+
+  /dispatches/{dispatch_id}:
+    get:
+      tags: [Dispatches]
+      summary: Получить рейс по ID
+      description: 'RBAC: только `OPERATOR`. `data.dispatch` — объект OutboundDispatch.'
+      operationId: dispatchesGetByID
+      parameters:
+        - name: dispatch_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 'Рейс найден. `data.dispatch` — объект OutboundDispatch.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        required: [dispatch]
+                        properties:
+                          dispatch:
+                            $ref: '#/components/schemas/OutboundDispatch'
+        '400':
+          description: '`INVALID_REQUEST` — dispatch_id не парсится как UUID.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: |
+            `NOT_FOUND` — рейс не найден. `message` — строка-сентинел `DISPATCH_NOT_FOUND`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: NOT_FOUND, message: DISPATCH_NOT_FOUND }
+        '503':
+          $ref: '#/components/responses/JSONServiceUnavailable'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # SHIPPING
+  # ──────────────────────────────────────────────────────────────────────────
+  /shipping/scan-buffer:
+    post:
+      tags: [Shipping]
+      summary: Осмотреть буфер отгрузки
+      description: |
+        RBAC: только `OPERATOR`. Возвращает метаданные SHIPPING_BUFFER-ячейки и все
+        `READY_TO_SHIP` товары в ней. Только чтение. См. `../flows/shipping-flow.md`.
+      operationId: shippingScanBuffer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShippingScanBufferRequest'
+            example:
+              buffer_bin_id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+      responses:
+        '200':
+          description: Содержимое буфера отгрузки.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanBufferResponse'
+              example:
+                success: true
+                data:
+                  buffer_bin:
+                    id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+                    code: SHIP-BUF-01
+                    destination:
+                      id: 88888888-8888-8888-8888-888888888888
+                      code: DEST-01
+                      name: Магазин №1
+                  products:
+                    - product_id: 55555555-5555-5555-5555-555555555555
+                      qr_code: QR-E2E-1a2b3c4d
+                      sku_name: Ноутбук Lenovo X1
+                      order_external_no: EXT-ORDER-001
+                  count: 1
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` или `BIN_NOT_SHIPPING_BUFFER` (section≠SHIPPING_BUFFER или нет destination).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: BIN_NOT_SHIPPING_BUFFER, message: Ячейка не является буфером отгрузки }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`BIN_NOT_FOUND` — ячейка не найдена.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /shipping/scan-driver:
+    post:
+      tags: [Shipping]
+      summary: Зарегистрировать прибытие водителя по коду рейса
+      description: |
+        RBAC: только `OPERATOR`. Переводит рейс `SCHEDULED → AT_GATE` (идемпотентно,
+        если уже `AT_GATE`). Терминальные статусы дают `409`.
+      operationId: shippingScanDriver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScanDriverRequest'
+            example:
+              dispatch_code: DSP-2026-0531-001
+      responses:
+        '200':
+          description: Рейс у ворот (AT_GATE).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanDriverResponse'
+              example:
+                success: true
+                data:
+                  dispatch_id: cccccccc-cccc-cccc-cccc-cccccccccccc
+                  dispatch_code: DSP-2026-0531-001
+                  vehicle_number: А123ВС77
+                  driver_name: Иванов Иван
+                  driver_phone: '+79001234567'
+                  destination: { id: 88888888-8888-8888-8888-888888888888, code: DEST-01, name: Магазин №1 }
+                  status: AT_GATE
+                  arrived_at: '2026-06-01T09:55:00Z'
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — пустой dispatch_code или нераспознанный терминальный статус рейса.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`DISPATCH_NOT_FOUND` — рейс с таким кодом не найден.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: DISPATCH_NOT_FOUND, message: Рейс не найден }
+        '409':
+          description: '`DISPATCH_ALREADY_DEPARTED` или `DISPATCH_CANCELLED`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: DISPATCH_ALREADY_DEPARTED, message: Рейс уже отбыл }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /shipping/ship:
+    post:
+      tags: [Shipping]
+      summary: Выполнить отгрузку
+      description: |
+        RBAC: только `OPERATOR`. Помечает товары `SHIPPED`, пишет `wms_ops.shippings` и
+        outbox-события (`aggregate_type=shipping`, `event_type=wms.shipping.v1`),
+        продвигает статусы заказов, и переводит рейс в `DEPARTED`, если буферная зона
+        пункта назначения опустела. `product_ids` опционален: пусто/отсутствует →
+        **bulk-режим** (все READY_TO_SHIP в ячейке); непусто → **spot-режим** (ровно эти,
+        точное совпадение). Максимум 200 элементов.
+        Примечание: `buffer_remaining` считается по **всей зоне SHIPPING_BUFFER пункта
+        назначения**, а не по одной ячейке. Ship-gate по блокчейну отсутствует.
+      operationId: shippingShip
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShipHTTPRequest'
+            example:
+              buffer_bin_id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+              dispatch_id: cccccccc-cccc-cccc-cccc-cccccccccccc
+              product_ids:
+                - 55555555-5555-5555-5555-555555555555
+      responses:
+        '200':
+          description: Отгрузка выполнена.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ShipResponse'
+              examples:
+                full:
+                  summary: Полная отгрузка, рейс отбыл
+                  value:
+                    success: true
+                    data:
+                      products_shipped: 3
+                      outbox_events_created: 3
+                      orders_completed: 1
+                      orders_partially_shipped: 0
+                      dispatch_departed: true
+                      buffer_remaining: 0
+                    error: null
+                partial:
+                  summary: Частичная отгрузка
+                  value:
+                    success: true
+                    data:
+                      products_shipped: 2
+                      outbox_events_created: 2
+                      orders_completed: 0
+                      orders_partially_shipped: 1
+                      dispatch_departed: false
+                      buffer_remaining: 1
+                    error: null
+        '400':
+          description: '`INVALID_REQUEST` — невалидные UUID, >200 product_ids, nil-значения.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`BIN_NOT_FOUND` или `DISPATCH_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: |
+            `DISPATCH_ALREADY_DEPARTED`, `DISPATCH_CANCELLED`, `DESTINATION_MISMATCH`
+            (destination буфера ≠ destination рейса), `DISPATCH_NOT_AT_GATE`,
+            `BUFFER_EMPTY` (bulk-режим, в ячейке нет READY_TO_SHIP) или
+            `PRODUCT_NOT_IN_BUFFER` (spot-режим, несовпадение по товарам).
+            Также `BIN_NOT_SHIPPING_BUFFER` (section≠SHIPPING_BUFFER) отдаётся как 400.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                not_at_gate:
+                  value:
+                    success: false
+                    data: null
+                    error: { code: DISPATCH_NOT_AT_GATE, message: Рейс не у ворот }
+                mismatch:
+                  value:
+                    success: false
+                    data: null
+                    error: { code: DESTINATION_MISMATCH, message: Пункт назначения буфера не совпадает с рейсом }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+# ════════════════════════════════════════════════════════════════════════════
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT access-токен (HS256). Claims: `user_id`, `role`, `type="access"`, `iat`, `exp`.
+        Получить — через `POST /auth/login`. Refresh-токены (`type="refresh"`) роль не несут.
+
+  responses:
+    # ── Бизнес-модули: JSON-конверт ──────────────────────────────────────────
+    JSONBadRequest:
+      description: '`INVALID_REQUEST` — битый JSON, лишнее поле (DisallowUnknownFields), не-UUID.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            data: null
+            error: { code: INVALID_REQUEST, message: Невалидный JSON в теле запроса }
+    PlainTextUnauthorized:
+      description: |
+        Отсутствует/невалиден JWT. Ответ формирует `auth.Middleware`
+        (`http.Error(w, "unauthorized", 401)`) — простой текст, без JSON-конверта.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: |
+            unauthorized
+    JSONForbidden:
+      description: '`FORBIDDEN` — роль не разрешена для этого эндпоинта.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            data: null
+            error: { code: FORBIDDEN, message: Только оператор может выполнять это действие }
+    JSONInternal:
+      description: '`INTERNAL_ERROR` — ошибка БД или непредвиденная ошибка.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            data: null
+            error: { code: INTERNAL_ERROR, message: Внутренняя ошибка сервера }
+    JSONServiceUnavailable:
+      description: |
+        `INTERNAL_ERROR` — ошибка БД/инфраструктуры. Модуль `dispatches` отдаёт
+        внутренние ошибки именно как `503` (не `500`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            success: false
+            data: null
+            error: { code: INTERNAL_ERROR, message: 'failed to get dispatch by id ...' }
+
+    # ── Модуль auth: простой текст ───────────────────────────────────────────
+    AuthPlainTextBadRequest:
+      description: 'Невалидное тело запроса (битый JSON / лишнее поле / нарушение валидации). Простой текст.'
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: |
+            invalid request body
+    AuthPlainTextUnauthorized:
+      description: 'Неверные учётные данные, неактивный пользователь или невалидный токен. Простой текст.'
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: |
+            unauthorized
+    AuthPlainTextForbidden:
+      description: 'Актёр не ADMIN (проверка по claim и по БД). Простой текст.'
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: |
+            forbidden
+    AuthPlainTextInternal:
+      description: 'Ошибка БД, bcrypt или генерации токена. Простой текст.'
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: |
+            internal server error
+
+  schemas:
+    # ── Общие конверты ───────────────────────────────────────────────────────
+    SuccessEnvelope:
+      type: object
+      description: Универсальный конверт успешного ответа бизнес-модулей.
+      required: [success, data, error]
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          description: Полезная нагрузка (тип зависит от операции).
+        error:
+          type: 'null'
+    ErrorEnvelope:
+      type: object
+      description: Универсальный конверт ошибки бизнес-модулей.
+      required: [success, data, error]
+      properties:
+        success:
+          type: boolean
+          const: false
+        data:
+          type: 'null'
+        error:
+          $ref: '#/components/schemas/APIError'
+    APIError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Машинно-читаемый код ошибки (ASCII).
+          example: INVALID_REQUEST
+        message:
+          type: string
+          description: Сообщение для пользователя (на русском).
+          example: Невалидный JSON в теле запроса
+
+    HealthResponse:
+      type: object
+      description: 'Особый формат `/health` — без конверта.'
+      required: [status, checks, time]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+          description: 'Карта `<зависимость> → "ok" | <текст ошибки>`.'
+          example: { postgres: ok, kafka: ok, ledger_adapter: ok }
+        time:
+          type: string
+          format: date-time
+
+    # ── Auth DTO ─────────────────────────────────────────────────────────────
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password, role]
+      properties:
+        username:
+          type: string
+          description: Непустой логин.
+        password:
+          type: string
+          minLength: 6
+          maxLength: 72
+          description: Длина 6..72 байта включительно.
+        role:
+          $ref: '#/components/schemas/UserRole'
+    TokenPair:
+      type: object
+      description: 'Сырой JSON без конверта (ответ /auth/login и /auth/refresh).'
+      required: [access_token, refresh_token]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+    RegisterResponse:
+      type: object
+      description: 'Сырой JSON без конверта (ответ /auth/register).'
+      required: [id, username]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+
+    # ── Доменные enum'ы ──────────────────────────────────────────────────────
+    UserRole:
+      type: string
+      enum: [ADMIN, OPERATOR, CUSTOMER]
+      description: Роль пользователя (DB enum public.user_role).
+    ProductStatus:
+      type: string
+      enum: [RECEIVED, STORED, ALLOCATED, ASSEMBLED, READY_TO_SHIP, SHIPPED]
+      description: Статус товара (DB enum wms_inventory.product_status).
+    OrderStatus:
+      type: string
+      enum: [NEW, ALLOCATED, ASSEMBLED, PARTIALLY_SHIPPED, SHIPPED]
+      description: Статус заказа (DB enum wms_inventory.order_status).
+    TaskStatus:
+      type: string
+      enum: [PENDING, IN_PROGRESS, DONE, CANCELLED]
+      description: 'Статус задачи сборки (DB enum wms_ops.task_status). IN_PROGRESS/CANCELLED — зарезервированы, без write-пути в текущей реализации.'
+    OutboundDispatchStatus:
+      type: string
+      enum: [SCHEDULED, AT_GATE, DEPARTED, CANCELLED]
+      description: Статус исходящего рейса.
+    CargoplaceStatus:
+      type: string
+      enum: [EXPECTED, RECEIVED_AT_GATE, NOT_RECEIVED, TABLE_IN_PROGRESS, TABLE_CLOSED]
+      description: 'Статус грузоместа (в БД — text, не enum).'
+    ShipmentStatus:
+      type: string
+      enum: [CREATED, GATE_IN_PROGRESS, GATE_CLOSED]
+      description: 'Статус входящей поставки (в БД — text, не enum).'
+    BoxStatus:
+      type: string
+      enum: [OPEN, CLOSED]
+      description: 'Статус коробки (в БД — text, не enum).'
+
+    # ── Доменные сущности ────────────────────────────────────────────────────
+    OutboundDispatch:
+      type: object
+      description: 'Плановый исходящий рейс. DB: wms_inventory.outbound_dispatches.'
+      required:
+        - dispatch_id
+        - dispatch_code
+        - warehouse_id
+        - destination_id
+        - vehicle_number
+        - driver_name
+        - status
+        - scheduled_at
+        - created_at
+        - updated_at
+      properties:
+        dispatch_id:
+          type: string
+          format: uuid
+        dispatch_code:
+          type: string
+          example: DSP-2026-0531-001
+        warehouse_id:
+          type: integer
+          format: int64
+        destination_id:
+          type: string
+          format: uuid
+        vehicle_number:
+          type: string
+        driver_name:
+          type: string
+        driver_phone:
+          type: [string, 'null']
+        status:
+          $ref: '#/components/schemas/OutboundDispatchStatus'
+        scheduled_at:
+          type: string
+          format: date-time
+        arrived_at:
+          type: [string, 'null']
+          format: date-time
+        departed_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Receiving: запросы ───────────────────────────────────────────────────
+    ScanTTNRequest:
+      type: object
+      additionalProperties: false
+      required: [ttn_code]
+      properties:
+        ttn_code:
+          type: string
+          maxLength: 256
+    ScanGateCargoplaceRequest:
+      type: object
+      additionalProperties: false
+      required: [shipment_id, cargoplace_code]
+      properties:
+        shipment_id:
+          type: string
+          format: uuid
+        cargoplace_code:
+          type: string
+          maxLength: 256
+    AcceptShipmentRequest:
+      type: object
+      additionalProperties: false
+      required: [shipment_id]
+      properties:
+        shipment_id:
+          type: string
+          format: uuid
+    ScanTableCargoplaceRequest:
+      type: object
+      additionalProperties: false
+      required: [cargoplace_id]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+    ScanBoxRequest:
+      type: object
+      additionalProperties: false
+      required: [cargoplace_id, box_barcode]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+        box_barcode:
+          type: string
+          maxLength: 256
+    ScanSKURequest:
+      type: object
+      additionalProperties: false
+      required: [cargoplace_id, box_id, barcode]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+        box_id:
+          type: string
+          format: uuid
+        barcode:
+          type: string
+          maxLength: 256
+    ScanQRRequest:
+      type: object
+      additionalProperties: false
+      required: [cargoplace_id, box_id, sku_id, qr_code]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+        box_id:
+          type: string
+          format: uuid
+        sku_id:
+          type: string
+          format: uuid
+        qr_code:
+          type: string
+          maxLength: 256
+    CloseBoxRequest:
+      type: object
+      additionalProperties: false
+      required: [box_id]
+      properties:
+        box_id:
+          type: string
+          format: uuid
+    ScanBufferReceivingRequest:
+      type: object
+      additionalProperties: false
+      required: [cargoplace_id, buffer_bin_id]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+        buffer_bin_id:
+          type: string
+          format: uuid
+    CloseCargoplaceRequest:
+      type: object
+      additionalProperties: false
+      required: [cargoplace_id]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+
+    # ── Receiving: ответы ────────────────────────────────────────────────────
+    CargoplaceView:
+      type: object
+      required: [cargoplace_id, cargoplace_code, status]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+        cargoplace_code:
+          type: string
+        status:
+          $ref: '#/components/schemas/CargoplaceStatus'
+    Progress:
+      type: object
+      required: [total, received, remaining, not_received]
+      properties:
+        total:
+          type: integer
+        received:
+          type: integer
+        remaining:
+          type: integer
+        not_received:
+          type: integer
+    ReceivingProgress:
+      type: object
+      required: [received_in_cargoplace, expected_in_cargoplace]
+      properties:
+        received_in_cargoplace:
+          type: integer
+        expected_in_cargoplace:
+          type: integer
+    ExpectedSKU:
+      type: object
+      required: [sku_id, sku_name, expected_qty]
+      properties:
+        sku_id:
+          type: string
+          format: uuid
+        sku_name:
+          type: string
+        expected_qty:
+          type: integer
+    ShortageBySKU:
+      type: object
+      required: [sku_name, expected, received, shortage]
+      properties:
+        sku_name:
+          type: string
+        expected:
+          type: integer
+        received:
+          type: integer
+        shortage:
+          type: integer
+    CloseCargoplaceSummary:
+      type: object
+      required: [products_received, products_expected, shortage, shortage_by_sku]
+      properties:
+        products_received:
+          type: integer
+        products_expected:
+          type: integer
+        shortage:
+          type: integer
+        shortage_by_sku:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShortageBySKU'
+    ScanTTNResult:
+      type: object
+      required: [shipment_id, ttn_code, status, cargoplaces, total_cargoplaces, received_cargoplaces]
+      properties:
+        shipment_id:
+          type: string
+          format: uuid
+        ttn_code:
+          type: string
+        status:
+          $ref: '#/components/schemas/ShipmentStatus'
+        cargoplaces:
+          type: array
+          items:
+            $ref: '#/components/schemas/CargoplaceView'
+        total_cargoplaces:
+          type: integer
+        received_cargoplaces:
+          type: integer
+    ScanGateCargoplaceResult:
+      type: object
+      required: [cargoplace_id, cargoplace_code, status, received_at_gate_at, progress]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+        cargoplace_code:
+          type: string
+        status:
+          $ref: '#/components/schemas/CargoplaceStatus'
+        received_at_gate_at:
+          type: string
+          format: date-time
+        progress:
+          $ref: '#/components/schemas/Progress'
+    AcceptShipmentResult:
+      type: object
+      required: [shipment_id, status, summary]
+      properties:
+        shipment_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ShipmentStatus'
+        summary:
+          $ref: '#/components/schemas/Progress'
+    ScanTableCargoplaceResult:
+      type: object
+      required: [cargoplace_id, cargoplace_code, status, expected_skus, total_expected]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+        cargoplace_code:
+          type: string
+        status:
+          $ref: '#/components/schemas/CargoplaceStatus'
+        expected_skus:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpectedSKU'
+        total_expected:
+          type: integer
+    ScanBoxResult:
+      type: object
+      required: [box_id, box_barcode, status]
+      properties:
+        box_id:
+          type: string
+          format: uuid
+        box_barcode:
+          type: string
+        status:
+          $ref: '#/components/schemas/BoxStatus'
+    ScanSKUResult:
+      type: object
+      required: [sku_id, sku_name, barcode, message]
+      properties:
+        sku_id:
+          type: string
+          format: uuid
+        sku_name:
+          type: string
+        barcode:
+          type: string
+        message:
+          type: string
+          example: Наклейте QR на товар
+    ScanQRResult:
+      type: object
+      required: [product_id, sku_id, sku_name, qr_code, status, progress]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        sku_id:
+          type: string
+          format: uuid
+        sku_name:
+          type: string
+        qr_code:
+          type: string
+        status:
+          $ref: '#/components/schemas/ProductStatus'
+        progress:
+          $ref: '#/components/schemas/ReceivingProgress'
+    CloseBoxResult:
+      type: object
+      required: [box_id, status, products_in_box]
+      properties:
+        box_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/BoxStatus'
+        products_in_box:
+          type: integer
+    ScanBufferReceivingResult:
+      type: object
+      required: [buffer_bin_id, buffer_code, products_placed]
+      properties:
+        buffer_bin_id:
+          type: string
+          format: uuid
+        buffer_code:
+          type: string
+        products_placed:
+          type: integer
+    CloseCargoplaceResult:
+      type: object
+      required: [cargoplace_id, status, summary, outbox_events_created]
+      properties:
+        cargoplace_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/CargoplaceStatus'
+        summary:
+          $ref: '#/components/schemas/CloseCargoplaceSummary'
+        outbox_events_created:
+          type: integer
+
+    # ── Putaway DTO ──────────────────────────────────────────────────────────
+    PutawayScanBufferRequest:
+      type: object
+      additionalProperties: false
+      required: [buffer_bin_id]
+      properties:
+        buffer_bin_id:
+          type: string
+          format: uuid
+    ProductBufferItemResponse:
+      type: object
+      required: [product_id, sku_name, qr_code, status]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        sku_name:
+          type: string
+        qr_code:
+          type: string
+        status:
+          type: string
+          description: 'Всегда "RECEIVED" (SQL фильтрует по status=RECEIVED).'
+    PutawayScanBufferResponse:
+      type: object
+      required: [buffer_bin_id, buffer_code, products, total_products]
+      properties:
+        buffer_bin_id:
+          type: string
+          format: uuid
+        buffer_code:
+          type: string
+        products:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProductBufferItemResponse'
+        total_products:
+          type: integer
+    PutawayScanProductRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id, buffer_bin_id]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        buffer_bin_id:
+          type: string
+          format: uuid
+    PutawayScanProductResponse:
+      type: object
+      required: [product_id, sku_name, qr_code, cart_size]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        sku_name:
+          type: string
+        qr_code:
+          type: string
+        cart_size:
+          type: integer
+    ScanStorageBinRequest:
+      type: object
+      additionalProperties: false
+      required: [product_ids, storage_bin_id]
+      properties:
+        product_ids:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            type: string
+            format: uuid
+        storage_bin_id:
+          type: string
+          format: uuid
+    ScanStorageBinResponse:
+      type: object
+      required: [storage_bin_id, storage_bin_code, products_placed, outbox_events_created]
+      properties:
+        storage_bin_id:
+          type: string
+          format: uuid
+        storage_bin_code:
+          type: string
+        products_placed:
+          type: integer
+        outbox_events_created:
+          type: integer
+
+    # ── Assembly DTO ─────────────────────────────────────────────────────────
+    AllocateRequest:
+      type: object
+      additionalProperties: false
+      required: [destination_id]
+      properties:
+        destination_id:
+          type: string
+          format: uuid
+    InsufficientSKU:
+      type: object
+      required: [sku_id, sku_name, missing_qty]
+      properties:
+        sku_id:
+          type: string
+          format: uuid
+        sku_name:
+          type: string
+        missing_qty:
+          type: integer
+    InsufficientOrder:
+      type: object
+      required: [order_id, missing_skus]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        missing_skus:
+          type: array
+          items:
+            $ref: '#/components/schemas/InsufficientSKU'
+    AllocateResponse:
+      type: object
+      required: [allocated_orders, allocated_products, insufficient_orders]
+      properties:
+        allocated_orders:
+          type: integer
+        allocated_products:
+          type: integer
+        insufficient_orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/InsufficientOrder'
+    TaskItem:
+      type: object
+      required: [task_id, product_id, qr_code, sku_name, from_bin_code, from_bin_section, order_no]
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        product_id:
+          type: string
+          format: uuid
+        qr_code:
+          type: string
+        sku_name:
+          type: string
+        from_bin_code:
+          type: string
+        from_bin_section:
+          type: string
+        order_no:
+          type: string
+    TaskResponse:
+      type: object
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskItem'
+    PickRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+    PickResponse:
+      type: object
+      required: [product_id, cart_size]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        cart_size:
+          type: integer
+    AssemblyScanShippingBufferRequest:
+      type: object
+      additionalProperties: false
+      required: [buffer_bin_id]
+      properties:
+        buffer_bin_id:
+          type: string
+          format: uuid
+    ScanShippingBufferResponse:
+      type: object
+      required: [buffer_bin_id, products_placed, orders_assembled]
+      properties:
+        buffer_bin_id:
+          type: string
+          format: uuid
+        products_placed:
+          type: integer
+        orders_assembled:
+          type: integer
+
+    # ── Dispatches DTO ───────────────────────────────────────────────────────
+    NewDispatchQuery:
+      type: object
+      additionalProperties: false
+      required: [destination_id, vehicle_number, driver_name, scheduled_at]
+      properties:
+        destination_id:
+          type: string
+          format: uuid
+        vehicle_number:
+          type: string
+        driver_name:
+          type: string
+        driver_phone:
+          type: [string, 'null']
+          description: Опционально.
+        scheduled_at:
+          type: string
+          format: date-time
+          description: Не должен быть более чем на 1 минуту в прошлом.
+
+    # ── Shipping DTO ─────────────────────────────────────────────────────────
+    ShippingScanBufferRequest:
+      type: object
+      additionalProperties: false
+      required: [buffer_bin_id]
+      properties:
+        buffer_bin_id:
+          type: string
+          format: uuid
+    ScanDriverRequest:
+      type: object
+      additionalProperties: false
+      required: [dispatch_code]
+      properties:
+        dispatch_code:
+          type: string
+    ShipHTTPRequest:
+      type: object
+      additionalProperties: false
+      required: [buffer_bin_id, dispatch_id]
+      properties:
+        buffer_bin_id:
+          type: string
+          format: uuid
+        dispatch_id:
+          type: string
+          format: uuid
+        product_ids:
+          type: array
+          maxItems: 200
+          description: 'Опционально. Пусто/отсутствует → bulk-режим; непусто → spot-режим.'
+          items:
+            type: string
+            format: uuid
+    Destination:
+      type: object
+      required: [id, code, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+    BufferBin:
+      type: object
+      required: [id, code, destination]
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        destination:
+          $ref: '#/components/schemas/Destination'
+    ScanBufferProduct:
+      type: object
+      required: [product_id, qr_code, sku_name, order_external_no]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        qr_code:
+          type: string
+        sku_name:
+          type: string
+        order_external_no:
+          type: [string, 'null']
+    ScanBufferResponse:
+      type: object
+      required: [buffer_bin, products, count]
+      properties:
+        buffer_bin:
+          $ref: '#/components/schemas/BufferBin'
+        products:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScanBufferProduct'
+        count:
+          type: integer
+    ScanDriverResponse:
+      type: object
+      required: [dispatch_id, dispatch_code, vehicle_number, driver_name, driver_phone, destination, status, arrived_at]
+      properties:
+        dispatch_id:
+          type: string
+          format: uuid
+        dispatch_code:
+          type: string
+        vehicle_number:
+          type: string
+        driver_name:
+          type: string
+        driver_phone:
+          type: [string, 'null']
+        destination:
+          $ref: '#/components/schemas/Destination'
+        status:
+          $ref: '#/components/schemas/OutboundDispatchStatus'
+        arrived_at:
+          type: [string, 'null']
+          format: date-time
+    ShipResponse:
+      type: object
+      required:
+        - products_shipped
+        - outbox_events_created
+        - orders_completed
+        - orders_partially_shipped
+        - dispatch_departed
+        - buffer_remaining
+      properties:
+        products_shipped:
+          type: integer
+        outbox_events_created:
+          type: integer
+        orders_completed:
+          type: integer
+        orders_partially_shipped:
+          type: integer
+        dispatch_departed:
+          type: boolean
+        buffer_remaining:
+          type: integer

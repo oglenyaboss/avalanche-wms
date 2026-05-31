@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WMS API — Swagger UI</title>
+    <!--
+      Self-contained Swagger UI для спецификации ./openapi.yaml.
+
+      Как открыть:
+        1) Прямо из файловой системы — двойной клик по этому файлу
+           (file://.../docs/api/swagger-ui.html). Работает в большинстве
+           браузеров, т.к. openapi.yaml лежит рядом и грузится по
+           относительному пути.
+        2) Если браузер блокирует загрузку из-за CORS/file://, поднимите
+           локальный статический сервер из каталога docs/api/:
+               python3 -m http.server 8088
+           и откройте http://localhost:8088/swagger-ui.html
+
+      Swagger UI и все ассеты грузятся с CDN unpkg (swagger-ui-dist).
+    -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      href="https://unpkg.com/swagger-ui-dist@5/favicon-32x32.png"
+      sizes="32x32"
+    />
+    <style>
+      html {
+        box-sizing: border-box;
+        overflow-y: scroll;
+      }
+      *,
+      *:before,
+      *:after {
+        box-sizing: inherit;
+      }
+      body {
+        margin: 0;
+        background: #fafafa;
+      }
+      .wms-note {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        font-size: 13px;
+        line-height: 1.5;
+        color: #3b4151;
+        background: #f0f6ff;
+        border-bottom: 1px solid #c9def7;
+        padding: 12px 20px;
+      }
+      .wms-note code {
+        background: #e3edf9;
+        padding: 1px 5px;
+        border-radius: 3px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wms-note">
+      <strong>WMS API</strong> — спецификация загружается из
+      <code>./openapi.yaml</code>. Файл можно открыть напрямую
+      (<code>file://…/docs/api/swagger-ui.html</code>) или раздать локальным
+      сервером: <code>python3 -m http.server 8088</code> из каталога
+      <code>docs/api/</code>, затем
+      <code>http://localhost:8088/swagger-ui.html</code>. Базовый URL сервиса —
+      <code>http://localhost:8081</code>.
+    </div>
+    <div id="swagger-ui"></div>
+
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js" crossorigin></script>
+    <script>
+      window.onload = function () {
+        window.ui = SwaggerUIBundle({
+          url: "./openapi.yaml",
+          dom_id: "#swagger-ui",
+          deepLinking: true,
+          docExpansion: "list",
+          defaultModelsExpandDepth: 1,
+          tryItOutEnabled: true,
+          presets: [
+            SwaggerUIBundle.presets.apis,
+            SwaggerUIStandalonePreset,
+          ],
+          plugins: [SwaggerUIBundle.plugins.DownloadUrl],
+          layout: "StandaloneLayout",
+        });
+      };
+    </script>
+  </body>
+</html>

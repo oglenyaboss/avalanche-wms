@@ -16,7 +16,7 @@
 | WMS-монолит | Go, net/http |
 | БД | PostgreSQL 17 (3 схемы: public, wms_inventory, wms_ops) |
 | CDC | Debezium (outbox → Kafka) |
-| Очереди | Apache Kafka (4 топика + DLQ) |
+| Очереди | Apache Kafka (рабочий топик `wms.events.v1` + DLQ `wms.dlq.v1`; 4 per-aggregate топика — legacy/rollback) |
 | Мост в блокчейн | Ledger Adapter (Go) |
 | Блокчейн | Avalanche Subnet-EVM (permissioned) |
 | Контракт | BatchMappingWMS (Solidity, batch-операции) |
@@ -32,6 +32,13 @@
 ---
 
 ## Навигация по документам
+
+### Документация разработчика
+
+| Документ | Описание |
+|----------|----------|
+| [Индекс разработчика](developer/README.md) | **Точка входа для приёма проекта:** обзор системы, архитектурная схема, карта всей документации, технологический стек, ключевые принципы, маршрут чтения и глоссарий. Начни отсюда при передаче проекта. |
+| [OpenAPI-спецификация](api/openapi.yaml) | Машиночитаемый контракт API (источник истины). По нему сгенерирован `api/api-contract.md`. |
 
 ### Бизнес-процесс
 
@@ -66,11 +73,21 @@
 | [Контракт данных](integration/data-contract.md) | Формат outbox, Kafka, Ledger Adapter, onchain_events |
 | [BatchMappingWMS](integration/batch-mapping-approach.md) | Смарт-контракт: FSM, batch-функции, производительность |
 
+### Документация разработчика (hand-off)
+
+| Документ | Описание |
+|----------|----------|
+| [WMS Reference](developer/wms-reference.md) | Референс WMS-монолита: пакеты, модули (receiving / putaway / assembly / shipping / dispatches / auth), сервисы, репозитории, запись outbox |
+| [Ledger Adapter Reference](developer/ledger-adapter-reference.md) | Внутреннее устройство моста: пакеты `internal/`, consumer, batch-flusher, reconcile, идемпотентность, env, типы и сигнатуры |
+| [Smart Contract Reference](developer/smart-contract-reference.md) | Контракт BatchMappingWMS: FSM, сигнатуры batch-функций, события, revert-условия, storage layout, `UUID → uint256` |
+| [Operations](developer/operations.md) | Эксплуатация: docker-compose, переменные окружения, инициализация БД/Kafka, регистрация Debezium-коннектора, мониторинг, CI |
+
 ### API
 
 | Документ | Описание |
 |----------|----------|
-| [API-контракт](api/api-contract.md) | 19 эндпоинтов: request/response, ошибки, побочные эффекты |
+| [OpenAPI-спецификация](api/openapi.yaml) | Машиночитаемый контракт API — источник истины для эндпоинтов |
+| [API-контракт](api/api-contract.md) | Request/response, ошибки, побочные эффекты. **Перегенерирован из `openapi.yaml`** |
 
 ### Архитектура и инфраструктура
 
