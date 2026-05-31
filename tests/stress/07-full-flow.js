@@ -17,21 +17,17 @@
  *       STORAGE_BIN_ID     — UUID ячейки A-01-01
  *       DESTINATION_ID     — UUID магазина (SHOP-7 или SHOP-5)
  *       SHIPPING_BIN_ID    — UUID буфера отгрузки для этого магазина
- *       DISPATCH_CODE      — код рейса (STRESS-DSP-XXXX)
+ *       DISPATCH_CODE      — коды рейсов через запятую (STRESS-FLOW-DSP-0001,...,STRESS-FLOW-DSP-0010)
+ *                           Допускается также передать один код (обратная совместимость).
  *
  * Запуск:
- *   source <(docker exec postgres_db psql -U root -d wms_blockchain_db \
- *     -tAc "SELECT 'export RECEIVING_BIN_ID=' || b.bin_id ||
- *            E'\nexport STORAGE_BIN_ID=' || s.bin_id ||
- *            E'\nexport DESTINATION_ID=' || d.destination_id ||
- *            E'\nexport SHIPPING_BIN_ID=' || sh.bin_id
- *           FROM wms_inventory.bins b, wms_inventory.bins s,
- *                wms_inventory.destinations d, wms_inventory.bins sh
- *           WHERE b.code='BUFFER-01' AND s.code='A-01-01'
- *             AND d.code='SHOP-7'
- *             AND sh.destination_id=d.destination_id AND sh.section='SHIPPING_BUFFER'
- *           LIMIT 1")
- *   k6 run tests/stress/07-full-flow.js
+ *   source <(bash tests/stress/setup/generate-stress-data.sh)
+ *   k6 run -e RECEIVING_BIN_ID=$RECEIVING_BIN_ID \
+ *          -e STORAGE_BIN_ID=$STORAGE_BIN_ID \
+ *          -e DESTINATION_ID=$DESTINATION_ID_07 \
+ *          -e SHIPPING_BIN_ID=$SHIPPING_BIN_ID_07 \
+ *          -e "DISPATCH_CODE=$DISPATCH_CODE_07" \
+ *          tests/stress/07-full-flow.js
  */
 import http from 'k6/http';
 import { check, sleep, group } from 'k6';
@@ -40,10 +36,12 @@ import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
 
-// UUID грузомест STRESS-TABLE-CP-0001..0500 (0-indexed, порядок по cargoplace_code).
+// UUID грузомест STRESS-FLOW-CP-0001..0500 (0-indexed, порядок по cargoplace_code).
+// Отдельный пул от теста 05 (STRESS-TABLE-CP-*), чтобы тест 07 не получал
+// уже закрытые (TABLE_CLOSED) грузоместа.
 // Файл генерируется run-all.sh перед запуском теста.
-const CP_UUIDS = new SharedArray('table_cargoplaces', () =>
-  JSON.parse(open('/tmp/stress-table-cps.json')));
+const CP_UUIDS = new SharedArray('flow_cargoplaces', () =>
+  JSON.parse(open('/tmp/stress-flow-cps.json')));
 
 export const options = {
   scenarios: {
@@ -70,6 +68,7 @@ export const options = {
 export function setup() {
   // Проверяем обязательные env-переменные ДО старта VU.
   // Если хотя бы одна не задана — тест прерывается немедленно с понятным сообщением.
+  // DISPATCH_CODE принимает один код ИЛИ коды через запятую (напр. "STRESS-FLOW-DSP-0001,...,0010").
   const required = {
     RECEIVING_BIN_ID: __ENV.RECEIVING_BIN_ID,
     STORAGE_BIN_ID:   __ENV.STORAGE_BIN_ID,
@@ -90,7 +89,7 @@ export function setup() {
       'или передайте переменные явно:\n' +
       '  k6 run -e RECEIVING_BIN_ID=<uuid> -e STORAGE_BIN_ID=<uuid> \\\n' +
       '         -e DESTINATION_ID=<uuid> -e SHIPPING_BIN_ID=<uuid> \\\n' +
-      '         -e DISPATCH_CODE=STRESS-DSP-0001 \\\n' +
+      '         -e "DISPATCH_CODE=STRESS-FLOW-DSP-0001,...,STRESS-FLOW-DSP-0010" \\\n' +
       '         tests/stress/07-full-flow.js\n';
     exec.test.abort(msg);
   }
@@ -99,25 +98,51 @@ export function setup() {
   if (!token) {
     exec.test.abort('setup: не удалось получить токен оператора. Проверьте WMS_URL и учётные данные.');
   }
+
+  // Разбираем коды рейсов (один или несколько через запятую).
+  // Множество кодов позволяет VU-шникам равномерно распределяться по рейсам
+  // и снизить число 409 DISPATCH_ALREADY_AT_GATE на scan-driver.
+  const dispatchCodes = __ENV.DISPATCH_CODE
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean);
+
   return {
     token,
     receivingBinId: __ENV.RECEIVING_BIN_ID,
     storageBinId:   __ENV.STORAGE_BIN_ID,
     destinationId:  __ENV.DESTINATION_ID,
     shippingBinId:  __ENV.SHIPPING_BIN_ID,
-    dispatchCode:   __ENV.DISPATCH_CODE,
+    dispatchCodes,
   };
 }
 
 export default function (data) {
-  const { token, receivingBinId, storageBinId, destinationId, shippingBinId, dispatchCode } = data;
+  const { token, receivingBinId, storageBinId, destinationId, shippingBinId, dispatchCodes } = data;
 
   // setup() уже проверил env-переменные и токен; сюда они приходят гарантированно.
   if (!token) return;
 
+  // Выбираем код рейса с ротацией по VU и итерации, чтобы VU-шники распределялись
+  // по всем доступным рейсам и сводили к минимуму 409 DISPATCH_ALREADY_AT_GATE.
+  const dispatchCode = dispatchCodes[
+    ((__VU - 1 + __ITER * 30) % dispatchCodes.length)
+  ];
+
+  // 404 = ресурс не найден; 409 = конфликт (закрытое грузоместо, закрытый рейс);
+  // 422 = нет NEW-заказов или STORED-товаров.
+  http.setResponseCallback(http.expectedStatuses(
+    { min: 200, max: 299 },
+    404,
+    409,
+    422,
+  ));
+
   const H = authHeaders(token);
   const suffix = `${pad(__VU, 4)}-${pad(__ITER, 6)}`;
-  const cpIdx = ((__VU - 1 + __ITER * 200) % 500); // 0-indexed → CP_UUIDS[0..499]
+  // Множитель = пиковый maxVUs (30): каждый round сдвигается на 30 позиций,
+  // все 500 грузомест покрываются за ceil(500/30)=17 итераций без пробелов.
+  const cpIdx = ((__VU - 1 + __ITER * 30) % 500); // 0-indexed → CP_UUIDS[0..499]
   const cargoplaceId = CP_UUIDS[cpIdx] || '';
 
   if (!cargoplaceId) {
@@ -126,6 +151,7 @@ export default function (data) {
   }
 
   let productId = null;
+  let pickedProductIds = []; // product IDs actually picked in assembly (may differ from productId)
 
   // ── БЛОК 1: Receiving table ──────────────────────────────────────────────
   group('receiving_table', () => {
@@ -148,7 +174,9 @@ export default function (data) {
       { headers: H },
     );
     if (boxRes.status !== 200) return;
-    const boxId = JSON.parse(boxRes.body).data.box_id;
+    const boxData = JSON.parse(boxRes.body).data;
+    const boxId = boxData ? boxData.box_id : null;
+    if (!boxId) return;
 
     // scan-sku
     const skuRes = http.post(
@@ -157,7 +185,9 @@ export default function (data) {
       { headers: H },
     );
     if (skuRes.status !== 200) return;
-    const skuId = JSON.parse(skuRes.body).data.sku_id;
+    const skuData = JSON.parse(skuRes.body).data;
+    const skuId = skuData ? skuData.sku_id : null;
+    if (!skuId) return;
 
     // scan-qr → creates product
     const qrRes = http.post(
@@ -166,7 +196,8 @@ export default function (data) {
       { headers: H },
     );
     if (qrRes.status !== 200) return;
-    productId = JSON.parse(qrRes.body).data.product_id;
+    const qrData = JSON.parse(qrRes.body).data;
+    productId = qrData ? qrData.product_id : null;
 
     // close-box
     http.post(`${BASE_URL}/receiving/table/close-box`, JSON.stringify({ box_id: boxId }), { headers: H });
@@ -237,26 +268,44 @@ export default function (data) {
     check(allocRes, { 'assembly: allocate 200': (r) => r.status === 200 });
     if (allocRes.status !== 200) return;
 
+    // Если нет NEW-заказов или STORED-товаров — выходим без вызова scan-shipping-buffer.
+    // Аналогично тесту 06 (строка if (!allocData || allocData.allocated_orders === 0) return).
+    const allocData = JSON.parse(allocRes.body).data;
+    if (!allocData || allocData.allocated_orders === 0) return;
+
     // tasks
     const tasksRes = http.get(
       `${BASE_URL}/assembly/tasks?destination_id=${destinationId}`,
       { headers: H },
     );
     if (tasksRes.status !== 200) return;
-    const tasks = JSON.parse(tasksRes.body).data.tasks || [];
+    const tasksBody = JSON.parse(tasksRes.body).data;
+    const tasks = (tasksBody && tasksBody.tasks) ? tasksBody.tasks : [];
+    if (tasks.length === 0) return;
 
-    // pick each task
+    // pick each task; запоминаем подобранные product_id для отгрузки.
+    // Замечание: allocate выбирает ЛЮБЫЕ STORED-товары для данного destination,
+    // не обязательно тот productId, что создан в блоке receiving_table этой итерации.
+    // Поэтому отгружать нужно именно эти product_id, а не productId из receiving.
     for (const task of tasks) {
       if (!task.product_id) continue;
-      http.post(
+      const pickRes = http.post(
         `${BASE_URL}/assembly/pick`,
         JSON.stringify({ product_id: task.product_id }),
         { headers: H },
       );
+      if (pickRes.status === 200) {
+        try {
+          const pickData = JSON.parse(pickRes.body).data;
+          if (pickData && pickData.product_id) pickedProductIds.push(pickData.product_id);
+        } catch (_) {}
+      }
       sleep(0.02);
     }
 
-    // scan-shipping-buffer
+    if (pickedProductIds.length === 0) return; // pick не сработал — пропускаем scan-buffer
+
+    // scan-shipping-buffer → перекладывает подобранные товары в буфер отгрузки
     const shipBufRes = http.post(
       `${BASE_URL}/assembly/scan-shipping-buffer`,
       JSON.stringify({ buffer_bin_id: shippingBinId }),
@@ -268,15 +317,24 @@ export default function (data) {
   sleep(0.05);
 
   // ── БЛОК 4: Shipping ─────────────────────────────────────────────────────
+  // Отгружаем только если assembly успешно поместил товары в буфер.
+  if (pickedProductIds.length === 0) {
+    sleep(0.2);
+    return;
+  }
+
   group('shipping', () => {
-    // scan-buffer
+    // scan-buffer (read-only: проверяет содержимое буфера)
     http.post(
       `${BASE_URL}/shipping/scan-buffer`,
       JSON.stringify({ buffer_bin_id: shippingBinId }),
       { headers: H },
     );
 
-    // scan-driver → AT_GATE
+    // scan-driver → AT_GATE.
+    // Каждый рейс может быть переведён в AT_GATE только одним VU (первым для данного кода).
+    // Остальные VU получат 409 DISPATCH_ALREADY_AT_GATE — это ожидаемо при concurrent тесте.
+    // Ротация dispatch_code по VU/ITER снижает число 409 относительно варианта с 1 кодом.
     if (!dispatchCode) return;
     const driverRes = http.post(
       `${BASE_URL}/shipping/scan-driver`,
@@ -285,15 +343,20 @@ export default function (data) {
     );
     check(driverRes, { 'shipping: scan-driver 200': (r) => r.status === 200 });
     if (driverRes.status !== 200) return;
-    const dispatchId = JSON.parse(driverRes.body).data.dispatch_id;
+    const driverData = JSON.parse(driverRes.body).data;
+    const dispatchId = driverData ? driverData.dispatch_id : null;
+    if (!dispatchId) return;
 
-    // ship → outbox events → Kafka → blockchain (async)
+    // ship → outbox events → Kafka → blockchain (async).
+    // Отгружаем именно подобранные в assembly товары (pickedProductIds),
+    // а не productId из receiving: allocate назначает любые STORED-товары на заказ,
+    // не обязательно тот, что создан в этой итерации.
     const shipRes = http.post(
       `${BASE_URL}/shipping/ship`,
       JSON.stringify({
         buffer_bin_id: shippingBinId,
         dispatch_id: dispatchId,
-        product_ids: [productId],
+        product_ids: pickedProductIds,
       }),
       { headers: H },
     );

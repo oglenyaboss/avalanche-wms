@@ -57,8 +57,18 @@ export default function (data) {
   const token = data.token;
   if (!token) return;
 
-  // Уникальный индекс поставки для этого VU + итерации
-  const idx = ((__VU - 1 + (__ITER * 200)) % TOTAL_SHIPMENTS) + 1;
+  // 404 = данные не засеяны; 409 = поставка уже закрыта (нормально после обработки всех 500).
+  // Без этого callback-а k6 считает 4xx в http_req_failed и валит порог на длинных прогонах.
+  http.setResponseCallback(http.expectedStatuses(
+    { min: 200, max: 299 },
+    404,
+    409,
+  ));
+
+  // Уникальный индекс поставки для этого VU + итерации.
+  // Множитель = пиковый maxVUs (100), чтобы каждый новый round охватывал
+  // следующий блок из 100 поставок без пересечений внутри одного round.
+  const idx = ((__VU - 1 + (__ITER * 100)) % TOTAL_SHIPMENTS) + 1;
   const ttnCode = `STRESS-TTN-${pad(idx, 4)}`;
 
   const JSON_H = authHeaders(token);

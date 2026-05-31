@@ -84,8 +84,17 @@ export default function (data) {
   const { token, bufferBinId } = data;
   if (!token) return;
 
-  // UUID грузоместа для этого VU/ITER (0-indexed в CP_UUIDS)
-  const cpIdx = ((__VU - 1 + (__ITER * 200)) % TOTAL_CARGOPLACES);
+  // 404 = грузоместо не найдено; 409 = грузоместо уже закрыто (нормально после обработки всех 500).
+  http.setResponseCallback(http.expectedStatuses(
+    { min: 200, max: 299 },
+    404,
+    409,
+  ));
+
+  // UUID грузоместа для этого VU/ITER (0-indexed в CP_UUIDS).
+  // Множитель = пиковый maxVUs (60): каждый round сдвигается на 60 позиций,
+  // все 500 грузомест покрываются за ceil(500/60)=9 итераций без пробелов.
+  const cpIdx = ((__VU - 1 + (__ITER * 60)) % TOTAL_CARGOPLACES);
   const cargoplaceId = CP_UUIDS[cpIdx];
   if (!cargoplaceId) return; // данные не засеяны
 

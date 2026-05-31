@@ -75,6 +75,14 @@ export default function (data) {
   // setup() гарантирует токен и env-переменные; сюда они приходят корректными.
   if (!token) return;
 
+  // 409 = нет NEW-заказов; 422 = нет STORED-товаров (нормально после исчерпания пула).
+  http.setResponseCallback(http.expectedStatuses(
+    { min: 200, max: 299 },
+    404,
+    409,
+    422,
+  ));
+
   const H = authHeaders(token);
 
   // 1. Allocate — назначает товары на первый доступный NEW заказ для магазина

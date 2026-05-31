@@ -113,6 +113,52 @@ WHERE sh.ttn_code LIKE 'STRESS-TABLE-TTN-%'
 ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- 2b. Грузоместа для теста 07-full-flow.js (отдельный пул, не пересекается с 05)
+--     STRESS-FLOW-CP-0001 … STRESS-FLOW-CP-0500 в статусе RECEIVED_AT_GATE
+-- ────────────────────────────────────────────────────────────────────────────
+INSERT INTO wms_inventory.inbound_shipments
+  (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  w.warehouse_id,
+  'STRESS-FLOW-TTN-' || LPAD(gs.i::text, 4, '0'),
+  'GATE_IN_PROGRESS',
+  now(),
+  now()
+FROM wms_inventory.warehouses w
+CROSS JOIN generate_series(1, 500) AS gs(i)
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT (ttn_code) DO NOTHING;
+
+INSERT INTO wms_inventory.cargoplaces
+  (cargoplace_id, shipment_id, cargoplace_code, status, received_at_gate_at, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  s.shipment_id,
+  'STRESS-FLOW-CP-' || LPAD(idx.i::text, 4, '0'),
+  'RECEIVED_AT_GATE',
+  now(),
+  now(),
+  now()
+FROM wms_inventory.inbound_shipments s
+JOIN (SELECT i FROM generate_series(1, 500) AS gs(i)) AS idx
+  ON s.ttn_code = 'STRESS-FLOW-TTN-' || LPAD(idx.i::text, 4, '0')
+ON CONFLICT DO NOTHING;
+
+-- Ожидаемые SKU для flow-грузомест
+INSERT INTO wms_inventory.expected_cargoplace_skus
+  (cargoplace_id, sku_id, expected_qty)
+SELECT
+  c.cargoplace_id,
+  s.sku_id,
+  10
+FROM wms_inventory.cargoplaces c
+JOIN wms_inventory.inbound_shipments sh ON sh.shipment_id = c.shipment_id
+JOIN wms_inventory.skus s ON s.name = 'E2E Seed Outbound SKU'
+WHERE sh.ttn_code LIKE 'STRESS-FLOW-TTN-%'
+ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- 3. Pre-STORED товары для теста 06-assembly.js
 --    500 продуктов в статусе STORED, sku = E2E Seed Outbound SKU, bin = A-01-01
 -- ────────────────────────────────────────────────────────────────────────────
@@ -179,6 +225,7 @@ ON CONFLICT (qr_code) DO NOTHING;
 -- 4. NEW заказы и SCHEDULED рейсы для тестов 06-assembly и 07-full-flow
 --    100 заказов для SHOP-7
 -- ────────────────────────────────────────────────────────────────────────────
+-- 300 заказов: ~100 потребляет тест 06, ~200 остаётся для теста 07
 INSERT INTO wms_inventory.orders
   (order_id, external_order_no, customer_id, warehouse_id, destination_id, status, created_at, updated_at)
 SELECT
@@ -190,7 +237,7 @@ SELECT
   'NEW',
   now(),
   now()
-FROM generate_series(1, 100) AS gs(i)
+FROM generate_series(1, 300) AS gs(i)
 CROSS JOIN public.users u
 CROSS JOIN wms_inventory.warehouses w
 CROSS JOIN wms_inventory.destinations d
@@ -232,6 +279,64 @@ CROSS JOIN wms_inventory.warehouses w
 CROSS JOIN wms_inventory.destinations d
 WHERE w.name = 'Склад Москва-Север'
   AND d.code = 'SHOP-7'
+ON CONFLICT (dispatch_code) DO NOTHING;
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- 5. NEW заказы и SCHEDULED рейсы для теста 07-full-flow (SHOP-5)
+--    Отдельный пул от теста 06 (SHOP-7), чтобы test 07 не остался без заказов.
+-- ────────────────────────────────────────────────────────────────────────────
+INSERT INTO wms_inventory.orders
+  (order_id, external_order_no, customer_id, warehouse_id, destination_id, status, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  'STRESS-FLOW-ORD-' || LPAD(gs.i::text, 4, '0'),
+  u.user_id,
+  w.warehouse_id,
+  d.destination_id,
+  'NEW',
+  now(),
+  now()
+FROM generate_series(1, 300) AS gs(i)
+CROSS JOIN public.users u
+CROSS JOIN wms_inventory.warehouses w
+CROSS JOIN wms_inventory.destinations d
+WHERE u.username = 'customer'
+  AND w.name = 'Склад Москва-Север'
+  AND d.code = 'SHOP-5'
+ON CONFLICT (external_order_no) DO NOTHING;
+
+INSERT INTO wms_inventory.order_lines (order_id, sku_id, qty)
+SELECT
+  o.order_id,
+  s.sku_id,
+  1
+FROM wms_inventory.orders o
+JOIN wms_inventory.skus s ON s.name = 'E2E Seed Outbound SKU'
+WHERE o.external_order_no LIKE 'STRESS-FLOW-ORD-%'
+ON CONFLICT DO NOTHING;
+
+-- 10 рейсов для SHOP-5
+INSERT INTO wms_inventory.outbound_dispatches
+  (dispatch_id, dispatch_code, warehouse_id, destination_id,
+   vehicle_number, driver_name, driver_phone,
+   status, scheduled_at, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  'STRESS-FLOW-DSP-' || LPAD(gs.i::text, 4, '0'),
+  w.warehouse_id,
+  d.destination_id,
+  'STRESS-FLOW-VH-' || LPAD(gs.i::text, 4, '0'),
+  'Stress Flow Driver ' || gs.i,
+  '+71000' || LPAD(gs.i::text, 6, '0'),
+  'SCHEDULED',
+  now() + interval '1 day',
+  now(),
+  now()
+FROM generate_series(1, 10) AS gs(i)
+CROSS JOIN wms_inventory.warehouses w
+CROSS JOIN wms_inventory.destinations d
+WHERE w.name = 'Склад Москва-Север'
+  AND d.code = 'SHOP-5'
 ON CONFLICT (dispatch_code) DO NOTHING;
 
 COMMIT;

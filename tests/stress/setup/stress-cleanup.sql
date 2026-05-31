@@ -8,19 +8,25 @@
 
 BEGIN;
 
--- onchain_events и outbox_events для stress-продуктов
+-- onchain_events и outbox_events для stress-продуктов и stress-грузомест
 DELETE FROM public.onchain_events
 WHERE event_id IN (
   SELECT oe.event_id FROM public.outbox_events oe
   WHERE oe.aggregate_id IN (
     SELECT p.product_id FROM wms_inventory.products p
     WHERE p.qr_code LIKE 'STRESS-%'
+    UNION
+    SELECT c.cargoplace_id FROM wms_inventory.cargoplaces c
+    WHERE c.cargoplace_code LIKE 'STRESS-%'
   )
 );
 DELETE FROM public.outbox_events
 WHERE aggregate_id IN (
   SELECT p.product_id FROM wms_inventory.products p
   WHERE p.qr_code LIKE 'STRESS-%'
+  UNION
+  SELECT c.cargoplace_id FROM wms_inventory.cargoplaces c
+  WHERE c.cargoplace_code LIKE 'STRESS-%'
 );
 
 -- Ops-таблицы

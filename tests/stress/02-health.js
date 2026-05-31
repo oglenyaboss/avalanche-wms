@@ -7,7 +7,6 @@
  * состояние всего стека.
  *
  * Целевой TPS согласно docs/architecture/system-overview.md: 1500 TPS.
- * Порог p95 < 250 мс.
  *
  * По умолчанию запускается ramp-сценарий (ramping-vus до 200 VUs).
  * Выбор сценария через переменную окружения STRESS_SCENARIO:
@@ -19,10 +18,6 @@
 import http from 'k6/http';
 import { check } from 'k6';
 import { BASE_URL } from './lib/config.js';
-
-// /health может вернуть 503 (деградация зависимостей) — это штатное поведение,
-// не ошибка инфраструктуры. Сообщаем k6, что 503 не должен попадать в http_req_failed.
-http.setResponseCallback(http.expectedStatuses({ min: 200, max: 299 }, 503));
 
 const SCENARIO = __ENV.STRESS_SCENARIO || 'ramp';
 
@@ -58,16 +53,18 @@ function buildOptions() {
 export const options = {
   ...buildOptions(),
   thresholds: {
-    // spike: 500 VU → p95<500ms; ramp/soak: 200 VU → p95<500ms
-    // Целевой SLA 250 мс актуален при рабочей нагрузке (~20 VU),
-    // под стресс-нагрузкой 200+ VU допустимо до 500 мс.
+    // Под стресс-нагрузкой 200+ VU допустимо до 500 мс (SLA 250 мс — для рабочей нагрузки ~20 VU)
     http_req_duration: ['p(95)<500', 'p(99)<1000'],
-    // 503 не считается сбоем (см. setResponseCallback выше)
+    // 503 от /health не является сбоем (см. setResponseCallback внутри default)
     http_req_failed: ['rate<0.01'],
   },
 };
 
 export default function () {
+  // setResponseCallback должен вызываться внутри VU-кода, а не на уровне модуля.
+  // Сообщаем k6, что 503 — штатный ответ /health (деградация зависимостей).
+  http.setResponseCallback(http.expectedStatuses({ min: 200, max: 299 }, 503));
+
   const res = http.get(`${BASE_URL}/health`);
   check(res, {
     'health: status 200 or 503': (r) => r.status === 200 || r.status === 503,

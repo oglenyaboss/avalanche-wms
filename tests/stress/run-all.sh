@@ -39,12 +39,14 @@ psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
 # ── 2. Засев данных ───────────────────────────────────────────────────────────
 echo "[SEED] Засев данных (stress-seed.sql)..."
 psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
-     -f /tests/stress/setup/stress-seed.sql > /dev/null
+     -f /tests/stress/setup/stress-seed.sql > /dev/null \
+    || { echo "[SEED] FATAL: stress-seed.sql завершился с ошибкой." >&2; exit 1; }
 
-# ── 3. Генерация JSON с UUID грузомест для тестов 05 и 07 ────────────────────
-# Тесты 05 и 07 передают cargoplace_id как UUID; строковый код API не принимает.
-# Файл: JSON-массив UUID, индекс 0 = STRESS-TABLE-CP-0001, 499 = CP-0500.
-echo "[SEED] Генерация /tmp/stress-table-cps.json..."
+# ── 3. Генерация JSON с UUID грузомест ───────────────────────────────────────
+# Тест 05 использует STRESS-TABLE-CP-* (stress-table-cps.json).
+# Тест 07 использует STRESS-FLOW-CP-*  (stress-flow-cps.json) — отдельный пул,
+# чтобы тест 07 не получал уже закрытые (TABLE_CLOSED) грузоместа из теста 05.
+echo "[SEED] Генерация /tmp/stress-table-cps.json (тест 05)..."
 psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
     -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code), '[]')
           FROM wms_inventory.cargoplaces
@@ -58,6 +60,21 @@ if [ "${CP_COUNT:-0}" -eq 0 ]; then
     exit 1
 fi
 echo "[SEED] /tmp/stress-table-cps.json: ${CP_COUNT} UUID готово"
+
+echo "[SEED] Генерация /tmp/stress-flow-cps.json (тест 07)..."
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+    -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code), '[]')
+          FROM wms_inventory.cargoplaces
+          WHERE cargoplace_code LIKE 'STRESS-FLOW-CP-%'" \
+    | tr -d '[:space:]' > /tmp/stress-flow-cps.json
+
+FLOW_CP_COUNT=$(psql_q "SELECT count(*) FROM wms_inventory.cargoplaces
+                        WHERE cargoplace_code LIKE 'STRESS-FLOW-CP-%'")
+if [ "${FLOW_CP_COUNT:-0}" -eq 0 ]; then
+    echo "[SEED] FATAL: грузоместа STRESS-FLOW-CP-* не найдены после засева." >&2
+    exit 1
+fi
+echo "[SEED] /tmp/stress-flow-cps.json: ${FLOW_CP_COUNT} UUID готово"
 
 # ── 4. Разрешение UUID ячеек и рейсов ────────────────────────────────────────
 echo "[SEED] Разрешение UUID ячеек и рейсов..."
@@ -93,20 +110,43 @@ DISPATCH_CODE=$(psql_q "
   ORDER BY d.dispatch_code
   LIMIT 1")
 
-if [ -z "${RECEIVING_BIN_ID}" ] || [ -z "${STORAGE_BIN_ID}" ] || \
-   [ -z "${DESTINATION_ID}" ]   || [ -z "${SHIPPING_BIN_ID}" ] || \
-   [ -z "${DISPATCH_CODE}" ]; then
+# Тест 07 использует отдельный пул: SHOP-5 (чтобы не конкурировать с тестом 06 за заказы SHOP-7).
+DESTINATION_ID_07=$(psql_q "
+  SELECT d.destination_id FROM wms_inventory.destinations d
+  JOIN wms_inventory.warehouses w ON w.warehouse_id = d.warehouse_id
+  WHERE d.code = 'SHOP-5' AND w.name = 'Склад Москва-Север'
+  LIMIT 1")
+
+SHIPPING_BIN_ID_07=$(psql_q "
+  SELECT b.bin_id FROM wms_inventory.bins b
+  WHERE b.destination_id = '${DESTINATION_ID_07}'
+    AND b.section = 'SHIPPING_BUFFER'
+  LIMIT 1")
+
+DISPATCH_CODE_07=$(psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+  -tAc "SELECT string_agg(d.dispatch_code, ',' ORDER BY d.dispatch_code)
+        FROM wms_inventory.outbound_dispatches d
+        WHERE d.dispatch_code LIKE 'STRESS-FLOW-DSP-%'
+          AND d.status = 'SCHEDULED'" | tr -d '[:space:]')
+
+if [ -z "${RECEIVING_BIN_ID}" ]   || [ -z "${STORAGE_BIN_ID}" ]    || \
+   [ -z "${DESTINATION_ID}" ]     || [ -z "${SHIPPING_BIN_ID}" ]    || \
+   [ -z "${DISPATCH_CODE}" ]      || [ -z "${DESTINATION_ID_07}" ]  || \
+   [ -z "${SHIPPING_BIN_ID_07}" ] || [ -z "${DISPATCH_CODE_07}" ]; then
     echo "[SEED] FATAL: не удалось разрешить один или несколько UUID." >&2
     echo "       Убедитесь, что stress-seed.sql и dev-seed выполнены корректно." >&2
     exit 1
 fi
 
 echo "[SEED] Готово:"
-echo "  RECEIVING_BIN_ID = ${RECEIVING_BIN_ID}"
-echo "  STORAGE_BIN_ID   = ${STORAGE_BIN_ID}"
-echo "  DESTINATION_ID   = ${DESTINATION_ID}"
-echo "  SHIPPING_BIN_ID  = ${SHIPPING_BIN_ID}"
-echo "  DISPATCH_CODE    = ${DISPATCH_CODE}"
+echo "  RECEIVING_BIN_ID  = ${RECEIVING_BIN_ID}"
+echo "  STORAGE_BIN_ID    = ${STORAGE_BIN_ID}"
+echo "  DESTINATION_ID    = ${DESTINATION_ID}  (SHOP-7, тест 06)"
+echo "  SHIPPING_BIN_ID   = ${SHIPPING_BIN_ID}"
+echo "  DISPATCH_CODE     = ${DISPATCH_CODE}"
+echo "  DESTINATION_ID_07 = ${DESTINATION_ID_07} (SHOP-5, тест 07)"
+echo "  SHIPPING_BIN_ID_07= ${SHIPPING_BIN_ID_07}"
+echo "  DISPATCH_CODE_07  = ${DISPATCH_CODE_07}"
 
 # ── 4. Функция запуска одного теста ──────────────────────────────────────────
 # Принимает имя файла как $1, остальные аргументы передаются в k6.
@@ -148,9 +188,9 @@ run_test "06-assembly.js" \
 run_test "07-full-flow.js" \
     -e "RECEIVING_BIN_ID=${RECEIVING_BIN_ID}" \
     -e "STORAGE_BIN_ID=${STORAGE_BIN_ID}" \
-    -e "DESTINATION_ID=${DESTINATION_ID}" \
-    -e "SHIPPING_BIN_ID=${SHIPPING_BIN_ID}" \
-    -e "DISPATCH_CODE=${DISPATCH_CODE}"
+    -e "DESTINATION_ID=${DESTINATION_ID_07}" \
+    -e "SHIPPING_BIN_ID=${SHIPPING_BIN_ID_07}" \
+    -e "DISPATCH_CODE=${DISPATCH_CODE_07}"
 
 # ── 6. Итог ───────────────────────────────────────────────────────────────────
 echo ""
