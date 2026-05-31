@@ -15,6 +15,7 @@ export const navigationItems: NavigationItem[] = [
   {
     label: 'Приемка на столах',
     title: 'Сценарий приемки товара на рабочих столах',
+    to: routes.receivingTable,
   },
   {
     label: 'Раскладка',
