@@ -16,9 +16,9 @@
 | WMS-монолит | Go, net/http |
 | БД | PostgreSQL 17 (3 схемы: public, wms_inventory, wms_ops) |
 | CDC | Debezium (outbox → Kafka) |
-| Очереди | Apache Kafka (4 топика + DLQ) |
+| Очереди | Apache Kafka (рабочий топик `wms.events.v1` + DLQ `wms.dlq.v1`; 4 per-aggregate топика — legacy/rollback) |
 | Мост в блокчейн | Ledger Adapter (Go) |
-| Блокчейн | Avalanche Subnet-EVM (permissioned) |
+| Блокчейн | Avalanche C-Chain (локально, dev) / Subnet-EVM (план); permissioned Allow Lists ещё не реализованы |
 | Контракт | BatchMappingWMS (Solidity, batch-операции) |
 
 ### Архитектурная схема (упрощённая)
@@ -32,6 +32,13 @@
 ---
 
 ## Навигация по документам
+
+### Документация разработчика
+
+| Документ | Описание |
+|----------|----------|
+| [Индекс разработчика](developer/README.md) | **Точка входа для приёма проекта:** обзор системы, архитектурная схема, карта всей документации, технологический стек, ключевые принципы, маршрут чтения и глоссарий. Начни отсюда при передаче проекта. |
+| [OpenAPI-спецификация](api/openapi.yaml) | Машиночитаемый контракт API (источник истины). По нему сгенерирован `api/api-contract.md`. |
 
 ### Бизнес-процесс
 
@@ -66,11 +73,21 @@
 | [Контракт данных](integration/data-contract.md) | Формат outbox, Kafka, Ledger Adapter, onchain_events |
 | [BatchMappingWMS](integration/batch-mapping-approach.md) | Смарт-контракт: FSM, batch-функции, производительность |
 
+### Документация разработчика (hand-off)
+
+| Документ | Описание |
+|----------|----------|
+| [WMS Reference](developer/wms-reference.md) | Референс WMS-монолита: пакеты, модули (receiving / putaway / assembly / shipping / dispatches / auth), сервисы, репозитории, запись outbox |
+| [Ledger Adapter Reference](developer/ledger-adapter-reference.md) | Внутреннее устройство моста: пакеты `internal/`, consumer, batch-flusher, reconcile, идемпотентность, env, типы и сигнатуры |
+| [Smart Contract Reference](developer/smart-contract-reference.md) | Контракт BatchMappingWMS: FSM, сигнатуры batch-функций, события, revert-условия, storage layout, `UUID → uint256` |
+| [Operations](developer/operations.md) | Эксплуатация: docker-compose, переменные окружения, инициализация БД/Kafka, регистрация Debezium-коннектора, мониторинг, CI |
+
 ### API
 
 | Документ | Описание |
 |----------|----------|
-| [API-контракт](api/api-contract.md) | 19 эндпоинтов: request/response, ошибки, побочные эффекты |
+| [OpenAPI-спецификация](api/openapi.yaml) | Машиночитаемый контракт API — источник истины для эндпоинтов |
+| [API-контракт](api/api-contract.md) | Request/response, ошибки, побочные эффекты. **Перегенерирован из `openapi.yaml`** |
 
 ### Архитектура и инфраструктура
 
@@ -94,7 +111,7 @@
 ## Ключевые принципы
 
 1. **Outbox pattern** — WMS пишет только в PostgreSQL. Debezium подхватывает outbox_events и публикует в Kafka. Нет двойной записи.
-2. **1 outbox event = 1 product** — aggregate_id всегда product_id. aggregate_type определяет Kafka topic.
-3. **Блокчейн = верификатор, не хранилище.** Контракт реализует FSM (None → Accepted → PutAway → Picked → Shipped) и ревертит при нарушении порядка.
+2. **1 outbox event = 1 product** — aggregate_id всегда product_id. aggregate_type едет в Kafka-заголовке и определяет, какой `batch*`-метод контракта вызывается (все события идут в один топик `wms.events.v1`).
+3. **Блокчейн = верификатор, не хранилище.** Контракт реализует FSM (None → Accepted → PutAway → Picked → Shipped). На пути адаптера (batch-функции) элемент с неверным статусом пропускается с событием `ItemTransitionFailed` — без revert всей транзакции; revert делают только per-item функции.
 4. **Идемпотентность на каждом уровне** — event_id уникален в outbox, onchain_events, и processedEventIds в контракте.
 5. **КПП не пишет в блокчейн** — товары (products) создаются только на столе приёмки.
