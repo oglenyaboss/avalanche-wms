@@ -6,6 +6,7 @@ import { HomePage } from '@/pages/home'
 import { LoginPage } from '@/pages/login'
 import { NotFoundPage } from '@/pages/not-found'
 import { ReceivingGatePage } from '@/pages/receiving-gate'
+import { ReceivingTablePage } from '@/pages/receiving-table'
 import { routes } from '@/shared/config/routes'
 import { AppShell } from '@/widgets/app-shell'
 
@@ -32,6 +33,10 @@ const router = createBrowserRouter([
           {
             path: routes.receivingGate,
             element: <ReceivingGatePage />,
+          },
+          {
+            path: routes.receivingTable,
+            element: <ReceivingTablePage />,
           },
         ],
       },
