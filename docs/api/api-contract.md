@@ -103,7 +103,7 @@ unauthorized
 
 ## Сводка эндпоинтов
 
-Всего **27 операций** на 26 путях (на `/dispatches/` висят GET и POST). RBAC указан
+Всего **28 операций** на 27 путях (на `/dispatches/` висят GET и POST). RBAC указан
 после auth-гейта. Полные тела, ошибки и примеры — в [`openapi.yaml`](openapi.yaml).
 
 ### System
@@ -164,6 +164,12 @@ unauthorized
 | GET | `/dispatches/` | OPERATOR | Список рейсов (**слэш обязателен**; `data` может быть `null`). |
 | POST | `/dispatches/` | OPERATOR | Создать рейс. **`200` (не `201`)**, `data.dispatch`. |
 | GET | `/dispatches/{dispatch_id}` | OPERATOR | Рейс по ID; `data.dispatch`. |
+
+### Destinations
+
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| GET | `/destinations` | OPERATOR | Справочник магазинов-получателей (read-only; query: `warehouse_id` опц., `int64 > 0`). Работают `/destinations` и `/destinations/`. |
 
 ### Shipping
 
