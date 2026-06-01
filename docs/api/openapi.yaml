@@ -64,6 +64,8 @@ tags:
     description: Аллокация, подбор и сборка заказов. RBAC — OPERATOR (кроме /allocate — ADMIN или OPERATOR).
   - name: Dispatches
     description: Управление плановыми исходящими рейсами (CRUD). RBAC — только OPERATOR.
+  - name: Destinations
+    description: Справочник магазинов-получателей (только чтение). RBAC — только OPERATOR.
   - name: Shipping
     description: Отгрузка товаров на рейс. RBAC — только OPERATOR.
   - name: System
@@ -1380,6 +1382,61 @@ paths:
   # ──────────────────────────────────────────────────────────────────────────
   # DISPATCHES
   # ──────────────────────────────────────────────────────────────────────────
+  /destinations:
+    get:
+      tags: [Destinations]
+      summary: Список магазинов-получателей
+      description: |
+        RBAC: только `OPERATOR`. Read-only справочник для выбора магазина в UI
+        сборки. Фильтр `warehouse_id` опционален (при отсутствии — все склады).
+        Пустой результат отдаёт `{"destinations": []}` (никогда не `null`).
+        Работают оба пути: `/destinations` и `/destinations/`.
+      operationId: destinationsList
+      parameters:
+        - name: warehouse_id
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 'Массив магазинов в `data.destinations`.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/DestinationListResponse'
+              example:
+                success: true
+                data:
+                  destinations:
+                    - destination_id: 88888888-8888-8888-8888-888888888888
+                      code: SHOP-5
+                      name: Магазин №5 Маросейка
+                      address: 'г. Москва, ул. Маросейка, 5'
+                      warehouse_id: 1
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — `warehouse_id` передан, но не число.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_REQUEST, message: warehouse_id должен быть числом }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
   /dispatches/:
     get:
       tags: [Dispatches]
@@ -2123,6 +2180,41 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    # ── Destinations: ответы ─────────────────────────────────────────────────
+    DestinationItem:
+      type: object
+      description: 'Магазин-получатель (обрезанный DTO без created_at/updated_at). DB: wms_inventory.destinations.'
+      required:
+        - destination_id
+        - code
+        - name
+        - warehouse_id
+      properties:
+        destination_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: SHOP-5
+        name:
+          type: string
+          example: Магазин №5 Маросейка
+        address:
+          type: [string, 'null']
+          example: 'г. Москва, ул. Маросейка, 5'
+        warehouse_id:
+          type: integer
+          format: int64
+    DestinationListResponse:
+      type: object
+      description: 'Тело поля `data` в ответе `GET /destinations`.'
+      required: [destinations]
+      properties:
+        destinations:
+          type: array
+          items:
+            $ref: '#/components/schemas/DestinationItem'
 
     # ── Receiving: запросы ───────────────────────────────────────────────────
     ScanTTNRequest:

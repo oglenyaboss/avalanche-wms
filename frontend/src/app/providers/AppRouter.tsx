@@ -2,6 +2,7 @@
 
 import { GuestOnlyRoute } from '@/app/providers/GuestOnlyRoute'
 import { ProtectedRoute } from '@/app/providers/ProtectedRoute'
+import { AssemblyPage } from '@/pages/assembly'
 import { HomePage } from '@/pages/home'
 import { LoginPage } from '@/pages/login'
 import { NotFoundPage } from '@/pages/not-found'
@@ -42,6 +43,10 @@ const router = createBrowserRouter([
           {
             path: routes.putaway,
             element: <PutawayPage />,
+          },
+          {
+            path: routes.assembly,
+            element: <AssemblyPage />,
           },
         ],
       },
