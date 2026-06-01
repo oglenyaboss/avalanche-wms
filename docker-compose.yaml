@@ -149,7 +149,7 @@ services:
       - app_network
 
   debezium:
-    image: debezium/connect:2.5
+    image: debezium/connect:2.6
     container_name: debezium-connect
     ports:
       - "8083:8083"
