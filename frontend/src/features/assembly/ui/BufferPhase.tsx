@@ -2,6 +2,7 @@ import type { Destination } from '@/entities/assembly'
 import { Button } from '@/shared/ui'
 
 import { shippingBufferUuidSchema } from '../model/schema'
+import { BagIcon } from './icons'
 import { ScanForm } from './ScanForm'
 
 interface BufferPhaseProps {
@@ -9,6 +10,7 @@ interface BufferPhaseProps {
   cartCount: number
   onScan: (value: string) => Promise<void> | void
   onBackToPick: () => void
+  onOpenDrafter: () => void
   onFinish: () => void
   isPlacing: boolean
   isBlocked: boolean
@@ -24,6 +26,7 @@ export function BufferPhase({
   cartCount,
   onScan,
   onBackToPick,
+  onOpenDrafter,
   onFinish,
   isPlacing,
   isBlocked,
@@ -37,9 +40,20 @@ export function BufferPhase({
           </h2>
           <p className="text-sm text-muted-foreground">Собрано: {cartCount}</p>
         </div>
-        <Button type="button" variant="outline" onClick={onFinish}>
-          Прервать сборку
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onOpenDrafter}
+          >
+            <BagIcon className="size-4" />
+            Товары к сборке ({cartCount})
+          </Button>
+          <Button type="button" variant="outline" onClick={onFinish}>
+            Прервать сборку
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-col gap-3">

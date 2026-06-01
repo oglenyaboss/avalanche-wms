@@ -118,6 +118,13 @@ export function DestinationPhase({
   // Selected-store panel.
   const hasShortage =
     allocation !== null && allocation.insufficientOrders.length > 0
+  const allocatedSomething =
+    allocation !== null &&
+    (allocation.allocatedOrders > 0 || allocation.allocatedProducts > 0)
+  // Allocate ran but reserved nothing and nothing came up short → there were no
+  // NEW orders for this store. Say so plainly instead of a green "0 заказов".
+  const nothingToAllocate =
+    allocation !== null && !allocatedSomething && !hasShortage
 
   return (
     <section className="mx-auto flex max-w-xl flex-col gap-6">
@@ -139,16 +146,32 @@ export function DestinationPhase({
         ) : null}
       </div>
 
+      {/* Placement summary after a buffer trip — the store stays selected for
+          multi-trip, so the success message shows here, not just on the list. */}
+      {successMessage ? (
+        <Alert variant="success">
+          <AlertDescription>{successMessage}</AlertDescription>
+        </Alert>
+      ) : null}
+
       <div className="flex flex-col gap-3">
         <Button type="button" onClick={onAllocate} disabled={isAllocating}>
           {isAllocating ? 'Аллокация...' : 'Аллоцировать заказы'}
         </Button>
 
-        {allocation ? (
+        {allocatedSomething ? (
           <Alert variant="success">
             <AlertDescription>
               Аллоцировано заказов: {allocation.allocatedOrders}, товаров:{' '}
               {allocation.allocatedProducts}.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {nothingToAllocate ? (
+          <Alert variant="default">
+            <AlertDescription>
+              Новых заказов для аллокации нет.
             </AlertDescription>
           </Alert>
         ) : null}

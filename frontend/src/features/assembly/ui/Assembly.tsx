@@ -59,6 +59,7 @@ export function Assembly() {
           cartCount={state.cart.length}
           onScan={assembly.submitBuffer}
           onBackToPick={assembly.backToPick}
+          onOpenDrafter={assembly.openDrafter}
           onFinish={assembly.openConfirmFinish}
           isPlacing={assembly.isPlacing}
           isBlocked={isErrorOpen}

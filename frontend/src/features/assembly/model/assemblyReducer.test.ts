@@ -274,22 +274,50 @@ describe('assemblyReducer / buffer transitions', () => {
   })
 })
 
-describe('assemblyReducer / BUFFER_SCANNED', () => {
-  it('finishes the task and rests on the destination phase with a summary', () => {
+describe('assemblyReducer / BUFFER_SCANNED (multi-trip)', () => {
+  it('places the batch but keeps the store selected so assembly can continue', () => {
     const inBuffer = assemblyReducer(pickTwo(), { type: 'GO_TO_BUFFER' })
 
     const state = assemblyReducer(inBuffer, {
       type: 'BUFFER_SCANNED',
-      result: bufferResult(),
+      result: bufferResult({ productsPlaced: 2, ordersAssembled: 0 }),
     })
 
+    // Back on the store panel with the SAME store still selected — no
+    // re-selection needed to keep picking (assembly-flow.md, частичная сдача).
     expect(state.phase).toBe('destination')
-    expect(state.selectedDestination).toBeNull()
+    expect(state.selectedDestination).toEqual(destinations[0])
+    // The placed batch is cleared; the allocation summary is dropped as stale.
     expect(state.cart).toEqual([])
-    // The store list survives so the next store can be picked immediately.
+    expect(state.allocation).toBeNull()
+    expect(state.tasks).toEqual([])
     expect(state.destinations).toEqual(destinations)
     expect(state.successMessage).toContain('Размещено товаров: 2')
-    expect(state.successMessage).toContain('Заказов собрано: 2')
+  })
+
+  it('lets the operator pick the remaining tasks for the same store without re-selecting (independent cycle)', () => {
+    // Trip 1: pick two, place them in the buffer.
+    const afterTrip1 = assemblyReducer(
+      assemblyReducer(pickTwo(), { type: 'GO_TO_BUFFER' }),
+      { type: 'BUFFER_SCANNED', result: bufferResult() },
+    )
+
+    // The hook reloads the remaining PENDING tasks for the SAME store. The
+    // TASKS_LOADED guard (phase==='destination' + matching destinationId) must
+    // still accept this — it would silently drop the tasks if BUFFER_SCANNED had
+    // deselected the store.
+    const remaining: AssemblyTask[] = [tasks[1]]
+    const reloaded = assemblyReducer(afterTrip1, {
+      type: 'TASKS_LOADED',
+      destinationId: destinations[0].destinationId,
+      tasks: remaining,
+    })
+    expect(reloaded.tasks).toEqual(remaining)
+
+    // Trip 2: start picking again — same store continues, fresh empty cart.
+    const inPickAgain = assemblyReducer(reloaded, { type: 'START_PICKING' })
+    expect(inPickAgain.phase).toBe('pick')
+    expect(inPickAgain.cart).toEqual([])
   })
 
   it('ignores a buffer scan dispatched outside the buffer phase', () => {

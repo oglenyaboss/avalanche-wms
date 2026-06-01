@@ -306,9 +306,19 @@ func (s *Service) ScanShippingBuffer(ctx context.Context, operatorID, bufferBinI
 		if err != nil {
 			return fmt.Errorf("assembly.Service.ScanShippingBuffer move products: %w", err)
 		}
-		// No products for this operator+destination: nothing staged, or already moved
-		// (e.g. a duplicate scan). Surfaces as 409 CART_EMPTY.
+		// Nothing moved for THIS buffer's destination. Distinguish the two causes so the
+		// operator gets an actionable message: if they are still carrying ASSEMBLED
+		// products (picked for some other destination), they scanned the WRONG store's
+		// buffer → DESTINATION_MISMATCH. Otherwise the cart is genuinely empty / already
+		// placed (e.g. a duplicate scan) → CART_EMPTY. One COUNT on a rare, no-op path.
 		if len(productIDs) == 0 {
+			assembled, countErr := txRepo.CountAssembledByOperator(ctx, operatorID)
+			if countErr != nil {
+				return fmt.Errorf("assembly.Service.ScanShippingBuffer count assembled: %w", countErr)
+			}
+			if assembled > 0 {
+				return ErrDestinationMismatch
+			}
 			return ErrCartEmpty
 		}
 		productsPlaced = len(productIDs)

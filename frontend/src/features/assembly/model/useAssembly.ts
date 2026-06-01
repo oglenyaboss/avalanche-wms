@@ -144,10 +144,17 @@ export function useAssembly() {
       return
     }
 
+    const destinationId = state.selectedDestination?.destinationId
+
     try {
       const result = await scanBufferMutation.mutateAsync(bufferBinId)
-      // Terminal: the whole cart moved into the buffer, so this resets the flow.
+      // The batch is placed; BUFFER_SCANNED returns to the store panel keeping
+      // the store selected (multi-trip). Reload the remaining PENDING tasks so
+      // the operator can keep picking for the same store without re-selecting.
       dispatch({ type: 'BUFFER_SCANNED', result })
+      if (destinationId) {
+        await loadTasks(destinationId)
+      }
     } catch (error) {
       showError(getAssemblyErrorMessage(error))
     }

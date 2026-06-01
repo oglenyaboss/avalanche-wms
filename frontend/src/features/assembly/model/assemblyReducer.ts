@@ -74,15 +74,6 @@ export const initialAssemblyState: AssemblyState = {
   confirmFinishOpen: false,
 }
 
-// Reset to the resting (destination) phase for the next store, keeping the
-// loaded destination list and surfacing a success summary.
-function restWith(
-  destinations: Destination[],
-  successMessage: string,
-): AssemblyState {
-  return { ...initialAssemblyState, destinations, successMessage }
-}
-
 function buildBufferMessage(result: ShippingBufferResult): string {
   return `Размещено товаров: ${result.productsPlaced}. Заказов собрано: ${result.ordersAssembled}.`
 }
@@ -220,15 +211,24 @@ export function assemblyReducer(
       return { ...state, phase: 'pick', errorMessage: null }
     }
 
-    // Scanning the shipping buffer is TERMINAL: it moves the whole cart in one
-    // call, then the task is done. Reset to the resting (destination) phase
-    // with a success summary so the operator can start the next store.
+    // Scanning the shipping buffer places the current batch but does NOT end
+    // assembly for the store. Multi-trip (assembly-flow.md): the operator can
+    // pick a batch, drop it in the buffer, then pick the remaining tasks for the
+    // SAME store. So return to the store's panel KEEPING it selected, clear the
+    // placed cart, and surface the placement summary; the hook reloads the
+    // remaining PENDING tasks right after. Leaving the store entirely is
+    // DESELECT/FINISH/RESET, not a buffer scan.
     case 'BUFFER_SCANNED': {
       if (state.phase !== 'buffer') {
         return state
       }
 
-      return restWith(state.destinations, buildBufferMessage(action.result))
+      return {
+        ...initialAssemblyState,
+        destinations: state.destinations,
+        selectedDestination: state.selectedDestination,
+        successMessage: buildBufferMessage(action.result),
+      }
     }
 
     case 'OPEN_DRAFTER': {

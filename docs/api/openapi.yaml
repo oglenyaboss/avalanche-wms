@@ -1367,15 +1367,28 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
-          description: '`CART_EMPTY` — нет ASSEMBLED товаров оператора для перемещения.'
+          description: >-
+            `CART_EMPTY` — у оператора нет ASSEMBLED товаров для перемещения (корзина
+            пуста / уже размещено). `DESTINATION_MISMATCH` — оператор несёт собранные
+            товары, но отсканировал буфер ДРУГОГО магазина: ни один товар не перемещён
+            (защита от mis-delivery). См. `../flows/assembly-flow.md`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
-              example:
-                success: false
-                data: null
-                error: { code: CART_EMPTY, message: Корзина пуста }
+              examples:
+                cartEmpty:
+                  summary: Корзина пуста
+                  value:
+                    success: false
+                    data: null
+                    error: { code: CART_EMPTY, message: Корзина оператора пуста }
+                destinationMismatch:
+                  summary: Чужой буфер магазина
+                  value:
+                    success: false
+                    data: null
+                    error: { code: DESTINATION_MISMATCH, message: 'Буфер отгрузки другого магазина: собранные товары не для этого пункта назначения' }
         '500':
           $ref: '#/components/responses/JSONInternal'
 
