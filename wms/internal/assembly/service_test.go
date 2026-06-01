@@ -775,9 +775,10 @@ func TestScanShippingBuffer_HappyPath(t *testing.T) {
 	}
 }
 
-// TestScanShippingBuffer_CartEmpty - оператор ничего не набрал для этого destination:
-// derived UPDATE двигает 0 строк -> 409 CART_EMPTY. Это поглощает и старую проверку
-// несоответствия магазина — чужой буфер теперь тоже даёт CART_EMPTY.
+// TestScanShippingBuffer_CartEmpty - оператор ничего не набрал вообще: derived UPDATE
+// двигает 0 строк И у оператора нет ASSEMBLED товаров (CountAssembledByOperator == 0)
+// -> 409 CART_EMPTY. Отличается от DESTINATION_MISMATCH тем, что корзина реально пуста
+// (ничего не подобрано / уже размещено дублирующим сканом).
 func TestScanShippingBuffer_CartEmpty(t *testing.T) {
 	operatorID := uuid.New()
 	bufferBinID := uuid.New()
@@ -791,7 +792,8 @@ func TestScanShippingBuffer_CartEmpty(t *testing.T) {
 			Section:       stringPtr("SHIPPING_BUFFER"),
 			DestinationID: &destID,
 		},
-		movedProductIDs: nil,
+		movedProductIDs:   nil,
+		assembledProducts: nil, // CountAssembledByOperator -> 0: корзина действительно пуста
 	}
 
 	svc := NewService(mockRepo)
@@ -800,6 +802,39 @@ func TestScanShippingBuffer_CartEmpty(t *testing.T) {
 
 	if !errors.Is(err, ErrCartEmpty) {
 		t.Errorf("expected ErrCartEmpty, got %v", err)
+	}
+}
+
+// TestScanShippingBuffer_DestinationMismatch - оператор собрал товары для ДРУГОГО магазина
+// и сканирует буфер не того пункта назначения: derived UPDATE двигает 0 строк (предикат
+// t.destination_id = buffer.destination_id), но CountAssembledByOperator > 0 -> 409
+// DESTINATION_MISMATCH, а не вводящий в заблуждение CART_EMPTY. Это защита от mis-delivery:
+// ни один товар чужого магазина не попадает в этот буфер.
+func TestScanShippingBuffer_DestinationMismatch(t *testing.T) {
+	operatorID := uuid.New()
+	bufferBinID := uuid.New()
+	destinationID := uuid.New()
+
+	destID := destinationID
+	mockRepo := &mockAssemblyRepo{
+		shippingBufferBin: &domain.Bin{
+			BinID:         bufferBinID,
+			Code:          "SHIP-BUF-01",
+			Section:       stringPtr("SHIPPING_BUFFER"),
+			DestinationID: &destID,
+		},
+		// Перемещение для destination ЭТОГО буфера ничего не двигает...
+		movedProductIDs: nil,
+		// ...но оператор всё ещё несёт ASSEMBLED товары (для другого магазина).
+		assembledProducts: []uuid.UUID{uuid.New(), uuid.New()},
+	}
+
+	svc := NewService(mockRepo)
+
+	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
+
+	if !errors.Is(err, ErrDestinationMismatch) {
+		t.Errorf("expected ErrDestinationMismatch, got %v", err)
 	}
 }
 

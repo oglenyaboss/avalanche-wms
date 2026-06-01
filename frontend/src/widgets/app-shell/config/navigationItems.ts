@@ -25,6 +25,7 @@ export const navigationItems: NavigationItem[] = [
   {
     label: 'Сборка',
     title: 'Сценарий сборки заказа',
+    to: routes.assembly,
   },
   {
     label: 'Отгрузка',

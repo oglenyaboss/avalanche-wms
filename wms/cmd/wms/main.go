@@ -14,6 +14,7 @@ import (
 	"wms/internal/assembly"
 	"wms/internal/auth"
 	"wms/internal/config"
+	"wms/internal/destinations"
 	"wms/internal/dispatches"
 	"wms/internal/ledger"
 	"wms/internal/platform/kafka"
@@ -83,6 +84,10 @@ func main() {
 	dispatchesSvc := dispatches.NewService(dispatchesRepo)
 	dispatchesHandler := dispatches.NewHandler(dispatchesSvc)
 
+	destinationsRepo := destinations.NewRepository(dbPool)
+	destinationsSvc := destinations.NewService(destinationsRepo)
+	destinationsHandler := destinations.NewHandler(destinationsSvc)
+
 	// Router
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
@@ -103,6 +108,10 @@ func main() {
 	dispatchesRouter := r.PathPrefix("/dispatches").Subrouter()
 	dispatchesRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	dispatchesHandler.RegisterRoutes(dispatchesRouter)
+
+	destinationsRouter := r.PathPrefix("/destinations").Subrouter()
+	destinationsRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	destinationsHandler.RegisterRoutes(destinationsRouter)
 
 	shippingRouter := r.PathPrefix("/shipping").Subrouter()
 	shippingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))

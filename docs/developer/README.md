@@ -31,7 +31,7 @@ flowchart LR
 
   subgraph WMS_APP["WMS-монолит (Go, net/http + gorilla/mux)"]
     API["HTTP API / Router"]
-    MOD["Модули: receiving, putaway,\nassembly, shipping, dispatches, auth"]
+    MOD["Модули: receiving, putaway,\nassembly, shipping, dispatches, destinations, auth"]
     GATE["CheckChainStatus\n(chain-status gate)"]
   end
 
@@ -97,7 +97,7 @@ flowchart LR
 
 | Документ | Описание |
 |----------|----------|
-| [wms-reference.md](wms-reference.md) | Референс WMS-монолита: пакеты, модули (receiving / putaway / assembly / shipping / dispatches / auth), сервисы, репозитории, запись outbox. |
+| [wms-reference.md](wms-reference.md) | Референс WMS-монолита: пакеты, модули (receiving / putaway / assembly / shipping / dispatches / destinations / auth), сервисы, репозитории, запись outbox. |
 | [ledger-adapter-reference.md](ledger-adapter-reference.md) | Референс Ledger Adapter: consumer, Flusher, `chain.Client`, конвертация UUID→uint256, reconcile-loop, DLQ. |
 | [smart-contract-reference.md](smart-contract-reference.md) | Референс `BatchMappingWMS`: FSM, batch- и single-функции, идемпотентность, события `ItemTransition` / `ItemTransitionFailed`. |
 | [operations.md](operations.md) | Эксплуатация: docker-compose, переменные окружения, инициализация БД/Kafka, регистрация Debezium-коннектора, мониторинг, CI. |
