@@ -318,7 +318,7 @@ services:
     build:
       context: ./deploy/avalanche
     platform: linux/amd64
-    profiles: [test]
+    profiles: [test, stress]
     container_name: avalanchego
     volumes:
       - ./deploy/avalanche/node-config.json:/avalanche/node-config.json:ro
@@ -345,7 +345,7 @@ services:
   contract-deploy:
     build:
       context: ./deploy/contracts
-    profiles: [test]
+    profiles: [test, stress]
     container_name: contract_deploy
     depends_on:
       avalanchego:

@@ -44,6 +44,78 @@ psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
      -f /tests/stress/setup/stress-seed.sql > /dev/null \
     || { echo "[SEED] FATAL: stress-seed.sql завершился с ошибкой." >&2; exit 1; }
 
+# ── 2.5. Регистрация Debezium outbox-коннектора ──────────────────────────────
+# Без зарегистрированного коннектора Debezium не следит за public.outbox_events,
+# сообщения не попадают в Kafka, ledger-adapter не пишет onchain_events.
+DEBEZIUM_URL="${DEBEZIUM_URL:-http://debezium-connect:8083}"
+
+echo ""
+echo "[DEBEZIUM] Ожидание готовности Debezium Connect..."
+for i in $(seq 1 24); do
+    if curl -sf "${DEBEZIUM_URL}/connectors" > /dev/null 2>&1; then
+        echo "[DEBEZIUM] Готов (попытка ${i}/24)."
+        break
+    fi
+    if [ "${i}" -eq 24 ]; then
+        echo "[DEBEZIUM] WARN: Debezium Connect не ответил за 120s. Продолжаем без гарантии CDC." >&2
+    fi
+    sleep 5
+done
+
+CONN_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" \
+    "${DEBEZIUM_URL}/connectors/outbox-connector" 2>/dev/null || echo "000")
+
+if [ "${CONN_STATUS}" = "200" ]; then
+    echo "[DEBEZIUM] Коннектор outbox-connector уже зарегистрирован."
+else
+    echo "[DEBEZIUM] Регистрация коннектора outbox-connector..."
+    curl -sf -X POST "${DEBEZIUM_URL}/connectors" \
+        -H "Content-Type: application/json" \
+        --data-binary '{
+  "name": "outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "${env:DB_USER}",
+    "database.password": "${env:DB_PASSWORD}",
+    "database.dbname": "${env:DB_NAME}",
+    "topic.prefix": "wms",
+    "table.include.list": "public.outbox_events",
+    "plugin.name": "pgoutput",
+    "slot.name": "debezium_outbox",
+    "publication.name": "outbox_publication",
+    "publication.autocreate.mode": "filtered",
+    "snapshot.mode": "never",
+    "max.batch.size": 2048,
+    "max.queue.size": 8192,
+    "poll.interval.ms": 5000,
+    "heartbeat.interval.ms": 10000,
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.table.field.event.id": "event_id",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.field.event.type": "event_type",
+    "transforms.outbox.table.field.event.payload": "payload_hash",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.route.topic.replacement": "wms.events.v1",
+    "transforms.outbox.table.fields.additional.placement": "aggregate_type:header:aggregate_type",
+    "transforms.outbox.table.expand.json.payload": "false",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  }
+}' \
+        && echo "[DEBEZIUM] Коннектор зарегистрирован." \
+        || echo "[DEBEZIUM] WARN: не удалось зарегистрировать коннектор. Проверьте доступность Debezium." >&2
+
+    # Пауза для захвата WAL-слота. snapshot.mode=never → события до регистрации
+    # не захватываются; события ПОСЛЕ регистрации попадают в Kafka.
+    # Seed-данные не создают outbox-событий, поэтому потерь нет.
+    echo "[DEBEZIUM] Пауза 10s для захвата WAL-слота..."
+    sleep 10
+fi
+
 # ── 3. Генерация JSON с UUID грузомест и продуктов ───────────────────────────
 # Тест 05 использует STRESS-TABLE-CP-* (stress-table-cps.json).
 # Тест 07 использует STRESS-FLOW-CP-*  (stress-flow-cps.json).

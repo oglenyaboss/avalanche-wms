@@ -7,7 +7,7 @@
 FROM grafana/k6:latest
 
 USER root
-RUN apk add --no-cache postgresql-client
+RUN apk add --no-cache postgresql-client curl
 
 # Точка входа — оркестратор тестов (монтируется через volume).
 # Явно вызываем /bin/sh, поэтому execute-бит файла не нужен.

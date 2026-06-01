@@ -194,16 +194,21 @@ export default function (data) {
     // close-box
     http.post(`${BASE_URL}/receiving/table/close-box`, JSON.stringify({ box_id: boxId }), { headers: H });
 
-    // scan-buffer
-    if (receivingBinId) {
-      http.post(
-        `${BASE_URL}/receiving/table/scan-buffer`,
-        JSON.stringify({ cargoplace_id: cargoplaceId, buffer_bin_id: receivingBinId }),
-        { headers: H },
-      );
+    // scan-buffer — устанавливает bin_id продукта = receivingBinId.
+    // Без этого putaway/scan-product вернёт 409 PRODUCT_NOT_IN_BUFFER и outbox-событие
+    // не будет создано. setup() гарантирует наличие receivingBinId.
+    const scanBufRes = http.post(
+      `${BASE_URL}/receiving/table/scan-buffer`,
+      JSON.stringify({ cargoplace_id: cargoplaceId, buffer_bin_id: receivingBinId }),
+      { headers: H },
+    );
+    check(scanBufRes, { 'receiving_table: scan-buffer 200': (r) => r.status === 200 });
+    if (scanBufRes.status !== 200) {
+      productId = null; // bin_id не установлен → putaway пропустить
     }
 
-    // close-cargoplace → outbox event → Kafka → blockchain (async)
+    // close-cargoplace → receiving outbox event → Kafka → blockchain (async)
+    // Вызываем всегда: receiving-событие записывается даже если scan-buffer упал.
     http.post(
       `${BASE_URL}/receiving/table/close-cargoplace`,
       JSON.stringify({ cargoplace_id: cargoplaceId }),
@@ -230,8 +235,9 @@ export default function (data) {
       { headers: H },
     );
     check(scanProdRes, { 'putaway: scan-product 200': (r) => r.status === 200 });
+    if (scanProdRes.status !== 200) return; // продукт не в буфере → scan-storage-bin не имеет смысла
 
-    // scan-storage-bin → outbox event → Kafka → blockchain (async)
+    // scan-storage-bin → putaway outbox event → Kafka → blockchain (async)
     const storeBinRes = http.post(
       `${BASE_URL}/putaway/scan-storage-bin`,
       JSON.stringify({ product_ids: [productId], storage_bin_id: storageBinId }),
