@@ -30,6 +30,7 @@ export const navigationItems: NavigationItem[] = [
   {
     label: 'Отгрузка',
     title: 'Сценарий отгрузки заказа',
+    to: routes.shipping,
   },
   {
     label: 'Аналитика',
