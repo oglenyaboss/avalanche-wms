@@ -5,5 +5,6 @@ export const routes = {
   receivingTable: '/receiving/table',
   putaway: '/putaway',
   assembly: '/assembly',
+  shipping: '/shipping',
   notFound: '*',
 } as const

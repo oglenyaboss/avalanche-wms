@@ -9,6 +9,7 @@ import { NotFoundPage } from '@/pages/not-found'
 import { PutawayPage } from '@/pages/putaway'
 import { ReceivingGatePage } from '@/pages/receiving-gate'
 import { ReceivingTablePage } from '@/pages/receiving-table'
+import { ShippingPage } from '@/pages/shipping'
 import { routes } from '@/shared/config/routes'
 import { AppShell } from '@/widgets/app-shell'
 
@@ -47,6 +48,10 @@ const router = createBrowserRouter([
           {
             path: routes.assembly,
             element: <AssemblyPage />,
+          },
+          {
+            path: routes.shipping,
+            element: <ShippingPage />,
           },
         ],
       },
