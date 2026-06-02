@@ -2,6 +2,7 @@
 
 import { GuestOnlyRoute } from '@/app/providers/GuestOnlyRoute'
 import { ProtectedRoute } from '@/app/providers/ProtectedRoute'
+import { AnalyticsPage } from '@/pages/analytics'
 import { AssemblyPage } from '@/pages/assembly'
 import { HomePage } from '@/pages/home'
 import { LoginPage } from '@/pages/login'
@@ -52,6 +53,10 @@ const router = createBrowserRouter([
           {
             path: routes.shipping,
             element: <ShippingPage />,
+          },
+          {
+            path: routes.analytics,
+            element: <AnalyticsPage />,
           },
         ],
       },

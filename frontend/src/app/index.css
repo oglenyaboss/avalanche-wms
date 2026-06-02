@@ -21,6 +21,12 @@
     --color-chart-3: var(--chart-3);
     --color-chart-2: var(--chart-2);
     --color-chart-1: var(--chart-1);
+    /* Onchain status accents — the only semantic colour axis on the otherwise
+       monochrome canvas. Reserved exclusively for blockchain event state. */
+    --color-status-committed: var(--status-committed);
+    --color-status-sent: var(--status-sent);
+    --color-status-pending: var(--status-pending);
+    --color-status-failed: var(--status-failed);
     --color-ring: var(--ring);
     --color-input: var(--input);
     --color-border: var(--border);
@@ -74,6 +80,10 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
+    --status-committed: oklch(0.6 0.15 152); /* green — finalized on-chain */
+    --status-sent: oklch(0.58 0.16 250); /* blue — submitted, awaiting receipt */
+    --status-pending: oklch(0.7 0.15 75); /* amber — queued / not yet on-chain */
+    --status-failed: oklch(0.577 0.245 27.325); /* red — reverted (== destructive) */
     --radius: 0.625rem;
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
@@ -110,6 +120,10 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
+    --status-committed: oklch(0.72 0.16 152); /* lifted for contrast on dark */
+    --status-sent: oklch(0.7 0.15 250);
+    --status-pending: oklch(0.8 0.14 80);
+    --status-failed: oklch(0.704 0.191 22.216); /* == dark destructive */
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
     --sidebar-primary: oklch(0.488 0.243 264.376);

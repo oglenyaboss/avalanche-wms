@@ -6,5 +6,6 @@ export const routes = {
   putaway: '/putaway',
   assembly: '/assembly',
   shipping: '/shipping',
+  analytics: '/analytics',
   notFound: '*',
 } as const

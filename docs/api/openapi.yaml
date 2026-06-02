@@ -70,6 +70,8 @@ tags:
     description: Отгрузка товаров на рейс. RBAC — только OPERATOR.
   - name: System
     description: Служебные эндпоинты (health-check).
+  - name: Analytics
+    description: Аналитика склада и статус блокчейн-аудита (только чтение). RBAC — ADMIN или OPERATOR.
 
 security:
   - bearerAuth: []
@@ -1450,6 +1452,106 @@ paths:
         '500':
           $ref: '#/components/responses/JSONInternal'
 
+  /analytics/summary:
+    get:
+      tags: [Analytics]
+      summary: Сводные показатели склада
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Read-only агрегаты по статусам товаров,
+        заказов и рейсов плюс итоговые счётчики. `events_today` — число outbox-событий
+        с начала суток. Работают оба пути: `/analytics/summary` и `/analytics/summary/`.
+      operationId: analyticsSummary
+      responses:
+        '200':
+          description: 'Сводка в `data`.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/AnalyticsSummaryResponse'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /analytics/onchain:
+    get:
+      tags: [Analytics]
+      summary: Статус событий в блокчейне
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Агрегаты подтверждения событий аудита в сети.
+        `confirmation_rate` = COMMITTED / `total_events` (на уровне событий, диапазон
+        0..1), где `total_events` — число outbox-событий (события КПП on-chain не
+        пишутся). `pending` = total − committed − sent − failed (включая события, ещё
+        не попавшие в `onchain_events`). Списки `recent_failed`/`recent_committed`
+        ограничены 10. Работают оба пути: `/analytics/onchain` и `/analytics/onchain/`.
+      operationId: analyticsOnchain
+      responses:
+        '200':
+          description: 'Статус блокчейн-аудита в `data`.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/AnalyticsOnchainResponse'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /analytics/throughput:
+    get:
+      tags: [Analytics]
+      summary: Поток событий по дням
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Объём outbox-событий по дням и этапам за
+        трейлинг-окно. `days` — 1..90 (по умолчанию 14). Ось `days` непрерывная
+        (без пропусков), `series[].counts` и `totals` позиционно с ней выровнены.
+        Работают оба пути: `/analytics/throughput` и `/analytics/throughput/`.
+      operationId: analyticsThroughput
+      parameters:
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 90
+            default: 14
+      responses:
+        '200':
+          description: 'Временной ряд в `data`.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/AnalyticsThroughputResponse'
+        '400':
+          description: '`INVALID_REQUEST` — `days` не число или вне диапазона 1..90.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
   /dispatches/:
     get:
       tags: [Dispatches]
@@ -2228,6 +2330,139 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DestinationItem'
+
+    # ── Analytics: ответы ────────────────────────────────────────────────────
+    AnalyticsStatusBucket:
+      type: object
+      description: 'Пара «статус → количество» для разбивки по жизненному циклу.'
+      required: [status, count]
+      properties:
+        status:
+          type: string
+        count:
+          type: integer
+          format: int64
+    AnalyticsTotals:
+      type: object
+      description: 'Итоговые счётчики справочных таблиц.'
+      required: [skus, products, orders, dispatches, destinations]
+      properties:
+        skus: { type: integer, format: int64 }
+        products: { type: integer, format: int64 }
+        orders: { type: integer, format: int64 }
+        dispatches: { type: integer, format: int64 }
+        destinations: { type: integer, format: int64 }
+    AnalyticsSummaryResponse:
+      type: object
+      description: 'Тело поля `data` в ответе `GET /analytics/summary`.'
+      required: [totals, events_today, products_by_status, orders_by_status, dispatches_by_status]
+      properties:
+        totals:
+          $ref: '#/components/schemas/AnalyticsTotals'
+        events_today:
+          type: integer
+          format: int64
+        products_by_status:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsStatusBucket'
+        orders_by_status:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsStatusBucket'
+        dispatches_by_status:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsStatusBucket'
+    OnchainStageBreakdown:
+      type: object
+      description: 'Разбивка подтверждения on-chain для одного этапа склада. `pending` сворачивает явные PENDING и события, ещё не записанные в блокчейн.'
+      required: [aggregate_type, total, committed, sent, pending, failed]
+      properties:
+        aggregate_type: { type: string }
+        total: { type: integer, format: int64 }
+        committed: { type: integer, format: int64 }
+        sent: { type: integer, format: int64 }
+        pending: { type: integer, format: int64 }
+        failed: { type: integer, format: int64 }
+    OnchainEventRef:
+      type: object
+      description: 'Одно событие в лентах последних отклонённых/подтверждённых.'
+      required: [event_id, aggregate_type, updated_at]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        aggregate_type:
+          type: string
+        tx_hash:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+    AnalyticsOnchainResponse:
+      type: object
+      description: 'Тело поля `data` в ответе `GET /analytics/onchain`.'
+      required: [total_events, committed, sent, pending, failed, confirmation_rate, by_stage, recent_failed, recent_committed]
+      properties:
+        total_events: { type: integer, format: int64 }
+        committed: { type: integer, format: int64 }
+        sent: { type: integer, format: int64 }
+        pending: { type: integer, format: int64 }
+        failed: { type: integer, format: int64 }
+        confirmation_rate:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        by_stage:
+          type: array
+          items:
+            $ref: '#/components/schemas/OnchainStageBreakdown'
+        recent_failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/OnchainEventRef'
+        recent_committed:
+          type: array
+          items:
+            $ref: '#/components/schemas/OnchainEventRef'
+    AnalyticsThroughputSeries:
+      type: object
+      description: 'Одна полоса стека: этап и его счётчики по дням (позиционно выровнены с `days`).'
+      required: [aggregate_type, counts]
+      properties:
+        aggregate_type:
+          type: string
+        counts:
+          type: array
+          items:
+            type: integer
+            format: int64
+    AnalyticsThroughputResponse:
+      type: object
+      description: 'Тело поля `data` в ответе `GET /analytics/throughput`.'
+      required: [days, series, totals]
+      properties:
+        days:
+          type: array
+          description: 'Непрерывная ось дат (формат YYYY-MM-DD), по возрастанию.'
+          items:
+            type: string
+        series:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsThroughputSeries'
+        totals:
+          type: array
+          description: 'Сумма по всем полосам для каждого дня (позиционно с `days`).'
+          items:
+            type: integer
+            format: int64
 
     # ── Receiving: запросы ───────────────────────────────────────────────────
     ScanTTNRequest:

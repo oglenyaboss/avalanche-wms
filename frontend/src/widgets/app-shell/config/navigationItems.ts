@@ -35,5 +35,6 @@ export const navigationItems: NavigationItem[] = [
   {
     label: 'Аналитика',
     title: 'Раздел аналитики склада',
+    to: routes.analytics,
   },
 ]
