@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
 
 import { getOnchain, getSummary, getThroughput } from '../api/analyticsApi'
@@ -48,13 +48,21 @@ export function useAnalytics() {
     queryFn: () => getThroughput(throughputDays),
     retry: retryColdLoadRace,
     retryDelay: 400,
+    // Keep the previous range's chart on screen while a new range loads so the
+    // toggle (which lives inside the chart card) doesn't flash to a skeleton.
+    placeholderData: keepPreviousData,
   })
 
+  // Depend on the stable refetch identities (TanStack guarantees these are
+  // stable), not the query objects, which are new on every render.
+  const { refetch: refetchSummary } = summaryQuery
+  const { refetch: refetchOnchain } = onchainQuery
+  const { refetch: refetchThroughput } = throughputQuery
   const refetchAll = useCallback(() => {
-    void summaryQuery.refetch()
-    void onchainQuery.refetch()
-    void throughputQuery.refetch()
-  }, [summaryQuery, onchainQuery, throughputQuery])
+    void refetchSummary()
+    void refetchOnchain()
+    void refetchThroughput()
+  }, [refetchSummary, refetchOnchain, refetchThroughput])
 
   // The freshest successful fetch across the three queries drives the "updated
   // at" stamp. 0 means nothing has loaded yet.

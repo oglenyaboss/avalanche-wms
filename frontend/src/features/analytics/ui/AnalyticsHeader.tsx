@@ -33,7 +33,7 @@ export function AnalyticsHeader({
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="relative flex size-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-status-committed/70" />
+            <span className="absolute inline-flex h-full w-full rounded-full bg-status-committed/70 motion-safe:animate-ping" />
             <span className="relative inline-flex size-2 rounded-full bg-status-committed" />
           </span>
           <span>
@@ -51,7 +51,9 @@ export function AnalyticsHeader({
           disabled={isFetching}
           aria-label="Обновить данные"
         >
-          <RefreshIcon className={isFetching ? 'animate-spin' : undefined} />
+          <RefreshIcon
+            className={isFetching ? 'motion-safe:animate-spin' : undefined}
+          />
           Обновить
         </Button>
       </div>

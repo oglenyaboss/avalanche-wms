@@ -73,11 +73,13 @@ type StageOnchain struct {
 }
 
 // OnchainEvent is a single event surfaced in the recent failed/committed feeds.
+// TxHash/ErrorMessage are emitted as explicit JSON null when absent (no
+// omitempty) to match the `nullable: true` contract in the OpenAPI spec.
 type OnchainEvent struct {
 	EventID       string  `json:"event_id"`
 	AggregateType string  `json:"aggregate_type"`
-	TxHash        *string `json:"tx_hash,omitempty"`
-	ErrorMessage  *string `json:"error_message,omitempty"`
+	TxHash        *string `json:"tx_hash"`
+	ErrorMessage  *string `json:"error_message"`
 	UpdatedAt     string  `json:"updated_at"`
 }
 

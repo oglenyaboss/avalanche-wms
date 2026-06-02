@@ -55,7 +55,8 @@ func (r *Repository) GetSummary(ctx context.Context) (SummaryReport, error) {
 
 	var eventsToday int64
 	if err := r.q.QueryRow(ctx,
-		`SELECT count(*) FROM public.outbox_events WHERE created_at >= current_date`).
+		`SELECT count(*) FROM public.outbox_events
+         WHERE created_at >= ((now() AT TIME ZONE 'UTC')::date)::timestamp AT TIME ZONE 'UTC'`).
 		Scan(&eventsToday); err != nil {
 		return SummaryReport{}, fmt.Errorf("analytics.Repository.GetSummary eventsToday: %w", err)
 	}
@@ -116,10 +117,12 @@ func (r *Repository) GetOnchain(ctx context.Context, failedLimit, committedLimit
 // GetThroughput returns daily event volume per stage over the trailing `days`
 // window (inclusive of today), pivoted onto a gap-free axis.
 func (r *Repository) GetThroughput(ctx context.Context, days int) (ThroughputReport, error) {
+	// Bucket and bound the window explicitly in UTC so day boundaries match the
+	// Go axis (time.Now().UTC()) regardless of the DB session timezone.
 	rows, err := r.q.Query(ctx,
-		`SELECT date_trunc('day', created_at)::date AS day, aggregate_type, count(*)
+		`SELECT (created_at AT TIME ZONE 'UTC')::date AS day, aggregate_type, count(*)
          FROM public.outbox_events
-         WHERE created_at >= current_date - ($1::int - 1)
+         WHERE created_at >= (((now() AT TIME ZONE 'UTC')::date - ($1::int - 1))::timestamp AT TIME ZONE 'UTC')
          GROUP BY 1, 2
          ORDER BY 1, 2`, days)
 	if err != nil {
@@ -143,7 +146,8 @@ func (r *Repository) GetThroughput(ctx context.Context, days int) (ThroughputRep
 
 // statusCounts runs a two-column (label, count) aggregate query. The first
 // column is stored in statusCount.Status regardless of whether it is a real
-// status or an aggregate_type — callers interpret it.
+// status or an aggregate_type — callers interpret it. `query` MUST be a string
+// literal: it is interpolated as-is, so never pass caller- or user-supplied SQL.
 func (r *Repository) statusCounts(ctx context.Context, query string) ([]statusCount, error) {
 	rows, err := r.q.Query(ctx, query)
 	if err != nil {

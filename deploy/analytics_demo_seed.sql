@@ -55,9 +55,12 @@ SELECT
 FROM gen
 ON CONFLICT (event_id) DO NOTHING;
 
--- 2) Onchain status for every outbox event missing one (covers the synthetic
---    rows above AND any pre-existing real events). Deterministic status mix per
---    event_id: ~80% COMMITTED, ~8% SENT, ~7% PENDING, ~5% FAILED.
+-- 2) Onchain status for the SYNTHETIC demo events only (event_type LIKE '%.demo').
+--    CRITICAL: this is scoped to demo rows so it NEVER fabricates a chain status
+--    for a real outbox event. Marking a real, not-yet-submitted event COMMITTED
+--    would make the ledger-adapter's Exists() gate skip submitting it forever
+--    (COMMITTED is terminal) — real events are left untouched and keep flowing.
+--    Deterministic status mix per event_id: ~80% COMMITTED, ~8% SENT, ~7% PENDING, ~5% FAILED.
 INSERT INTO public.onchain_events (event_id, aggregate_type, tx_hash, status, error_message, created_at, updated_at)
 SELECT
     ob.event_id,
@@ -82,7 +85,8 @@ CROSS JOIN LATERAL (
         ELSE 'FAILED'
     END AS status
 ) st
-WHERE NOT EXISTS (
+WHERE ob.event_type LIKE '%.demo'
+  AND NOT EXISTS (
     SELECT 1 FROM public.onchain_events oe WHERE oe.event_id = ob.event_id
 );
 

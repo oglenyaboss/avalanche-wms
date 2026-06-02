@@ -77,7 +77,7 @@ export function PipelineCard({ summary }: PipelineCardProps) {
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
                 <div
-                  className="h-full rounded-full transition-[width] duration-500"
+                  className="h-full rounded-full"
                   style={{
                     width: `${width}%`,
                     backgroundColor: `var(--chart-${Math.min(i + 1, 5)})`,

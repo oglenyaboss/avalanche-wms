@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 
@@ -46,6 +47,7 @@ func (h *Handler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	rep, err := h.svc.GetSummary(r.Context())
 	if err != nil {
+		log.Printf("analytics: GetSummary -> 500: %v", err)
 		httputil.WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера")
 		return
 	}
@@ -59,6 +61,7 @@ func (h *Handler) GetOnchain(w http.ResponseWriter, r *http.Request) {
 	}
 	rep, err := h.svc.GetOnchain(r.Context(), recentFeedLimit, recentFeedLimit)
 	if err != nil {
+		log.Printf("analytics: GetOnchain -> 500: %v", err)
 		httputil.WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера")
 		return
 	}
@@ -88,6 +91,7 @@ func (h *Handler) GetThroughput(w http.ResponseWriter, r *http.Request) {
 
 	rep, err := h.svc.GetThroughput(r.Context(), days)
 	if err != nil {
+		log.Printf("analytics: GetThroughput(days=%d) -> 500: %v", days, err)
 		httputil.WriteError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера")
 		return
 	}

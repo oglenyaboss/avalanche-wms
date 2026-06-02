@@ -41,6 +41,11 @@ export function Analytics() {
       <Reveal>
         {a.onchain && a.summary ? (
           <KpiStrip onchain={a.onchain} summary={a.summary} />
+        ) : a.onchainError || a.summaryError ? (
+          <CardError
+            message={getAnalyticsErrorMessage(a.onchainError ?? a.summaryError)}
+            onRetry={onRetry}
+          />
         ) : (
           <KpiStripSkeleton />
         )}
@@ -106,11 +111,21 @@ export function Analytics() {
           )}
           {a.onchain ? (
             <FailedEventsCard events={a.onchain.recentFailed} />
+          ) : a.onchainError ? (
+            <CardError
+              message={getAnalyticsErrorMessage(a.onchainError)}
+              onRetry={onRetry}
+            />
           ) : (
             <CardSkeleton lines={5} />
           )}
           {a.onchain ? (
             <RecentTxCard events={a.onchain.recentCommitted} />
+          ) : a.onchainError ? (
+            <CardError
+              message={getAnalyticsErrorMessage(a.onchainError)}
+              onRetry={onRetry}
+            />
           ) : (
             <CardSkeleton lines={5} />
           )}
