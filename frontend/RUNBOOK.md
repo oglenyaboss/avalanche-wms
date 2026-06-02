@@ -25,9 +25,11 @@ docker compose --profile test up -d --build
 #    дождаться, пока avalanchego/kafka/postgres станут healthy (~1–2 мин):
 docker compose ps
 
-# 2) подключить CDC-коннектор (Debezium → Kafka), иначе ончейн-аудит не поедет
-make register-connector
+# 2) CDC-коннектор (Debezium → Kafka) регистрируется сам — контейнером connector-init при up.
+#    Достаточно проверить (через ~30s после подъёма):
 make connector-status      # должно быть "state":"RUNNING"
+#    Фолбэк, если по какой-то причине не зарегался сам:
+make register-connector
 
 # 3) фронтенд
 cd frontend && npm run dev # откроется на http://localhost:5173
