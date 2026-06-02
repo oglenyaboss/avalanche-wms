@@ -186,6 +186,24 @@ services:
     networks:
       - app_network
 
+  # Одноразовый контейнер: регистрирует outbox-коннектор в Kafka Connect
+  # автоматически при `up`, чтобы не запускать `make register-connector` руками.
+  # Идемпотентно (201/409 = ok); на обычном рестарте коннектор уже восстановлен
+  # из топика debezium_configs, нужен только на чистом kafka-volume.
+  connector-init:
+    image: curlimages/curl:8.11.1
+    container_name: connector_init
+    restart: "no"
+    depends_on:
+      debezium:
+        condition: service_started
+    volumes:
+      - ./deploy/debezium/connectors/postgres-connector.json:/connector.json:ro
+      - ./deploy/debezium/register-connector.sh:/register-connector.sh:ro
+    entrypoint: ["sh", "/register-connector.sh"]
+    networks:
+      - app_network
+
   kafka-ui:
     image: ghcr.io/kafbat/kafka-ui:v1.5.0
     container_name: kafka-ui
