@@ -53,10 +53,15 @@
     --radius-2xl: calc(var(--radius) * 1.8);
     --radius-3xl: calc(var(--radius) * 2.2);
     --radius-4xl: calc(var(--radius) * 2.6);
+    /* Premium-enterprise depth: a restrained, layered soft-shadow tier.
+       Used via shadow-soft / shadow-card / shadow-pop. */
+    --shadow-soft: 0 1px 2px oklch(0 0 0 / 0.04), 0 2px 6px oklch(0 0 0 / 0.04);
+    --shadow-card: 0 1px 2px oklch(0 0 0 / 0.05), 0 10px 28px oklch(0 0 0 / 0.06);
+    --shadow-pop: 0 6px 16px oklch(0 0 0 / 0.08), 0 20px 48px oklch(0 0 0 / 0.10);
 }
 
 :root {
-    --background: oklch(1 0 0);
+    --background: oklch(0.986 0 0); /* faint cool canvas so white cards lift */
     --foreground: oklch(0.235 0 0); /* SDS text-default #1e1e1e */
     --card: oklch(1 0 0);
     --card-foreground: oklch(0.235 0 0); /* SDS text-default #1e1e1e */
@@ -85,8 +90,8 @@
     --status-pending: oklch(0.7 0.15 75); /* amber — queued / not yet on-chain */
     --status-failed: oklch(0.577 0.245 27.325); /* red — reverted (== destructive) */
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar: oklch(1 0 0); /* crisp white rail against the faint canvas */
+    --sidebar-foreground: oklch(0.235 0 0);
     --sidebar-primary: oklch(0.205 0 0);
     --sidebar-primary-foreground: oklch(0.985 0 0);
     --sidebar-accent: oklch(0.97 0 0);
@@ -143,5 +148,29 @@
   }
   html {
     @apply font-sans;
+  }
+}
+
+@layer utilities {
+  /* Faint dot-grid atmosphere for hero / brand surfaces — never flat white. */
+  .bg-dotgrid {
+    background-image: radial-gradient(
+      oklch(0 0 0 / 0.045) 1px,
+      transparent 1px
+    );
+    background-size: 22px 22px;
+  }
+  /* Light dots for dark surfaces (brand panel). */
+  .bg-dotgrid-invert {
+    background-image: radial-gradient(
+      oklch(1 0 0 / 0.06) 1px,
+      transparent 1px
+    );
+    background-size: 22px 22px;
+  }
+  /* Tabular, lined figures for metrics so numbers don't jitter when they change. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1, 'ss01' 1;
   }
 }

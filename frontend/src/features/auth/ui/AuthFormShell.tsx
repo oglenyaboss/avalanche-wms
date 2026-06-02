@@ -1,31 +1,30 @@
-﻿import type { ReactNode } from 'react'
-
-import { PageTitle } from '@/shared/ui'
+import type { ReactNode } from 'react'
 
 type AuthFormShellProps = {
   children: ReactNode
   status?: ReactNode
   title: string
+  description?: string
 }
 
 export function AuthFormShell({
   children,
   status,
   title,
+  description,
 }: AuthFormShellProps) {
   return (
-    <section className="grid min-h-[calc(100vh-6rem)] w-full grid-rows-[1fr_auto_1fr]">
-      <div className="flex items-end justify-center pb-8">
-        <div className="w-[348px] max-w-full">
-          <PageTitle>{title}</PageTitle>
-        </div>
-      </div>
-      <div className="flex items-center justify-center">
-        <div className="w-[348px] max-w-full min-h-[252px]">{children}</div>
-      </div>
-      <div className="flex items-start justify-center pt-8">
-        <div className="min-h-[124px] w-[348px] max-w-full">{status}</div>
-      </div>
-    </section>
+    <div className="w-full max-w-[360px]">
+      <header className="mb-7">
+        <h1 className="text-3xl font-semibold tracking-tight text-foreground">
+          {title}
+        </h1>
+        {description ? (
+          <p className="mt-2 text-sm text-muted-foreground">{description}</p>
+        ) : null}
+      </header>
+      {children}
+      {status ? <div className="mt-5">{status}</div> : null}
+    </div>
   )
 }
