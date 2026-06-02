@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	kafkago "github.com/segmentio/kafka-go"
 
+	"wms/internal/analytics"
 	"wms/internal/assembly"
 	"wms/internal/auth"
 	"wms/internal/config"
@@ -88,6 +89,10 @@ func main() {
 	destinationsSvc := destinations.NewService(destinationsRepo)
 	destinationsHandler := destinations.NewHandler(destinationsSvc)
 
+	analyticsRepo := analytics.NewRepository(dbPool)
+	analyticsSvc := analytics.NewService(analyticsRepo)
+	analyticsHandler := analytics.NewHandler(analyticsSvc)
+
 	// Router
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
@@ -112,6 +117,10 @@ func main() {
 	destinationsRouter := r.PathPrefix("/destinations").Subrouter()
 	destinationsRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	destinationsHandler.RegisterRoutes(destinationsRouter)
+
+	analyticsRouter := r.PathPrefix("/analytics").Subrouter()
+	analyticsRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	analyticsHandler.RegisterRoutes(analyticsRouter)
 
 	shippingRouter := r.PathPrefix("/shipping").Subrouter()
 	shippingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
