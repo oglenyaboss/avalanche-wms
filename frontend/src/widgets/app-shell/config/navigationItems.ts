@@ -5,6 +5,7 @@ import {
   InboxIcon,
   Layers01Icon,
   PackageProcessIcon,
+  Route01Icon,
   TruckIcon,
 } from '@hugeicons/core-free-icons'
 import type { IconSvgElement } from '@hugeicons/react'
@@ -60,5 +61,11 @@ export const navigationItems: NavigationItem[] = [
     title: 'Аналитика склада и блокчейн-аудит',
     to: routes.analytics,
     icon: Analytics01Icon,
+  },
+  {
+    label: 'Трассировка',
+    title: 'История товара и его подтверждения в блокчейне',
+    to: routes.trace,
+    icon: Route01Icon,
   },
 ]
