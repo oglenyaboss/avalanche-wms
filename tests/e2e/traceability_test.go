@@ -61,6 +61,8 @@ func assertProductTraceability(t *testing.T, env *env, token string, productID u
 	var aCommittedHash string
 	for _, s := range byID.Steps {
 		stages[s.Stage] = true
+		// chain_status is the public.onchain_event_status enum rendered ::text —
+		// uppercase (PENDING/SENT/COMMITTED/FAILED), matching the wms DTO.
 		if s.ChainStatus == "COMMITTED" {
 			require.NotNilf(t, s.TxHash, "committed step %q missing tx_hash", s.Stage)
 			require.NotEmptyf(t, *s.TxHash, "committed step %q empty tx_hash", s.Stage)

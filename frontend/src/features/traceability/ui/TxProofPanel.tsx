@@ -7,7 +7,7 @@ interface TxProofPanelProps {
 const STATUS_TEXT: Record<string, string> = {
   success: '✓ Подтверждена в сети',
   failed: '✕ Транзакция отклонена',
-  pending: '⏳ Ещё не подтверждена (в мемпуле)',
+  pending: '• Ещё не подтверждена (в мемпуле)',
 }
 
 // Live RPC verification of one tx, fetched on demand. Renders inside a Sheet

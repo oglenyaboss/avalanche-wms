@@ -48,6 +48,12 @@ type TxReceipt struct {
 // or non-200 is returned as an error (caller maps to CHAIN_UNREACHABLE). A 200
 // with found:false (tx not yet mined) is a valid, non-error result.
 func (c *Client) GetTxReceipt(ctx context.Context, txHash string) (TxReceipt, error) {
+	// Explicit per-call deadline (independent of the transport-level
+	// httpClient.Timeout): bounds this UI-facing proxy and is cancellable
+	// mid-stream by the caller. Mirrors the adapter's own 4s receipt guard.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/onchain/tx/"+txHash, http.NoBody)
 	if err != nil {
 		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt build: %w", err)

@@ -60,6 +60,12 @@ type txProofResponse struct {
 }
 
 // TxProof does a single live receipt lookup (no polling) for an on-demand proof.
+//
+// SECURITY: this endpoint is intentionally UNAUTHENTICATED — the adapter has no
+// auth layer. It is safe only because the adapter port is container-internal
+// (private Docker network); the public-facing wms /onchain/tx/{hash} proxy is the
+// authenticated entry point (RequireAdminOrOperator). Do NOT expose this port
+// beyond the internal network without adding a shared-secret check.
 func (h *Handler) TxProof(w http.ResponseWriter, r *http.Request) {
 	hash := r.PathValue("hash")
 	if !txHashRe.MatchString(hash) {
