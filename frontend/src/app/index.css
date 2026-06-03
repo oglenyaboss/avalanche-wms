@@ -72,7 +72,7 @@
     --secondary: oklch(0.97 0 0);
     --secondary-foreground: oklch(0.205 0 0);
     --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.5624 0 0); /* SDS text-secondary #757575 */
+    --muted-foreground: oklch(0.52 0 0); /* ~#6b6b6b — clears WCAG AA (4.5:1) on the faint canvas, not just on cards */
     --placeholder: oklch(0.7668 0 0); /* SDS text-tertiary #b3b3b3 */
     --accent: oklch(0.97 0 0);
     --accent-foreground: oklch(0.205 0 0);

@@ -1,4 +1,4 @@
-import { Alert, AlertDescription } from '@/shared/ui'
+import { Alert, AlertDescription, ScanScene } from '@/shared/ui'
 
 import { bufferBinUuidSchema } from '../model/schema'
 import { ScanForm } from './ScanForm'
@@ -19,15 +19,17 @@ export function BufferScanPhase({
   isBlocked,
 }: BufferScanPhaseProps) {
   return (
-    <section className="mx-auto flex max-w-xl flex-col gap-6">
-      <h2 className="text-lg font-medium">Отсканируйте буфер отгрузки магазина</h2>
-
-      {emptyBufferMessage ? (
-        <Alert variant="default">
-          <AlertDescription>{emptyBufferMessage}</AlertDescription>
-        </Alert>
-      ) : null}
-
+    <ScanScene
+      title="Отгрузка"
+      description="Отсканируйте буфер отгрузки магазина, чтобы осмотреть готовый к погрузке заказ."
+      banner={
+        emptyBufferMessage ? (
+          <Alert variant="default">
+            <AlertDescription>{emptyBufferMessage}</AlertDescription>
+          </Alert>
+        ) : null
+      }
+    >
       <ScanForm
         title="Отсканируйте ШК буфера отгрузки"
         inputId="shipping-buffer"
@@ -40,6 +42,6 @@ export function BufferScanPhase({
         isBlocked={isBlocked}
         schema={bufferBinUuidSchema}
       />
-    </section>
+    </ScanScene>
   )
 }

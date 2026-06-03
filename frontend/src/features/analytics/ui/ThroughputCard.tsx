@@ -43,7 +43,7 @@ export function ThroughputCard({
   return (
     <Card>
       <CardHeader className="border-b pb-5">
-        <CardTitle>Поток событий аудита</CardTitle>
+        <CardTitle>Поток событий</CardTitle>
         <CardDescription>
           Объём событий по этапам · всего{' '}
           <span className="font-medium text-foreground tabular-nums">

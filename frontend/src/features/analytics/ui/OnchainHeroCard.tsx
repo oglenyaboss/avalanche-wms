@@ -48,7 +48,7 @@ export function OnchainHeroCard({ onchain }: OnchainHeroCardProps) {
           Статус в блокчейне
         </CardTitle>
         <CardDescription>
-          Подтверждение событий аудита в сети Avalanche
+          Подтверждение событий в сети Avalanche
         </CardDescription>
       </CardHeader>
 

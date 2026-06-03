@@ -21,7 +21,7 @@ export type NavigationItem = {
 export const navigationItems: NavigationItem[] = [
   {
     label: 'Дашборд',
-    title: 'Обзор склада и состояние блокчейн-аудита',
+    title: 'Обзор склада',
     to: routes.home,
     icon: DashboardSquare01Icon,
   },

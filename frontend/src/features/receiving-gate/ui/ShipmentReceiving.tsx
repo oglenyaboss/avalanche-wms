@@ -20,7 +20,7 @@ export function ShipmentReceiving({
   isErrorOpen,
 }: ShipmentReceivingProps) {
   return (
-    <section className="flex flex-col gap-6">
+    <section className="mx-auto flex max-w-2xl flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="font-heading text-2xl font-semibold">
           Поставка {shipment.ttnCode}

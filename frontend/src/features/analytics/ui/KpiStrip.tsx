@@ -23,7 +23,7 @@ export function KpiStrip({ onchain, summary }: KpiStripProps) {
       <KpiStat
         label="Подтверждено"
         value={formatNumber(onchain.committed)}
-        hint={`${formatPercent(onchain.confirmationRate)} аудита в сети`}
+        hint={`${formatPercent(onchain.confirmationRate)} подтверждено в сети`}
         accent={STATUS_COLOR.committed}
       />
       <KpiStat

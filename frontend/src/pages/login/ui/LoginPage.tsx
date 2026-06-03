@@ -4,9 +4,9 @@ import { Logo } from '@/shared/ui'
 import { useLoginPageState } from '../model/useLoginPageState'
 
 const brandPoints = [
-  'Каждая складская операция — событие в неизменяемом реестре',
-  'Аудит подтверждается в сети Avalanche',
   'Сквозная прослеживаемость от приёмки до отгрузки',
+  'Каждая операция подтверждается в блокчейне',
+  'Единый журнал событий для всех этапов склада',
 ]
 
 export function LoginPage() {
@@ -57,8 +57,8 @@ export function LoginPage() {
         </div>
 
         <div className="relative flex items-center gap-2 text-xs text-primary-foreground/55">
-          <span className="size-1.5 animate-pulse rounded-full bg-status-committed" />
-          Avalanche Subnet · аудит в реальном времени
+          <span className="size-1.5 rounded-full bg-status-committed" />
+          Работает на Avalanche Subnet
         </div>
       </aside>
 

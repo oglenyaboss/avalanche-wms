@@ -73,16 +73,14 @@ export function HomePage() {
         />
         <div className="relative max-w-2xl">
           <span className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-primary-foreground/90">
-            <span className="size-1.5 animate-pulse rounded-full bg-status-committed" />
-            Avalanche Subnet · аудит в реальном времени
+            <span className="size-1.5 rounded-full bg-status-committed" />
+            Avalanche Subnet
           </span>
           <h2 className="mt-4 text-3xl font-semibold tracking-tight text-balance">
-            Складские операции, подтверждённые в блокчейне
+            Складские операции от приёмки до отгрузки
           </h2>
           <p className="mt-3 leading-relaxed text-primary-foreground/75">
-            Каждое движение товара — от приёмки до отгрузки — фиксируется как
-            неизменяемое событие в реестре. Выберите сценарий, чтобы начать
-            работу.
+            Выберите сценарий, чтобы перейти к работе.
           </p>
         </div>
       </section>

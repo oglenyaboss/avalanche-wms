@@ -50,13 +50,6 @@ export function ContextBar() {
       <h1 className="truncate text-lg font-semibold tracking-tight text-foreground">
         {title}
       </h1>
-
-      <div className="ml-auto flex items-center gap-2">
-        <span className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground shadow-soft">
-          <span className="size-1.5 rounded-full bg-status-committed" />
-          On-chain аудит
-        </span>
-      </div>
     </header>
   )
 }
