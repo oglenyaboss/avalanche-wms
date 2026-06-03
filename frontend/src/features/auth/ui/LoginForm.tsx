@@ -1,4 +1,4 @@
-﻿import {
+import {
   Button,
   Field,
   FieldGroup,
@@ -54,7 +54,11 @@ export function LoginForm({
   ) : null
 
   return (
-    <AuthFormShell title="Вход в систему" status={status}>
+    <AuthFormShell
+      title="Вход в систему"
+      description="Войдите, чтобы продолжить работу со складом"
+      status={status}
+    >
       <form onSubmit={onSubmit}>
         <FieldGroup className="gap-5">
           <Field>
@@ -68,7 +72,17 @@ export function LoginForm({
             />
           </Field>
           <Field>
-            <FieldLabel htmlFor="password">Пароль</FieldLabel>
+            <div className="flex items-baseline justify-between gap-2">
+              <FieldLabel htmlFor="password">Пароль</FieldLabel>
+              <Button
+                variant="link"
+                type="button"
+                onClick={onPasswordResetClick}
+                className="text-xs"
+              >
+                Забыли пароль?
+              </Button>
+            </div>
             <PasswordInput
               id="password"
               autoComplete="current-password"
@@ -77,22 +91,22 @@ export function LoginForm({
               {...register('password')}
             />
           </Field>
-          <Field
-            orientation="horizontal"
-            className="[&>[data-slot=button]]:min-w-0 [&>[data-slot=button]]:flex-1"
-          >
-            <Button variant="outline" type="button" onClick={onRegistrationClick}>
-              Регистрация
-            </Button>
-            <Button type="submit" disabled={isPending}>
-              {isPending ? 'Подождите...' : 'Войти'}
-            </Button>
-          </Field>
-          <Button variant="link" type="button" onClick={onPasswordResetClick}>
-            Забыли пароль?
+          <Button type="submit" disabled={isPending} className="w-full">
+            {isPending ? 'Подождите...' : 'Войти'}
           </Button>
         </FieldGroup>
       </form>
+
+      <p className="mt-6 text-center text-sm text-muted-foreground">
+        Нет аккаунта?{' '}
+        <button
+          type="button"
+          onClick={onRegistrationClick}
+          className="font-medium text-foreground underline-offset-4 hover:underline"
+        >
+          Создать аккаунт
+        </button>
+      </p>
     </AuthFormShell>
   )
 }

@@ -49,7 +49,7 @@ export function DonePhase({ dispatch, result, onReset }: DonePhaseProps) {
             value={result.ordersPartiallyShipped}
           />
           <SummaryRow
-            label="Событий блокчейна создано"
+            label="Событий зафиксировано"
             value={result.outboxEventsCreated}
           />
         </CardContent>

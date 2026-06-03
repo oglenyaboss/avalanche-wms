@@ -67,8 +67,10 @@ export function AreaChart({ series, height = 200 }: AreaChartProps) {
           vectorEffect="non-scaling-stroke"
         />
       ))}
+      {/* Light, translucent washes keep the stacked bands from collapsing into
+          one dark mass; the crisp top stroke is what differentiates each stage. */}
       {bands.map((b) => (
-        <path key={b.key} d={b.area} fill={b.color} fillOpacity={0.9} />
+        <path key={b.key} d={b.area} fill={b.color} fillOpacity={0.16} />
       ))}
       {bands.map((b) => (
         <path
@@ -76,8 +78,9 @@ export function AreaChart({ series, height = 200 }: AreaChartProps) {
           d={b.line}
           fill="none"
           stroke={b.color}
-          strokeWidth={1.5}
+          strokeWidth={2}
           strokeLinejoin="round"
+          strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
         />
       ))}

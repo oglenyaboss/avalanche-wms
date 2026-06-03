@@ -1,3 +1,5 @@
+import { PackageProcessIcon } from '@hugeicons/core-free-icons'
+
 import type {
   AllocationResult,
   AssemblyTask,
@@ -9,6 +11,7 @@ import {
   Button,
   Card,
   CardContent,
+  ScanScene,
 } from '@/shared/ui'
 
 import { ChevronRightIcon } from './icons'
@@ -99,19 +102,27 @@ export function DestinationPhase({
   // Store picker: no store chosen yet.
   if (!selectedDestination) {
     return (
-      <section className="mx-auto flex max-w-xl flex-col gap-6">
-        {successMessage ? (
-          <Alert variant="success">
-            <AlertDescription>{successMessage}</AlertDescription>
-          </Alert>
-        ) : null}
-        <h2 className="text-lg font-medium">Выберите магазин для сборки</h2>
-        <DestinationList
-          destinations={destinations}
-          isLoading={isLoadingDestinations}
-          onSelect={onSelect}
-        />
-      </section>
+      <ScanScene
+        icon={PackageProcessIcon}
+        title="Сборка"
+        description="Выберите магазин, аллоцируйте заказы и соберите товары на отгрузку."
+        banner={
+          successMessage ? (
+            <Alert variant="success">
+              <AlertDescription>{successMessage}</AlertDescription>
+            </Alert>
+          ) : null
+        }
+      >
+        <div className="flex flex-col gap-4">
+          <h2 className="text-lg font-medium">Выберите магазин для сборки</h2>
+          <DestinationList
+            destinations={destinations}
+            isLoading={isLoadingDestinations}
+            onSelect={onSelect}
+          />
+        </div>
+      </ScanScene>
     )
   }
 

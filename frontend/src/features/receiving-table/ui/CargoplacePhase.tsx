@@ -1,4 +1,4 @@
-import { Alert, AlertDescription } from '@/shared/ui'
+import { Alert, AlertDescription, ScanScene } from '@/shared/ui'
 
 import { cargoplaceUuidSchema } from '../model/schema'
 import { ScanForm } from './ScanForm'
@@ -17,15 +17,19 @@ export function CargoplacePhase({
   successMessage,
 }: CargoplacePhaseProps) {
   return (
-    <section className="flex flex-col gap-4">
-      {successMessage ? (
-        <Alert variant="success">
-          <AlertDescription className="col-span-2">
-            {successMessage}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
+    <ScanScene
+      title="Приёмка на столах"
+      description="Отсканируйте грузоместо, чтобы разобрать его на рабочем столе и сверить товары по SKU."
+      banner={
+        successMessage ? (
+          <Alert variant="success">
+            <AlertDescription className="col-span-2">
+              {successMessage}
+            </AlertDescription>
+          </Alert>
+        ) : null
+      }
+    >
       <ScanForm
         title="Отсканируйте штрих-код грузоместа"
         inputId="cargoplace-id"
@@ -37,6 +41,6 @@ export function CargoplacePhase({
         isBlocked={isBlocked}
         schema={cargoplaceUuidSchema}
       />
-    </section>
+    </ScanScene>
   )
 }

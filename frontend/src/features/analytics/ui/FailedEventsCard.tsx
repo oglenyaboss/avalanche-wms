@@ -34,7 +34,7 @@ export function FailedEventsCard({ events }: FailedEventsCardProps) {
               <CheckIcon className="size-5" />
             </span>
             <p className="text-sm text-muted-foreground">
-              Нет отклонённых событий — аудит синхронизирован.
+              Нет отклонённых событий — всё синхронизировано.
             </p>
           </div>
         ) : (

@@ -1,4 +1,4 @@
-import { Alert, AlertDescription } from '@/shared/ui'
+import { Alert, AlertDescription, ScanScene } from '@/shared/ui'
 
 import { bufferUuidSchema } from '../model/schema'
 import { ScanForm } from './ScanForm'
@@ -20,12 +20,17 @@ export function BufferPhase({
   successMessage,
 }: BufferPhaseProps) {
   return (
-    <section className="mx-auto flex max-w-xl flex-col gap-6">
-      {successMessage ? (
-        <Alert variant="success">
-          <AlertDescription>{successMessage}</AlertDescription>
-        </Alert>
-      ) : null}
+    <ScanScene
+      title="Раскладка"
+      description="Разместите принятый товар по местам хранения. Начните со сканирования буфера приёмки."
+      banner={
+        successMessage ? (
+          <Alert variant="success">
+            <AlertDescription>{successMessage}</AlertDescription>
+          </Alert>
+        ) : null
+      }
+    >
       <ScanForm
         title="Отсканируйте штрих-код буфера приёмки"
         inputId="putaway-buffer"
@@ -37,6 +42,6 @@ export function BufferPhase({
         isBlocked={isBlocked}
         schema={bufferUuidSchema}
       />
-    </section>
+    </ScanScene>
   )
 }

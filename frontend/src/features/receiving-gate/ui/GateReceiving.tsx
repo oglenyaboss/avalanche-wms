@@ -1,3 +1,5 @@
+import { ScanScene } from '@/shared/ui'
+
 import { useGateReceiving } from '../model/useGateReceiving'
 import { ConfirmCloseDialog } from './ConfirmCloseDialog'
 import { ReceivingErrorDialog } from './ReceivingErrorDialog'
@@ -18,7 +20,7 @@ export function GateReceiving() {
       : '')
 
   return (
-    <div className="mx-auto w-full max-w-2xl">
+    <div className="w-full">
       <div role="status" aria-live="polite" className="sr-only">
         {announcement}
       </div>
@@ -32,12 +34,17 @@ export function GateReceiving() {
           isErrorOpen={isErrorOpen}
         />
       ) : (
-        <ScanTtnForm
-          onScan={gate.submitTtn}
-          isScanning={gate.isScanningTtn}
-          successMessage={state.successMessage}
-          isBlocked={isErrorOpen}
-        />
+        <ScanScene
+          title="Приёмка на воротах"
+          description="Отсканируйте ТТН, чтобы открыть поставку и принять грузоместа от перевозчика."
+        >
+          <ScanTtnForm
+            onScan={gate.submitTtn}
+            isScanning={gate.isScanningTtn}
+            successMessage={state.successMessage}
+            isBlocked={isErrorOpen}
+          />
+        </ScanScene>
       )}
 
       <ReceivingErrorDialog

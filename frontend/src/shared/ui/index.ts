@@ -38,7 +38,7 @@ export { Input } from './input'
 export { Label } from './label'
 export { Logo } from './logo'
 export { PasswordInput } from './password-input'
-export { PageTitle } from './typography/PageTitle'
+export { ScanScene } from './scan-scene'
 export { Separator } from './separator'
 export {
   Sheet,
