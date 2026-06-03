@@ -90,7 +90,7 @@ func run(log *slog.Logger) error {
 		return reconciler.Run(gCtx)
 	})
 
-	srv := startHealthServer(log, cfg.Port)
+	srv := startHealthServer(log, cfg.Port, cli)
 
 	runErr := g.Wait()
 	log.Info("consumer stopped, shutting down http")
@@ -108,9 +108,9 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-func startHealthServer(log *slog.Logger, port string) *http.Server {
+func startHealthServer(log *slog.Logger, port string, chainReader handler.ChainReader) *http.Server {
 	mux := http.NewServeMux()
-	handler.New().RegisterRoutes(mux)
+	handler.New(chainReader).RegisterRoutes(mux)
 
 	srv := &http.Server{
 		Addr:              ":" + port,
