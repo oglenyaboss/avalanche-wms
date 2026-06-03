@@ -17,15 +17,13 @@ type ReceiptFetcher interface {
 	TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error)
 }
 
-// receiptDelays — exponential backoff для polling'а receipt'а.
-// Последний элемент используется повторно пока timeout не выйдет.
+// receiptDelays — polling receipt'а. Tight constant cadence: на быстрых subnet-evm
+// блоках (sub-second) большой backoff (...→2s) сам становился бутылочным горлышком —
+// receipt 1s-блока детектился только на ~1.85s. Частый poll = round-trip ≈ block_time.
+// Это тайминг polling'а, НЕ nonce/идемпотентность. Последний элемент повторяется.
 var receiptDelays = []time.Duration{
 	50 * time.Millisecond,
 	100 * time.Millisecond,
-	200 * time.Millisecond,
-	500 * time.Millisecond,
-	1 * time.Second,
-	2 * time.Second,
 }
 
 // WaitReceipt опрашивает fetcher пока не вернётся успешный receipt, или не
