@@ -11,6 +11,7 @@ import { PutawayPage } from '@/pages/putaway'
 import { ReceivingGatePage } from '@/pages/receiving-gate'
 import { ReceivingTablePage } from '@/pages/receiving-table'
 import { ShippingPage } from '@/pages/shipping'
+import { TracePage } from '@/pages/trace'
 import { routes } from '@/shared/config/routes'
 import { AppShell } from '@/widgets/app-shell'
 
@@ -57,6 +58,10 @@ const router = createBrowserRouter([
           {
             path: routes.analytics,
             element: <AnalyticsPage />,
+          },
+          {
+            path: routes.trace,
+            element: <TracePage />,
           },
         ],
       },
