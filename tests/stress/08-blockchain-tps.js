@@ -65,8 +65,8 @@ export const options = {
       // closed-model: ровно TOTAL_PRODUCTS итераций, каждая — уникальный продукт.
       // После обработки всех 5000 продуктов тест завершается естественно.
       executor: 'shared-iterations',
-      vus: 100,
-      iterations: TOTAL_PRODUCTS,
+      vus: Number(__ENV.VUS) || 100,
+      iterations: Number(__ENV.ITER) || TOTAL_PRODUCTS,
       maxDuration: '5m',
     },
   },
