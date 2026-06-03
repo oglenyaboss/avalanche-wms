@@ -5,6 +5,7 @@ import {
   CardContent,
   Sheet,
   SheetContent,
+  SheetDescription,
   SheetHeader,
   SheetTitle,
 } from '@/shared/ui'
@@ -58,6 +59,9 @@ export function ProductTimeline({ timeline }: ProductTimelineProps) {
         <SheetContent side="right" className="w-full max-w-md p-6">
           <SheetHeader className="mb-4 p-0">
             <SheetTitle>On-chain проверка</SheetTitle>
+            <SheetDescription className="sr-only">
+              Проверка транзакции товара в сети Avalanche
+            </SheetDescription>
           </SheetHeader>
           {selectedHash ? <TxProofPanel hash={selectedHash} /> : null}
         </SheetContent>
