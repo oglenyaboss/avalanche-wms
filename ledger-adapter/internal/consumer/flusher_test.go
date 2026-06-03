@@ -637,6 +637,100 @@ func TestFlusher_ChainTransientError_PropagatesAsError_NoDLQ(t *testing.T) {
 	}
 }
 
+// --- Send / Confirm split (pipeline primitives) --------------------------
+
+func TestFlusher_SendDoesNotWaitForReceipt(t *testing.T) {
+	f, ch, st, _ := newFlusherT()
+	msgs := makeMessages(3, "putaway")
+
+	inflight, err := f.Send(context.Background(), msgs)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(inflight) != 1 {
+		t.Fatalf("expected 1 inflight tx (one putaway sub-batch), got %d", len(inflight))
+	}
+	if inflight[0].Aggregate != "putaway" {
+		t.Errorf("aggregate: want putaway, got %q", inflight[0].Aggregate)
+	}
+	if len(inflight[0].IDs) != 3 {
+		t.Errorf("expected 3 ids in inflight, got %d", len(inflight[0].IDs))
+	}
+	if ch.receiptCalls != 0 {
+		t.Errorf("Send must NOT poll receipts, got %d receipt calls", ch.receiptCalls)
+	}
+	if len(st.sent) != 3 {
+		t.Errorf("expected 3 MarkSent rows, got %d", len(st.sent))
+	}
+	if len(st.committed) != 0 {
+		t.Errorf("Send must not commit, got %d", len(st.committed))
+	}
+}
+
+func TestFlusher_ConfirmCommits(t *testing.T) {
+	f, ch, st, _ := newFlusherT() // ch.receipt = Status 1
+	inflight, err := f.Send(context.Background(), makeMessages(2, "receiving"))
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := f.Confirm(context.Background(), &inflight[0]); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	if len(st.committed) != 2 {
+		t.Errorf("expected 2 committed, got %d", len(st.committed))
+	}
+	if ch.receiptCalls == 0 {
+		t.Error("Confirm should poll the receipt")
+	}
+}
+
+func TestFlusher_ConfirmRevertToDLQ(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	inflight, err := f.Send(context.Background(), makeMessages(1, "shipping"))
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	ch.receipt = &types.Receipt{Status: 0} // mined but reverted
+	if err := f.Confirm(context.Background(), &inflight[0]); err != nil {
+		t.Fatalf("confirm revert should record failure, not return error: %v", err)
+	}
+	if len(st.failed) != 1 {
+		t.Errorf("expected 1 MarkFailed, got %d", len(st.failed))
+	}
+	if len(dq.messages) != 1 {
+		t.Errorf("expected 1 DLQ publish, got %d", len(dq.messages))
+	}
+	if len(st.committed) != 0 {
+		t.Errorf("no commit on revert, got %d", len(st.committed))
+	}
+}
+
+// TestFlusher_ConfirmStall_NoDLQ_StaysSent: a tx that can't be confirmed within
+// the timeout (or on RPC failure) returns ErrConfirmStalled and leaves rows SENT
+// (visible, not lost) — NO DLQ, NO MarkFailed. The pipeline turns this into
+// recovery; the reconcile loop later catches the tx if it eventually mines.
+func TestFlusher_ConfirmStall_NoDLQ_StaysSent(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	inflight, err := f.Send(context.Background(), makeMessages(2, "receiving"))
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	ch.receiptErr = errors.New("rpc: connection reset") // WaitReceipt can't confirm
+	err = f.Confirm(context.Background(), &inflight[0])
+	if !errors.Is(err, ErrConfirmStalled) {
+		t.Fatalf("stall must return ErrConfirmStalled, got %v", err)
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("stall must NOT publish DLQ, got %d", len(dq.messages))
+	}
+	if len(st.failed) != 0 {
+		t.Errorf("stall must NOT MarkFailed, got %d", len(st.failed))
+	}
+	if len(st.committed) != 0 {
+		t.Errorf("stall must NOT commit, got %d", len(st.committed))
+	}
+}
+
 // --- mixed-batch tests ---------------------------------------------------
 
 func TestFlusher_MixedBatch_OrderedByFSM(t *testing.T) {
