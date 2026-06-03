@@ -1,9 +1,0 @@
-{
-  "network-id": "local",
-  "http-host": "0.0.0.0",
-  "http-port": 9650,
-  "staking-port": 9651,
-  "http-allowed-hosts": "*",
-  "log-level": "info",
-  "sybil-protection-enabled": false
-}

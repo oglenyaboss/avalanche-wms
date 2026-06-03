@@ -322,33 +322,52 @@ services:
     networks:
       - app_network
 
-  # ====== test profile: local Avalanche (C-Chain) ======
+  # ====== test profile: локальный Avalanche Subnet-EVM ======
+  # subnet-node1 — «сырой» avalanchego v1.14.0, отдающий цепочку WMS Subnet-EVM,
+  #   container-native (http-host 0.0.0.0); детерминированный subnetID преднабит в
+  #   --track-subnets, поэтому цепочка подхватывается на лету (без рестарта).
+  # subnet-init  — одноразовый bootstrap через Go wallet SDK (CreateSubnet/AddValidator/CreateChain),
+  #   идемпотентный; пишет динамический /shared/rpc_url.txt, который читают
+  #   contract-deploy и ledger-adapter.
 
-  avalanchego:
+  subnet-node1:
     build:
-      context: ./deploy/avalanche
-    platform: linux/amd64
+      context: ./deploy/subnet/subnet-node
     profiles: [test]
-    container_name: avalanchego
+    container_name: subnet-node1
     volumes:
-      - ./deploy/avalanche/node-config.json:/avalanche/node-config.json:ro
-      - avalanche_data:/root/.avalanchego
+      - ./deploy/subnet/network-genesis.json:/genesis/network-genesis.json:ro
+      - ./deploy/subnet/staking:/staking:ro
+      - ./deploy/subnet/node-config.json:/node-config.json:ro
+      - subnet_data:/data
     ports:
-      # bind to loopback only — prefunded ewoq key with 50M AVAX should not
-      # be exposed on LAN/public interfaces on shared dev machines.
+      # только loopback — префандженый ключ ewoq не должен торчать в LAN.
       - "127.0.0.1:9650:9650"
       - "127.0.0.1:9651:9651"
-    command: ["./avalanchego", "--config-file=/avalanche/node-config.json"]
+    command: ["./avalanchego", "--config-file=/node-config.json"]
     healthcheck:
       test:
         - "CMD-SHELL"
         - |
-          curl -sf -X POST -H 'Content-Type: application/json' \
-            --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
-            http://localhost:9650/ext/bc/C/rpc | grep -q '"result":"0x'
+          curl -sf http://localhost:9650/ext/health | grep -qE '"healthy":[[:space:]]*true'
       interval: 10s
       retries: 30
       start_period: 30s
+    networks:
+      - app_network
+
+  subnet-init:
+    build:
+      context: ./deploy/subnet/subnet-init
+    profiles: [test]
+    container_name: subnet_init
+    restart: "no"
+    depends_on:
+      subnet-node1:
+        condition: service_healthy
+    volumes:
+      - ./deploy/subnet/chain-genesis.json:/genesis/chain-genesis.json:ro
+      - shared_state:/shared
     networks:
       - app_network
 
@@ -358,8 +377,8 @@ services:
     profiles: [test]
     container_name: contract_deploy
     depends_on:
-      avalanchego:
-        condition: service_healthy
+      subnet-init:
+        condition: service_completed_successfully
     volumes:
       - ./ledger-adapter/contracts:/contracts:ro
       - shared_state:/shared
@@ -370,7 +389,7 @@ services:
 volumes:
   postgres_data:
   kafka_data:
-  avalanche_data:
+  subnet_data:
   shared_state:
 
 networks:
