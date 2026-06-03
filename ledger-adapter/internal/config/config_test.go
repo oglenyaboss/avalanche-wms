@@ -53,6 +53,37 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel default: got %q", cfg.LogLevel)
 	}
+	if cfg.PipelineWindow != 3 {
+		t.Errorf("PipelineWindow default: got %d, want 3", cfg.PipelineWindow)
+	}
+}
+
+func TestLoad_PipelineWindow(t *testing.T) {
+	cases := []struct {
+		env  string
+		want int
+	}{
+		{"1", 1},
+		{"5", 5},
+		{"8", 8},
+		{"0", 1},  // clamp up
+		{"-3", 1}, // clamp up
+		{"99", 8}, // clamp down to TxPoolAccountSlots ceiling
+		{"", 3},   // default
+	}
+	for _, tc := range cases {
+		t.Run("PIPELINE_WINDOW="+tc.env, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("PIPELINE_WINDOW", tc.env)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.PipelineWindow != tc.want {
+				t.Errorf("PIPELINE_WINDOW=%q → got %d, want %d", tc.env, cfg.PipelineWindow, tc.want)
+			}
+		})
+	}
 }
 
 func TestLoad_MissingRequired(t *testing.T) {

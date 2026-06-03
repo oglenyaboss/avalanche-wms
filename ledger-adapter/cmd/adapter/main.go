@@ -47,6 +47,7 @@ func run(log *slog.Logger) error {
 		"contract_addr", cfg.ContractAddr,
 		"batch_size", cfg.BatchSize,
 		"batch_timeout", cfg.BatchTimeout,
+		"pipeline_window", cfg.PipelineWindow,
 		"reconcile_interval", cfg.ReconcileInterval,
 		"reconcile_min_age", cfg.ReconcileMinAge)
 
@@ -77,7 +78,7 @@ func run(log *slog.Logger) error {
 	g, gCtx := errgroup.WithContext(rootCtx)
 	g.Go(func() error {
 		tlog := log.With("topic", eventsTopic)
-		c := consumer.NewConsumer(brokers, eventsTopic, cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, tlog)
+		c := consumer.NewConsumer(brokers, eventsTopic, cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, cfg.PipelineWindow, tlog)
 		if err := c.Run(gCtx); err != nil && gCtx.Err() == nil {
 			tlog.Error("consumer stopped unexpectedly", "err", err)
 			return err
