@@ -1,6 +1,6 @@
 # Ledger Adapter
 
-Kafka→EVM мост. Читает outbox-события WMS из Kafka, батчит, отправляет одну транзакцию на batch в `BatchMappingWMS` на Avalanche C-Chain. Idempotent, at-least-once, DLQ при фейлах.
+Kafka→EVM мост. Читает outbox-события WMS из Kafka, батчит, отправляет одну транзакцию на batch в `BatchMappingWMS`. Адаптер EVM-агностичен: локально работает против Avalanche Subnet-EVM, но подойдёт любой EVM-совместимый RPC. Idempotent, at-least-once, DLQ при фейлах.
 
 ## Архитектура
 
@@ -81,7 +81,7 @@ ledger-adapter/
 | `KAFKA_BROKERS` | ✓ | — | CSV broker list, `kafka:9092` |
 | `KAFKA_GROUP_ID` | | `ledger-adapter` | consumer group |
 | `DB_URL` | ✓ | — | pgx DSN `postgres://user:pw@host/db` |
-| `RPC_URL` | ✓ | — | Avalanche C-Chain RPC |
+| `RPC_URL` | ✓ | — | RPC EVM-узла (локально — Avalanche Subnet-EVM; подойдёт любой EVM-совместимый) |
 | `CONTRACT_ADDR` | ✓ | — | Адрес `BatchMappingWMS` |
 | `PRIVATE_KEY` | ✓ | — | Hex signer key (0x-prefixed ok) |
 | `BATCH_SIZE` | | `10` | Events per tx |
@@ -93,7 +93,7 @@ ledger-adapter/
 
 ## Запуск
 
-### Test profile (полный стек с локальным avalanchego)
+### Test profile (полный стек с локальным Subnet-EVM)
 
 ```bash
 docker compose --profile test up -d

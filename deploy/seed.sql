@@ -380,6 +380,90 @@ LEFT JOIN wms_inventory.boxes b
  AND b.box_barcode = 'BOX-TABLE-201'
 ON CONFLICT (qr_code) DO NOTHING;
 
+-- 9.7) Dedicated receiving-gate happy-path dataset
+-- A CREATED shipment with EXPECTED cargoplaces, so the full gate flow can be
+-- tested end to end: scan-ttn -> scan-cargoplace (x2) -> auto-close, or
+-- scan-ttn -> accept-shipment. Other seeded shipments are already past the gate
+-- stage (RECEIVED / GATE_IN_PROGRESS / GATE_CLOSED), so they cannot exercise it.
+INSERT INTO wms_inventory.inbound_shipments (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  w.warehouse_id,
+  'ТТН-2026-GATE-001',
+  'CREATED',
+  now(),
+  now()
+FROM wms_inventory.warehouses w
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT (ttn_code) DO NOTHING;
+
+INSERT INTO wms_inventory.cargoplaces (
+  cargoplace_id,
+  shipment_id,
+  cargoplace_code,
+  status,
+  received_at_gate_at,
+  created_at,
+  updated_at
+)
+SELECT
+  gen_random_uuid(),
+  sh.shipment_id,
+  v.cargoplace_code,
+  'EXPECTED',
+  NULL,
+  now(),
+  now()
+FROM wms_inventory.inbound_shipments sh
+JOIN (
+  VALUES
+    ('CP-GATE-001'),
+    ('CP-GATE-002')
+) AS v(cargoplace_code) ON true
+WHERE sh.ttn_code = 'ТТН-2026-GATE-001'
+ON CONFLICT DO NOTHING;
+
+-- 9.8) Second gate shipment, so the partial-accept path (accept-shipment with
+-- remaining EXPECTED places -> NOT_RECEIVED) can be tested independently of the
+-- auto-close happy path on ТТН-2026-GATE-001.
+INSERT INTO wms_inventory.inbound_shipments (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  w.warehouse_id,
+  'ТТН-2026-GATE-002',
+  'CREATED',
+  now(),
+  now()
+FROM wms_inventory.warehouses w
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT (ttn_code) DO NOTHING;
+
+INSERT INTO wms_inventory.cargoplaces (
+  cargoplace_id,
+  shipment_id,
+  cargoplace_code,
+  status,
+  received_at_gate_at,
+  created_at,
+  updated_at
+)
+SELECT
+  gen_random_uuid(),
+  sh.shipment_id,
+  v.cargoplace_code,
+  'EXPECTED',
+  NULL,
+  now(),
+  now()
+FROM wms_inventory.inbound_shipments sh
+JOIN (
+  VALUES
+    ('CP-GATE-003'),
+    ('CP-GATE-004')
+) AS v(cargoplace_code) ON true
+WHERE sh.ttn_code = 'ТТН-2026-GATE-002'
+ON CONFLICT DO NOTHING;
+
 -- 10) Orders (customer = seeded demo customer)
 -- Test outbound flow order for e2e/manual run: ORD-2026-0501 -> SHOP-5.
 INSERT INTO wms_inventory.orders (

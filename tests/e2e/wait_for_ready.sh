@@ -76,7 +76,8 @@ wait_health_http() {
 
 wait_healthy postgres_db
 wait_healthy kafka
-wait_healthy avalanchego
+wait_healthy subnet-node1
+wait_completed subnet_init
 wait_completed contract_deploy
 wait_health_http ledger-adapter "http://localhost:8085/health"
 

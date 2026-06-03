@@ -82,7 +82,7 @@ func TestMain(m *testing.M) {
 		wmsURL:      getenv("WMS_URL", "http://localhost:8081"),
 		debeziumURL: getenv("DEBEZIUM_URL", "http://localhost:8083"),
 		dbURL:       getenv("DB_URL", "postgres://root:root@localhost:5432/wms_blockchain_db?sslmode=disable"),
-		rpcURL:      getenv("RPC_URL", "http://localhost:9650/ext/bc/C/rpc"),
+		rpcURL:      getenv("RPC_URL", ""), // empty → resolved from /shared/rpc_url.txt (dynamic subnet blockchainID)
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -131,7 +131,8 @@ func TestMain(m *testing.M) {
 				"kafka",
 				"kafka-init",
 				"debezium",
-				"avalanchego",
+				"subnet-node1",
+				"subnet-init",
 				"contract-deploy",
 				"ledger-adapter",
 				"wms_app",
@@ -171,6 +172,22 @@ func TestMain(m *testing.M) {
 			log.Fatalf("read contract address: %v", err)
 		}
 		testEnv.contractAddr = addr
+	}
+
+	// 11b. Resolve the chain RPC URL the same way. subnet-init writes the dynamic
+	// /shared/rpc_url.txt with the in-container host (subnet-node1:9650) plus the
+	// dynamic blockchainID; host-side ethclient needs localhost:9650 instead, so
+	// rewrite the scheme+host prefix while keeping the /ext/bc/<id>/rpc path.
+	if testEnv.rpcURL == "" {
+		shared, err := readSharedStateFile(ctx, "rpc_url.txt")
+		if err != nil {
+			log.Fatalf("read rpc url: %v", err)
+		}
+		idx := strings.Index(shared, "/ext/bc/")
+		if idx < 0 {
+			log.Fatalf("unexpected rpc_url.txt %q (missing /ext/bc/ path)", shared)
+		}
+		testEnv.rpcURL = "http://localhost:9650" + shared[idx:]
 	}
 
 	// 12. Run the actual test cases.

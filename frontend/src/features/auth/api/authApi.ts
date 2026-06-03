@@ -1,0 +1,16 @@
+﻿import {
+  mapAuthTokensResponse,
+  type AuthTokensResponse,
+} from '@/entities/session'
+import { publicApiClient } from '@/shared/api'
+
+import type { LoginFormValues } from '../model/schema'
+
+export async function loginRequest(credentials: LoginFormValues) {
+  const { data } = await publicApiClient.post<AuthTokensResponse>(
+    '/auth/login',
+    credentials,
+  )
+
+  return mapAuthTokensResponse(data)
+}

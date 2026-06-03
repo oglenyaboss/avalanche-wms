@@ -2,12 +2,12 @@
 
 Two layers of end-to-end coverage for the WMS → ledger pipeline:
 
-1. **Go integration suite** (primary) — drives the **full outbound flow through the real WMS HTTP API** and verifies on-chain mirroring: `WMS API → public.outbox_events → Debezium CDC → Kafka (wms.events.v1) → ledger-adapter → Avalanche C-Chain`. Plus edge-case coverage (auth, validation, FSM guards, idempotency, multi-product). Build tag `//go:build e2e`.
+1. **Go integration suite** (primary) — drives the **full outbound flow through the real WMS HTTP API** and verifies on-chain mirroring: `WMS API → public.outbox_events → Debezium CDC → Kafka (wms.events.v1) → ledger-adapter → Avalanche Subnet-EVM`. Plus edge-case coverage (auth, validation, FSM guards, idempotency, multi-product). Build tag `//go:build e2e`.
 2. **Bash adapter-level scenarios** (`scenarios/*.sh`) — publish straight to the unified Kafka topic via `kcat`, bypassing WMS/outbox/Debezium, to test the **adapter in isolation** (batching, revert/DLQ, ordering).
 
 ## Pre-requisites
 - Docker Compose v2.22+, Go 1.25+, `docker` in PATH (the Go suite uses testcontainers; `psql`/`jq` only for the bash scenarios).
-- macOS/arm64: `avalanchego` is pinned `platform: linux/amd64` and runs under emulation.
+- macOS/arm64: `subnet-node1` builds and runs natively (the subnet-evm plugin is built for `TARGETARCH`) — no QEMU emulation, faster startup.
 
 ## Go suite — quick start
 ```bash
@@ -16,10 +16,12 @@ Two layers of end-to-end coverage for the WMS → ledger pipeline:
 # .env.example if missing.
 make e2e-test-outbound
 
-# Against a long-lived stack you manage yourself (faster iteration):
+# Against a long-lived stack you manage yourself (faster iteration).
+# RPC_URL / CONTRACT_ADDR are pulled from the shared_state volume automatically,
+# so you usually don't set them. To target an external node, pass the dynamic
+# Subnet-EVM path: RPC_URL=http://localhost:9650/ext/bc/<blockchainID>/rpc CONTRACT_ADDR=<addr>
 cd tests/e2e
-E2E_USE_EXISTING_STACK=true CONTRACT_ADDR=<addr> RPC_URL=http://localhost:9650/ext/bc/C/rpc \
-  go test -tags=e2e -count=1 -v ./...
+E2E_USE_EXISTING_STACK=true go test -tags=e2e -count=1 -v ./...
 ```
 
 ### Env toggles (testmain_test.go)
@@ -30,7 +32,7 @@ E2E_USE_EXISTING_STACK=true CONTRACT_ADDR=<addr> RPC_URL=http://localhost:9650/e
 | `E2E_SKIP_STACK_RESET=true` | Skip the pre-run `down -v`. |
 | `E2E_SKIP_TESTMAIN=true` | Skip all setup (used for compile-checks: `go test -tags=e2e -run=NONE`). |
 
-The suite uses an **isolated compose project `blockchain_project_e2e`**, so it can never wipe a developer's `blockchain_project` dev stack. It brings up only `postgres, db-init, kafka, kafka-init, debezium, avalanchego, contract-deploy, ledger-adapter, wms_app` (no monitoring → no host-port clashes).
+The suite uses an **isolated compose project `blockchain_project_e2e`**, so it can never wipe a developer's `blockchain_project` dev stack. It brings up only `postgres, db-init, kafka, kafka-init, debezium, subnet-node1, subnet-init, contract-deploy, ledger-adapter, wms_app` (no monitoring → no host-port clashes).
 
 ### What the Go suite covers
 | File | Coverage |
@@ -93,9 +95,9 @@ All scenarios publish to the **single unified topic `wms.events.v1`** with an `a
 
 ## Troubleshooting
 - **`itemStatus`/`wait_for_status` timeout** — `docker logs ledger-adapter`; common causes: missing header `id`, chain revert.
-- **`chain-id mismatch`** — `cast chain-id --rpc-url $RPC_URL` must be `43112` (local Avalanche C-Chain).
+- **`chain-id mismatch`** — `cast chain-id --rpc-url $RPC_URL` must be `99999` (local Avalanche Subnet-EVM). Note the RPC path is dynamic: `/ext/bc/<blockchainID>/rpc` (blockchainID is in `shared_state:/rpc_url.txt`).
 - **`db connection refused`** — `docker compose ps` → postgres health.
-- **avalanchego "does not provide platform linux/amd64"** — stale arm64 image cached under the project name; `docker rmi <project>-avalanchego` and let it rebuild, or retag a good amd64 build.
+- **subnet-node1 won't start / serves a stale chain after a Dockerfile or genesis change** — stale image cached under the project name; `docker rmi <project>-subnet-node1` and let it rebuild (`<project>` is `blockchain_project_e2e` for this suite).
 
 ## Known limitations
 - Product bugs are encoded as `t.Skip` specs in `known_failures_test.go` and, for S2/S3/N1, as off-gate bash repros `scenarios/09-11`. The full prioritised backlog — every defect and untested path from the 2026-05-25 multi-module bug-hunt — is in [BUGHUNT.md](BUGHUNT.md). Remove a stub's skip / implement its body once the product is fixed.

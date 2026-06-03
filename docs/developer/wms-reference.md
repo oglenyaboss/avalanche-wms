@@ -37,6 +37,7 @@ wms/
     ├── assembly/                    Этап 4: аллокация + сборка/пикинг (4 эндпоинта)
     ├── shipping/                    Этап 5: отгрузка (3 эндпоинта)
     ├── dispatches/                  CRUD исходящих рейсов (3 эндпоинта, без блокчейна)
+    ├── destinations/                Справочник магазинов-получателей (1 эндпоинт, read-only)
     ├── domain/                      Общие доменные модели + enum-статусы (без логики)
     ├── ledger/                      Клиент ledger-adapter + DB-гейт CheckChainStatus
     └── platform/
@@ -77,7 +78,7 @@ PostgreSQL (*pgxpool.Pool)
 receivingRouter := r.PathPrefix("/receiving").Subrouter()
 receivingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 receivingHandler.RegisterRoutes(receivingRouter)
-// ... аналогично putaway, assembly, dispatches, shipping
+// ... аналогично putaway, assembly, dispatches, destinations, shipping
 ```
 
 `authHandler.RegisterRoutes(r)` навешивается на **корневой** роутер (без middleware на саброутере); `GET /health` — тоже на корне, без auth.
@@ -359,6 +360,7 @@ type UserRepository interface {
 | `POST /assembly/scan-shipping-buffer` | `RequireOperator` | `OPERATOR` |
 | `POST /shipping/**` (все 3) | `RequireOperator` | `OPERATOR` |
 | `GET|POST /dispatches/**` (все 3) | `RequireOperator` | `OPERATOR` |
+| `GET /destinations` | `RequireOperator` | `OPERATOR` |
 | `POST /auth/register` | — (проверка ADMIN внутри сервиса) | `ADMIN` |
 
 > [!NOTE] Единственное исключение из «OPERATOR-only» среди бизнес-эндпоинтов — `POST /assembly/allocate` (`RequireAdminOrOperator`). Это сознательное изменение ветки `refactor/issue-39-admin-operator-access` (MR #39): админ-координация без отдельного operator-аккаунта.
@@ -844,7 +846,7 @@ MoveOperatorAssembledToBuffer(ctx, operatorID, bufferBinID, destinationID uuid.U
 UpdateOrdersToAssembled(ctx, ...) (int, error)
 ```
 
-Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrInsufficientStock`, `ErrSKUNotFound`, `ErrOrderNotNew`, `ErrNoTaskForProduct`, `ErrProductNotAllocated`, `ErrInvalidInput`, `ErrBinNotShippingBuffer`, `ErrCartEmpty`.
+Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrInsufficientStock`, `ErrSKUNotFound`, `ErrOrderNotNew`, `ErrNoTaskForProduct`, `ErrProductNotAllocated`, `ErrInvalidInput`, `ErrBinNotShippingBuffer`, `ErrCartEmpty`, `ErrDestinationMismatch`.
 
 **Методы Service:**
 
@@ -853,7 +855,7 @@ Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrInsufficientS
 | `Allocate(ctx, destinationID) (*AllocateResponse, error)` | Транзакция: `NEW`-заказы destination `FOR UPDATE`; per-order `FOR UPDATE SKIP LOCKED` FIFO по `STORED`; нехватка → заказ в `InsufficientOrders`; иначе products→`ALLOCATED`, batch-insert `assembly_tasks` (`PENDING`), order→`ALLOCATED`. Частичная аллокация — НЕ ошибка. **Outbox не пишется.** |
 | `GetTasks(ctx, destinationID, operatorID, status) (*TaskResponse, error)` | Read-only. `operatorID=Nil` → без фильтра по оператору. Default `status=PENDING`. |
 | `Pick(ctx, operatorID, productID) (*PickResponse, error)` | Pre-check `CheckChainStatus(AggregatePutaway)` (вне транзакции). Транзакция: lock task+product, product должен быть `ALLOCATED`, task→`DONE` (+`operator_id`), product→`ASSEMBLED`, **insert outbox**. После commit — `CountAssembledByOperator` для `cart_size`. |
-| `ScanShippingBuffer(ctx, operatorID, bufferBinID) (*ScanShippingBufferResponse, error)` | Транзакция: bin `section=SHIPPING_BUFFER` + есть `destination_id`; `MoveOperatorAssembledToBuffer` (атомарный UPDATE...RETURNING) → `READY_TO_SHIP`; `ErrCartEmpty` если ничего; `UpdateOrdersToAssembled`. |
+| `ScanShippingBuffer(ctx, operatorID, bufferBinID) (*ScanShippingBufferResponse, error)` | Транзакция: bin `section=SHIPPING_BUFFER` + есть `destination_id`; `MoveOperatorAssembledToBuffer` (атомарный UPDATE...RETURNING, предикат `task.destination_id = bin.destination_id`) → `READY_TO_SHIP`. Если подвинуто 0 строк → `CountAssembledByOperator`: у оператора есть ASSEMBLED-товары (для другого магазина) → `ErrDestinationMismatch` (отсканирован чужой буфер, защита от mis-delivery), иначе → `ErrCartEmpty`. Затем `UpdateOrdersToAssembled`. |
 
 **Эндпоинты:**
 
@@ -1003,6 +1005,41 @@ Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrDispatchNotFo
 > - `POST` возвращает **200, не 201**; `data` обёрнут лишним ключом `{"dispatch": ...}` (в отличие от `GET /dispatches/`, где массив лежит прямо в `data`).
 > - `GET /dispatches/` при пустом результате может вернуть `"data": null` (nil-слайс), не `[]`.
 > - Своя структура `ApiError` (не `httputil.APIError`).
+
+---
+
+### 5.6 `destinations` — справочник магазинов-получателей
+
+**Назначение:** read-only справочник магазинов для UI сборки (выбор `destination_id` под `/assembly/allocate` и `/assembly/tasks`). **Без блокчейна/outbox и без транзакций** — единственный `SELECT` над `wms_inventory.destinations`. Появился потому, что магазины сидятся со случайными UUID, а эндпоинта со списком не было — UI не мог выбрать получателя.
+
+**DTO (verbatim, `handler.go`, неэкспортируемые wire-типы).** Обрезанный вид: без `created_at`/`updated_at`.
+
+| DTO | Поле | JSON-тег | Go-тип |
+|-----|------|----------|--------|
+| `destinationItem` | `DestinationID` | `destination_id` | `string` |
+| | `Code` | `code` | `string` |
+| | `Name` | `name` | `string` |
+| | `Address` | `address` | `*string` (nullable → JSON `null`, не опускается) |
+| | `WarehouseID` | `warehouse_id` | `int64` |
+| `destinationListResponse` | `Destinations` | `destinations` | `[]destinationItem` (всегда не-`nil`: `{"destinations": []}`) |
+
+**Интерфейс `destinationsRepository`** (`service.go`, 1 метод):
+
+```go
+type destinationsRepository interface {
+    GetDestinations(ctx context.Context, warehouseID int64) ([]domain.Destination, error)
+}
+```
+
+> Репозиторий **read-only**: держит только узкий `dbTX` (`Exec`/`Query`/`QueryRow`), **без** `*pgxpool.Pool` и `WithTx` — транзакций здесь нет (в отличие от пишущих модулей). SQL: `SELECT … FROM wms_inventory.destinations [WHERE warehouse_id=$1] ORDER BY code ASC LIMIT 1000` (`warehouseID <= 0` → без фильтра).
+
+**Эндпоинт:**
+
+| Маршрут | Метод | Гейт | Outbox |
+|---------|-------|------|--------|
+| `/destinations` | `GET` | `RequireOperator` | — (read-only). Query: `warehouse_id` опц. (`int64`); нечисло или `<= 0` → `400 INVALID_REQUEST` |
+
+> [!NOTE] Хендлер регистрируется и на `""`, и на `"/"` под `PathPrefix("/destinations").Subrouter()` — `gorilla/mux` не редиректит между `/destinations` и `/destinations/`, поэтому работают оба пути. Пустой результат отдаётся как `{"destinations": []}` (никогда `null`).
 
 ---
 

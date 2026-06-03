@@ -31,7 +31,7 @@ flowchart LR
 
   subgraph WMS_APP["WMS-монолит (Go, net/http + gorilla/mux)"]
     API["HTTP API / Router"]
-    MOD["Модули: receiving, putaway,\nassembly, shipping, dispatches, auth"]
+    MOD["Модули: receiving, putaway,\nassembly, shipping, dispatches, destinations, auth"]
     GATE["CheckChainStatus\n(chain-status gate)"]
   end
 
@@ -51,7 +51,7 @@ flowchart LR
     CHAIN["chain.Client\n(go-ethereum)"]
   end
 
-  subgraph CH["Avalanche C-Chain (local) / Subnet-EVM (future)"]
+  subgraph CH["Avalanche Subnet-EVM (local)"]
     SC["BatchMappingWMS\nFSM: None→Accepted→PutAway→Picked→Shipped"]
   end
 
@@ -97,7 +97,7 @@ flowchart LR
 
 | Документ | Описание |
 |----------|----------|
-| [wms-reference.md](wms-reference.md) | Референс WMS-монолита: пакеты, модули (receiving / putaway / assembly / shipping / dispatches / auth), сервисы, репозитории, запись outbox. |
+| [wms-reference.md](wms-reference.md) | Референс WMS-монолита: пакеты, модули (receiving / putaway / assembly / shipping / dispatches / destinations / auth), сервисы, репозитории, запись outbox. |
 | [ledger-adapter-reference.md](ledger-adapter-reference.md) | Референс Ledger Adapter: consumer, Flusher, `chain.Client`, конвертация UUID→uint256, reconcile-loop, DLQ. |
 | [smart-contract-reference.md](smart-contract-reference.md) | Референс `BatchMappingWMS`: FSM, batch- и single-функции, идемпотентность, события `ItemTransition` / `ItemTransitionFailed`. |
 | [operations.md](operations.md) | Эксплуатация: docker-compose, переменные окружения, инициализация БД/Kafka, регистрация Debezium-коннектора, мониторинг, CI. |
@@ -138,7 +138,7 @@ flowchart LR
 | Очереди | Apache Kafka 3.7 (KRaft) | Прямой топик `wms.events.v1` (1 партиция), DLQ `wms.dlq.v1` |
 | Мост в блокчейн | Ledger Adapter (Go) | Kafka consumer + Flusher + reconcile-loop |
 | EVM-клиент | `go-ethereum` (`ethclient`, `abi`) | Подпись tx, батчинг, ожидание квитанций |
-| Блокчейн | Avalanche C-Chain (EVM) | Локально — C-Chain узел `avalanchego` (`network-id=local`, профиль `test`); пермиссионные Allow Lists ещё не реализованы — см. `deploy/avalanche/README.md` |
+| Блокчейн | Avalanche Subnet-EVM | Локально — узел `subnet-node1` (avalanchego v1.14.0 + плагин subnet-evm, кастомный сабнет chainID `99999`, профиль `test`); пермиссионные Allow Lists ещё не реализованы — см. `deploy/subnet/README.md` |
 | Контракт | `BatchMappingWMS` (Solidity `^0.8.0`, solc 0.8.23) | Foundry, EVM target `paris`, optimizer 200 runs |
 | Инфраструктура | Docker Compose | WMS, ledger-adapter, postgres, kafka, debezium, мониторинг |
 | Мониторинг | Prometheus + Grafana + exporters | postgres-exporter, JMX-экспортеры Kafka/Debezium |

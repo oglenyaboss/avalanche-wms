@@ -238,6 +238,8 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusBadRequest, "BIN_NOT_SHIPPING_BUFFER", "Ячейка не является буфером отгрузки"
 	case errors.Is(err, ErrCartEmpty):
 		return http.StatusConflict, "CART_EMPTY", "Корзина оператора пуста"
+	case errors.Is(err, ErrDestinationMismatch):
+		return http.StatusConflict, "DESTINATION_MISMATCH", "Буфер отгрузки другого магазина: собранные товары не для этого пункта назначения"
 	default:
 		log.Printf("assembly: unmapped service error -> 500: %v", err)
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"

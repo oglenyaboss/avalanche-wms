@@ -1,0 +1,17 @@
+{
+  "network-id": 1337,
+  "genesis-file": "/genesis/network-genesis.json",
+  "sybil-protection-enabled": false,
+  "http-host": "0.0.0.0",
+  "http-port": 9650,
+  "http-allowed-hosts": "*",
+  "staking-port": 9651,
+  "public-ip": "127.0.0.1",
+  "staking-tls-cert-file": "/staking/staker.crt",
+  "staking-tls-key-file": "/staking/staker.key",
+  "staking-signer-key-file": "/staking/signer.key",
+  "plugin-dir": "/plugins",
+  "track-subnets": "2W9boARgCWL25z6pMFNtkCfNA5v28VGg9PmBgUJfuKndEdhrvw",
+  "data-dir": "/data",
+  "log-level": "info"
+}

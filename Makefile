@@ -55,7 +55,9 @@ lint: lint-wms lint-ledger ## Lint all Go code
 test: test-wms test-ledger ## Run all tests
 
 e2e-test-outbound: ## Run full outbound WMS API -> DB -> Kafka -> chain e2e test
-	cd tests/e2e && RPC_URL=http://localhost:9650/ext/bc/C/rpc go test -tags=e2e -count=1 -timeout=15m ./...
+	# RPC_URL не задаём: TestMain резолвит динамический Subnet-EVM RPC
+	# (/ext/bc/<blockchainID>/rpc) из тома shared_state.
+	cd tests/e2e && go test -tags=e2e -count=1 -timeout=15m ./...
 
 tidy: tidy-wms tidy-ledger ## Tidy all go.mod
 

@@ -206,11 +206,11 @@ Ledger Adapter автоматически батчит N последовате�
 | `/allocate`: заказ уже в статусе != `NEW` | `ORDER_NOT_NEW` |
 | `/pick`: `product.status != ALLOCATED` | `PRODUCT_NOT_ALLOCATED` |
 | `/pick`: нет `PENDING` / `IN_PROGRESS` assembly_task для product | `NO_TASK_FOR_PRODUCT` |
-| `/scan-shipping-buffer`: cart оператора пуст | `CART_EMPTY` |
+| `/scan-shipping-buffer`: оператор не несёт ASSEMBLED товаров (ничего не подобрано / уже размещено) | `CART_EMPTY` |
 | `/scan-shipping-buffer`: `bin.section != 'SHIPPING_BUFFER'` | `BIN_NOT_SHIPPING_BUFFER` |
-| `/scan-shipping-buffer`: в cart есть товар с destination != `bin.destination_id` | `DESTINATION_MISMATCH` |
+| `/scan-shipping-buffer`: оператор несёт ASSEMBLED товары, но для другого `destination_id`, чем у буфера | `DESTINATION_MISMATCH` |
 
-`DESTINATION_MISMATCH` защищает от ситуации «сборщик собирал для магазина №5, а сканирует буфер магазина №7». Ни один товар из cart не применяется, оператору сообщается о проблеме.
+`DESTINATION_MISMATCH` защищает от ситуации «сборщик собирал для магазина №5, а сканирует буфер магазина №7». Механика: `MoveOperatorAssembledToBuffer` двигает только товары с `assembly_task.destination_id = bin.destination_id`, поэтому при чужом буфере перемещается 0 строк. Сервис различает два случая нулевого перемещения через `CountAssembledByOperator`: если у оператора **есть** ASSEMBLED товары (для другого магазина) → `DESTINATION_MISMATCH`; если ASSEMBLED товаров нет вовсе → `CART_EMPTY`. Ни один товар чужого магазина не попадает в буфер (защита от mis-delivery).
 
 ## Связь с соседними этапами
 

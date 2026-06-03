@@ -26,6 +26,21 @@ func TestMapServiceError(t *testing.T) {
 			wantStatus: http.StatusConflict,
 			wantCode:   "ORDER_NOT_NEW",
 		},
+		{
+			name:       "ErrCartEmpty maps to 409 CART_EMPTY",
+			err:        ErrCartEmpty,
+			wantStatus: http.StatusConflict,
+			wantCode:   "CART_EMPTY",
+		},
+		{
+			// Assembly wrong-buffer guard: scanning another store's shipping buffer
+			// while carrying picked goods must surface as a distinct, actionable
+			// 409 DESTINATION_MISMATCH — not a misleading CART_EMPTY.
+			name:       "ErrDestinationMismatch maps to 409 DESTINATION_MISMATCH",
+			err:        ErrDestinationMismatch,
+			wantStatus: http.StatusConflict,
+			wantCode:   "DESTINATION_MISMATCH",
+		},
 	}
 
 	for _, tt := range tests {
