@@ -11,7 +11,7 @@
 - Интеграция с блокчейном: [blockchain-mapping](../integration/blockchain-mapping.md), [data-contract](../integration/data-contract.md), [batch-mapping-approach](../integration/batch-mapping-approach.md)
 - Справочник по модулям/эндпоинтам WMS: [wms-reference](./wms-reference.md)
 - Конвенции и процесс ревью: [CONVENTIONS](../CONVENTIONS.md), [MR_GUIDE](../MR_GUIDE.md)
-- Локальный Avalanche-стек: [deploy/avalanche/README.md](../../deploy/avalanche/README.md)
+- Локальный Avalanche-стек: [deploy/subnet/README.md](../../deploy/subnet/README.md)
 - E2E-тесты: [tests/e2e/README.md](../../tests/e2e/README.md)
 
 ---
@@ -28,7 +28,7 @@
 | `make` | любой | удобные таргеты |
 | `pre-commit` | любой | локальные хуки (`make hooks-install`) |
 
-> **macOS / Apple Silicon (arm64):** `avalanchego` запинен на `platform: linux/amd64` и работает под эмуляцией QEMU. Старт занимает заметно дольше (заложены `start_period: 30s` + 30 ретраев ≈ 5 минут).
+> **macOS / Apple Silicon (arm64):** `subnet-node1` собирается и работает **нативно** под текущую архитектуру (плагин subnet-evm тянется под `TARGETARCH`) — эмуляции QEMU больше нет, старт заметно быстрее. На первый bootstrap всё равно заложен запас (`start_period: 30s` + 30 ретраев), пока узел поднимется и `subnet-init` создаст цепочку.
 
 ### 1.2. Файл `.env`
 
@@ -67,7 +67,7 @@ openssl rand -hex 32
 make up                 # = docker compose up -d
 ```
 
-Поднимает app-tier + инфраструктуру + мониторинг, **но НЕ поднимает** `avalanchego` и `contract-deploy` — они под `profile: test`. `ledger-adapter` запустится (его `depends_on` на `contract-deploy` помечен `required: false`), но без живого RPC/контракта он-чейн часть работать не будет.
+Поднимает app-tier + инфраструктуру + мониторинг, **но НЕ поднимает** `subnet-node1`, `subnet-init` и `contract-deploy` — они под `profile: test`. `ledger-adapter` запустится (его `depends_on` на `contract-deploy` помечен `required: false`), но без живого RPC/контракта он-чейн часть работать не будет.
 
 **Режим B — полный стек с локальным блокчейном (для реального end-to-end):**
 
@@ -75,7 +75,7 @@ make up                 # = docker compose up -d
 docker compose --profile test up -d
 ```
 
-Дополнительно поднимает `avalanchego` (C-Chain) и one-shot `contract-deploy`, который деплоит `BatchMappingWMS` и пишет `rpc_url.txt` / `contract_addr.txt` / `deployer_key.txt` в том `shared_state`. Подробности — [deploy/avalanche/README.md](../../deploy/avalanche/README.md).
+Дополнительно поднимает узел `subnet-node1` (Avalanche Subnet-EVM), one-shot `subnet-init` (создаёт сабнет + цепочку через Go wallet SDK и пишет динамический `rpc_url.txt`) и one-shot `contract-deploy`, который деплоит `BatchMappingWMS` и пишет `rpc_url.txt` / `contract_addr.txt` / `deployer_key.txt` в том `shared_state`. Подробности — [deploy/subnet/README.md](../../deploy/subnet/README.md).
 
 **Обязательный шаг после старта — регистрация Debezium-коннектора.** Коннектор **не регистрируется автоматически** (нет init-скрипта/`depends_on`, у Debezium нет healthcheck). Без него CDC-конвейер мёртв:
 
@@ -91,7 +91,7 @@ make connector-status         # проверка статуса outbox-connector
 cp .env.example .env
 # отредактируйте JWT_SECRET!
 docker compose --profile test up -d
-make ps                        # дождаться healthy у postgres/kafka/avalanchego
+make ps                        # дождаться healthy у postgres/kafka/subnet-node1
 make register-connector        # после готовности debezium
 make connector-status
 ```
@@ -120,8 +120,8 @@ curl -s localhost:8085/health  # health ledger-adapter
 | `9999` | `kafka` | Kafka JMX |
 | `9012` | `debezium` | Debezium Connect JMX |
 | `9187` | `postgres-exporter` | метрики Postgres |
-| `127.0.0.1:9650` | `avalanchego` (`profile: test`) | Avalanche C-Chain RPC (только loopback) |
-| `127.0.0.1:9651` | `avalanchego` (`profile: test`) | Avalanche staking (только loopback) |
+| `127.0.0.1:9650` | `subnet-node1` (`profile: test`) | Avalanche Subnet-EVM RPC, динамический путь `/ext/bc/<blockchainID>/rpc` (только loopback) |
+| `127.0.0.1:9651` | `subnet-node1` (`profile: test`) | Avalanche staking (только loopback) |
 
 > **Порты `8080`/`8081` легко перепутать:** `8080` — это `kafka-ui`, а WMS API наружу — на `8081`.
 >
@@ -133,7 +133,7 @@ curl -s localhost:8085/health  # health ledger-adapter
 
 ## 2. Инфраструктура `docker-compose`
 
-Один bridge-network `app_network`; именованные тома `postgres_data`, `kafka_data`, `avalanche_data`, `shared_state`.
+Один bridge-network `app_network`; именованные тома `postgres_data`, `kafka_data`, `subnet_data`, `shared_state`.
 
 | Сервис | Образ / сборка | Порты (host:container) | depends_on | healthcheck |
 |--------|----------------|------------------------|-----------|-------------|
@@ -150,8 +150,9 @@ curl -s localhost:8085/health  # health ledger-adapter
 | `kafka-jmx-exporter` | `sscaling/jmx-prometheus-exporter` | `5556` (без host-маппинга) | — | — |
 | `debezium-jmx-exporter` | `sscaling/jmx-prometheus-exporter` | `5556` (без host-маппинга) | — | — |
 | `ledger-adapter` | build `./ledger-adapter/Dockerfile` | `8085:8085` | `db-init` (completed), `kafka-init` (completed), `contract-deploy` (completed, `required: false`) | **нет** (distroless — нет `curl`/`wget`/`nc`) |
-| `avalanchego` *(test)* | build `./deploy/avalanche/Dockerfile` (v1.12.2, amd64) | `127.0.0.1:9650`, `127.0.0.1:9651` | — | POST `eth_chainId` на `/ext/bc/C/rpc` (10s/30 ретраев/start 30s) |
-| `contract-deploy` *(test)* | build `./deploy/contracts/Dockerfile` (foundry:stable, one-shot) | — | `avalanchego` (healthy) | — |
+| `subnet-node1` *(test)* | build `./deploy/subnet/subnet-node` (avalanchego v1.14.0 + плагин subnet-evm v0.8.0, нативная арх.) | `127.0.0.1:9650`, `127.0.0.1:9651` | — | `curl /ext/health` + grep `"healthy": true` (10s/30 ретраев/start 30s) |
+| `subnet-init` *(test)* | build `./deploy/subnet/subnet-init` (Go wallet SDK, one-shot) | — | `subnet-node1` (healthy) | — |
+| `contract-deploy` *(test)* | build `./deploy/contracts/Dockerfile` (foundry:stable, one-shot) | — | `subnet-init` (completed) | — |
 
 Существенные детали:
 
@@ -357,14 +358,13 @@ URL: `http://localhost:3000`, креды `admin` / `admin`.
 
 ## 7. Avalanche subnet (локальный блокчейн)
 
-Профиль `test` поднимает single-node `avalanchego` v1.12.2 в `network-id=local` и деплоит `BatchMappingWMS.sol` на встроенный **C-Chain** (chainID `43112`, RPC-путь `/ext/bc/C/rpc`). chainID `43112` — встроенная константа AvalancheGo для `network-id=local`; в `node-config.json` она не задаётся (искать её там бесполезно). Полная документация, обоснование «C-Chain, а не custom subnet», prefunded-ключ ewoq и троублшутинг — в [deploy/avalanche/README.md](../../deploy/avalanche/README.md).
+Профиль `test` поднимает single-node `avalanchego` v1.14.0 (`subnet-node1`) с плагином subnet-evm, через one-shot `subnet-init` создаёт кастомный сабнет + цепочку (Go wallet SDK, локальная подпись ключом ewoq) и деплоит `BatchMappingWMS.sol` на эту цепочку **Subnet-EVM** (chainID `99999`, динамический RPC-путь `/ext/bc/<blockchainID>/rpc`). `blockchainID` детерминируется на bootstrap'е и пишется в `shared_state` (`rpc_url.txt`). Полная документация, обоснование «Subnet-EVM вместо встроенного C-Chain», prefunded-ключ ewoq и троублшутинг — в [deploy/subnet/README.md](../../deploy/subnet/README.md).
 
 Быстрый старт:
 
 ```bash
-# только блокчейн-часть
-docker compose --profile test up -d avalanchego
-docker compose --profile test up contract-deploy      # one-shot, exit 0 после деплоя
+# только блокчейн-часть (узел + bootstrap сабнета + деплой контракта)
+docker compose --profile test up -d subnet-node1 subnet-init contract-deploy
 
 # проверка артефактов деплоя
 docker run --rm -v blockchain_project_shared_state:/s alpine cat /s/rpc_url.txt
@@ -398,18 +398,22 @@ make test-ledger        # cd ledger-adapter && go test -race -count=1 ./...
 ### 8.2. E2E-тесты
 
 Go-сьют гоняет **полный outbound-флоу через реальный WMS HTTP API** и проверяет он-чейн зеркалирование:
-`WMS API → public.outbox_events → Debezium CDC → Kafka (wms.events.v1) → ledger-adapter → Avalanche C-Chain`.
+`WMS API → public.outbox_events → Debezium CDC → Kafka (wms.events.v1) → ledger-adapter → Avalanche Subnet-EVM`.
 Build-tag `//go:build e2e`. Детали, перечень покрытия и env-тогглы — в [tests/e2e/README.md](../../tests/e2e/README.md).
 
 ```bash
 # изолированный стенд: поднять только сервисы под тестом, прогнать, снести
 make e2e-test-outbound
-# = cd tests/e2e && RPC_URL=http://localhost:9650/ext/bc/C/rpc go test -tags=e2e -count=1 -timeout=15m ./...
+# = cd tests/e2e && go test -tags=e2e -count=1 -timeout=15m ./...
+# RPC_URL не задаём: сьют, поднимая стек, подтягивает реальные RPC_URL/CONTRACT_ADDR из
+# тома shared_state (динамический /ext/bc/<blockchainID>/rpc). Задавать вручную нужно
+# только для прогона против внешнего узла — и тогда путь динамический.
 
-# против уже поднятого стека (быстрее итерации)
+# против уже поднятого стека (быстрее итерации) — RPC_URL/CONTRACT_ADDR сьют берёт
+# из тома shared_state автоматически; задавать вручную нужно только для внешнего узла,
+# и тогда путь — динамический /ext/bc/<blockchainID>/rpc
 cd tests/e2e
-E2E_USE_EXISTING_STACK=true CONTRACT_ADDR=<addr> RPC_URL=http://localhost:9650/ext/bc/C/rpc \
-  go test -tags=e2e -count=1 -v ./...
+E2E_USE_EXISTING_STACK=true go test -tags=e2e -count=1 -v ./...
 ```
 
 Тогглы (`testmain_test.go`): `E2E_USE_EXISTING_STACK`, `E2E_KEEP_STACK`, `E2E_SKIP_STACK_RESET`, `E2E_SKIP_TESTMAIN`.
@@ -419,7 +423,7 @@ E2E_USE_EXISTING_STACK=true CONTRACT_ADDR=<addr> RPC_URL=http://localhost:9650/e
 - **Деструктивный reset.** Перед прогоном сьют по умолчанию делает `down -v` своего стека. Сьют использует **изолированный compose-project `blockchain_project_e2e`**, поэтому он не трогает ваш dev-стек `blockchain_project`. Чтобы пропустить пре-ран reset — `E2E_SKIP_STACK_RESET=true`.
 - **Коллизия по fixed-name контейнеру.** Если остался осиротевший контейнер с фиксированным именем (напр. `ledger-adapter`), старт падает с `container name "/ledger-adapter" already in use`. Лечится `docker compose down -v --remove-orphans` перед перезапуском (падает быстро, ~1.4s — выглядит как баг кода, но это инфраструктура).
 - **Кеш образов.** testcontainers переиспользует кешированные образы `wms_app`/`ledger-adapter`. После правок кода **пересоберите образы** (`docker compose build` или `make build`), иначе протестируете старый код.
-- **macOS/arm64:** `avalanchego` под эмуляцией — закладывайте время на старт.
+- **macOS/arm64:** `subnet-node1` работает нативно (без эмуляции QEMU) — старт быстрее прежнего C-Chain-узла, но на первый bootstrap (поднятие узла + создание сабнета/цепочки в `subnet-init`) всё равно закладывайте запас.
 
 ---
 

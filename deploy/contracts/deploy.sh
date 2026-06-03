@@ -3,9 +3,23 @@ set -euo pipefail
 
 # ewoq — канонический prefunded ключ local avalanchego (P/X/C chains)
 EWOQ_KEY='0x56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027'
-RPC_URL='http://avalanchego:9650/ext/bc/C/rpc'
 
-echo "==> Waiting for C-Chain RPC at $RPC_URL"
+# RPC_URL — динамический эндпоинт Subnet-EVM (/ext/bc/<blockchainID>/rpc), который
+# subnet-init пишет в shared-том. Ждём появления файла, затем используем его.
+RPC_FILE=/shared/rpc_url.txt
+echo "==> Waiting for subnet RPC URL at $RPC_FILE (written by subnet-init)"
+RPC_URL=""
+for i in $(seq 1 60); do
+  if [ -s "$RPC_FILE" ]; then
+    RPC_URL=$(tr -d '[:space:]' < "$RPC_FILE")
+    [ -n "$RPC_URL" ] && break
+  fi
+  echo "  waiting for rpc_url.txt ($i/60)..."
+  sleep 5
+done
+[ -n "$RPC_URL" ] || { echo "FATAL: $RPC_FILE not populated after 5 min"; exit 1; }
+
+echo "==> Waiting for Subnet-EVM RPC at $RPC_URL"
 READY=false
 for i in $(seq 1 60); do
   if curl -sf -X POST -H 'Content-Type: application/json' \
@@ -17,10 +31,10 @@ for i in $(seq 1 60); do
   echo "  waiting ($i/60)..."
   sleep 5
 done
-[ "$READY" = "true" ] || { echo "FATAL: C-Chain RPC not ready after 5 min"; exit 1; }
+[ "$READY" = "true" ] || { echo "FATAL: Subnet-EVM RPC not ready after 5 min"; exit 1; }
 
 CHAIN_ID=$(cast chain-id --rpc-url "$RPC_URL")
-echo "==> C-Chain ready, chainID=$CHAIN_ID"
+echo "==> Subnet-EVM ready, chainID=$CHAIN_ID"
 
 # Idempotency: skip deploy if shared/contract_addr.txt points to a live contract.
 # Транзиентная RPC-ошибка при `cast code` НЕ должна приводить к слепому redeploy —

@@ -3,12 +3,17 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^deploy/subnet/staking/
       - id: end-of-file-fixer
+        exclude: ^deploy/subnet/staking/   # signer.key — бинарный BLS-ключ, newline его портит
       - id: check-yaml
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ['--maxkb=500']
+      # deploy/subnet/staking/ — публичные well-known staking-креды локальной сети
+      # Avalanche (test-only, см. deploy/subnet/staking/README.md); это не секреты.
       - id: detect-private-key
+        exclude: ^deploy/subnet/staking/
 
   # ── Go: форматирование ──────────────────────────────
   - repo: https://github.com/dnephin/pre-commit-golang

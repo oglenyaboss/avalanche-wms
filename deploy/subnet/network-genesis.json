@@ -1,0 +1,50 @@
+{
+  "networkID": 1337,
+  "allocations": [
+    {
+      "ethAddr": "0x0000000000000000000000000000000000000000",
+      "avaxAddr": "X-custom17vyx67luxklpc6xmve96nnnp5grqzf4sh3jctv",
+      "initialAmount": 0,
+      "unlockSchedule": [
+        {
+          "amount": 1000000000000000,
+          "locktime": 1781027368
+        }
+      ]
+    },
+    {
+      "ethAddr": "0x0000000000000000000000000000000000000000",
+      "avaxAddr": "X-custom18jma8ppw3nhx5r4ap8clazz0dps7rv5u9xde7p",
+      "initialAmount": 30000000000000000,
+      "unlockSchedule": [
+        {
+          "amount": 20000000000000000,
+          "locktime": 0
+        },
+        {
+          "amount": 1000000000000000,
+          "locktime": 1781027368
+        }
+      ]
+    }
+  ],
+  "startTime": 1780422568,
+  "initialStakeDuration": 31536000,
+  "initialStakeDurationOffset": 5400,
+  "initialStakedFunds": [
+    "X-custom17vyx67luxklpc6xmve96nnnp5grqzf4sh3jctv"
+  ],
+  "initialStakers": [
+    {
+      "nodeID": "NodeID-7Xhw2mDxuDS44j42TCB6U5579esbSt3Lg",
+      "rewardAddress": "X-custom1t73fa4p4dypa4s3kgufuvr6hmprjclw6yuagv7",
+      "delegationFee": 10000,
+      "signer": {
+        "publicKey": "0xb3ebbe748a1f06d19ee25d4e345ba8d6b5a426498a140c2519b518e3e6224abd7895075892f361acf24c10af968bc7de",
+        "proofOfPossession": "0xa2569a137e65d3a507c4f1f7ffac74ec05916ba44dfbbb84d42c2736a2bc1e8be14038d3aeeeac7c78e19ecdde69d830051959f22559641a3f9e42377d7f64580acdc383c5c9e22f7f1114712a543c6997d6dc59c88555423497d9fff41fa79a"
+      }
+    }
+  ],
+  "cChainGenesis": "{\"config\":{\"chainId\":1337},\"nonce\":\"0x0\",\"timestamp\":\"0x5fcb13d0\",\"extraData\":\"0x\",\"gasLimit\":\"0x5f5e100\",\"difficulty\":\"0x0\",\"mixHash\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"coinbase\":\"0x0000000000000000000000000000000000000000\",\"alloc\":{\"8db97c7cece249c2b98bdc0226cc4c2a57bf52fc\":{\"balance\":\"0xc9f2c9cd04674edea40000000\"}},\"number\":\"0x0\",\"gasUsed\":\"0x0\",\"parentHash\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"baseFeePerGas\":null,\"excessBlobGas\":null,\"blobGasUsed\":null}",
+  "message": "hello avalanche!"
+}
