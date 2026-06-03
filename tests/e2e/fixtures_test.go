@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -155,6 +156,12 @@ func newOutboundFixture(t *testing.T, ctx context.Context, env *env) e2eFixture 
 	// FKs; an FK error just means a downstream row already removed it, so log and
 	// continue rather than fail the test on cleanup.
 	t.Cleanup(func() {
+		// E2E_KEEP_FIXTURE leaves the per-run rows in place after the test, so the
+		// shipped product (with its committed on-chain events) can be inspected
+		// manually — e.g. in the traceability UI. Mirrors E2E_KEEP_STACK.
+		if os.Getenv("E2E_KEEP_FIXTURE") == "true" {
+			return
+		}
 		cleanupCtx := context.Background()
 		// Delete children before parents (FK order). The flow creates rows in
 		// wms_ops (putaways/assembly_tasks/shippings/receiving_table/receiving_gate)

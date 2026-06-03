@@ -1,13 +1,6 @@
-import type { ChainStatus } from '../model/types'
-
-// Semantic accent — used ONLY for on-chain event state. These resolve to the
-// --status-* CSS custom properties (light/dark aware) defined in app/index.css.
-export const STATUS_COLOR: Record<ChainStatus, string> = {
-  committed: 'var(--status-committed)',
-  sent: 'var(--status-sent)',
-  pending: 'var(--status-pending)',
-  failed: 'var(--status-failed)',
-}
+// On-chain status colours now live in shared/lib (used by both analytics and
+// traceability). Re-exported here so analytics components keep their import path.
+export { STATUS_COLOR } from '@/shared/lib'
 
 // Non-semantic volume/stage series use the monochrome --chart-* ramp so colour
 // stays reserved for chain status alone.

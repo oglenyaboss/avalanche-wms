@@ -143,6 +143,11 @@ func (c *Client) TransactionReceipt(ctx context.Context, h common.Hash) (*types.
 	return c.eth.TransactionReceipt(ctx, h)
 }
 
+// BlockNumber returns the current chain head, used to compute tx confirmations.
+func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
+	return c.eth.BlockNumber(ctx)
+}
+
 func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (common.Hash, error) {
 	data, err := c.parsedABI.Pack(method, args...)
 	if err != nil {

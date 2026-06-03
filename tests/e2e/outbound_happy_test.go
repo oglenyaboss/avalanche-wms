@@ -206,4 +206,8 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 
 	// 11. Verify the on-chain FSM stage ordering using transaction receipts.
 	requireOnchainFSMOrdering(t, ctx, env, stageEventIDs)
+
+	// 12. Product traceability: full lifecycle timeline (both lookup modes), recent
+	//     list, and a live on-chain proof for the shipped product.
+	assertProductTraceability(t, env, token, scannedProduct.ProductID, fixture.QRCode)
 }

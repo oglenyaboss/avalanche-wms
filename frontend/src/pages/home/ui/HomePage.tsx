@@ -5,6 +5,7 @@ import {
   InboxIcon,
   Layers01Icon,
   PackageProcessIcon,
+  Route01Icon,
   TruckIcon,
 } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -56,6 +57,12 @@ const quickActions: QuickAction[] = [
     description: 'Метрики склада и состояние блокчейн-аудита',
     to: routes.analytics,
     icon: Analytics01Icon,
+  },
+  {
+    label: 'Трассировка',
+    description: 'История товара от приёмки до отгрузки с проверкой в сети',
+    to: routes.trace,
+    icon: Route01Icon,
   },
 ]
 

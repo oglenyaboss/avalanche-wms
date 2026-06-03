@@ -7,5 +7,6 @@ export const routes = {
   assembly: '/assembly',
   shipping: '/shipping',
   analytics: '/analytics',
+  trace: '/trace',
   notFound: '*',
 } as const
