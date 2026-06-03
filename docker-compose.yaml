@@ -305,6 +305,9 @@ services:
       # the receipt poll + reconcile cadence (N1/11) by exporting these before a
       # `docker compose up --force-recreate ledger-adapter`. Defaults = production values.
       BATCH_TIMEOUT: ${BATCH_TIMEOUT:-100ms}
+      # PIPELINE_WINDOW — сколько batch-tx держать in-flight одновременно (flusher
+      # pipeline). 1 = serial (старый потолок ≈900/s); 3 = дефолт. Tunable для бенча.
+      PIPELINE_WINDOW: ${PIPELINE_WINDOW:-3}
       RECEIPT_POLL_TIMEOUT: ${RECEIPT_POLL_TIMEOUT:-30s}
       RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-30s}
       RECONCILE_MIN_AGE: ${RECONCILE_MIN_AGE:-1m}
