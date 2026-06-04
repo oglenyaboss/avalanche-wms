@@ -11,6 +11,8 @@ services:
       POSTGRES_USER: ${DB_USER:-root}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-root}
       POSTGRES_DB: ${DB_NAME:-wms_blockchain_db}
+      # pgx pool size. Default 10 = historical production value; raise for load benches.
+      WMS_DB_MAX_CONNS: ${WMS_DB_MAX_CONNS:-10}
       KAFKA_BROKER: kafka:9092
       LEDGER_ADAPTER_URL: http://ledger-adapter:8085
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env or environment}

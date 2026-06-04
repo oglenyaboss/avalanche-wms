@@ -129,7 +129,7 @@ func TestPick_ChainEventRejected(t *testing.T) {
 	}
 }
 
-func (m *mockAssemblyRepo) GetOrdersByDestinationForUpdate(_ context.Context, _ uuid.UUID) ([]domain.Order, error) {
+func (m *mockAssemblyRepo) GetOrdersByDestinationForUpdate(_ context.Context, _ uuid.UUID, _ int) ([]domain.Order, error) {
 	if m.ordersErr != nil {
 		return nil, m.ordersErr
 	}

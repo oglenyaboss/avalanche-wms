@@ -5,9 +5,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// defaultDBMaxConns mirrors the historical hardcoded pgx pool size. Kept as the
+// fallback so production behavior is unchanged unless WMS_DB_MAX_CONNS is set.
+const defaultDBMaxConns = 10
 
 const minJWTSecretLength = 32
 
@@ -26,6 +31,7 @@ type Config struct {
 	DBUser           string
 	DBPassword       string
 	DBName           string
+	DBMaxConns       int
 	KafkaBroker      string
 	LedgerAdapterURL string
 	JWTSecret        string
@@ -46,6 +52,7 @@ func Load() (*Config, error) {
 		DBUser:           getEnv("POSTGRES_USER", "root"),
 		DBPassword:       getEnv("POSTGRES_PASSWORD", "root"),
 		DBName:           getEnv("POSTGRES_DB", "wms_blockchain_db"),
+		DBMaxConns:       getIntEnv("WMS_DB_MAX_CONNS", defaultDBMaxConns),
 		KafkaBroker:      getEnv("KAFKA_BROKER", "localhost:9092"),
 		LedgerAdapterURL: getEnv("LEDGER_ADAPTER_URL", ""),
 		JWTSecret:        jwtSecret,
@@ -59,6 +66,23 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getIntEnv retrieves a positive integer from the environment variable specified by key.
+// Non-numeric or non-positive values fall back to the default with a warning.
+func getIntEnv(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		log.Printf("WARNING: invalid %s=%q, using default %d", key, raw, fallback)
+		return fallback
+	}
+
+	return parsed
 }
 
 // getDurationEnv retrieves a duration from the environment variable specified by key.
