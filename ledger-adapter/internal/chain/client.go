@@ -50,6 +50,19 @@ const (
 	gasPriceHeadroomDen = 1
 )
 
+// gasLimitHeadroomNum/Den масштабируют estimateGas вверх. Под пайплайном tx
+// оценивается, пока prior-stage transition того же товара ещё in-flight (не в
+// блоке): estimateGas видит item в раннем статусе → считает по дешёвому
+// skip-пути контракта (ItemTransitionFailed), а к моменту майнинга item уже
+// Accepted/PutAway → реальный SSTORE-путь дороже → OutOfGas без запаса
+// (full-FSM smoke: ~28k skip vs ~32k real putaway → 807/2000 OOG). ×3/2
+// покрывает разрыв с маржой, не раздувая лимит чрезмерно (упаковка блока).
+// Серийный flusher этого не ловил — prior tx домайнивался до estimate.
+const (
+	gasLimitHeadroomNum = 3
+	gasLimitHeadroomDen = 2
+)
+
 // ethBackend — подмножество *ethclient.Client, которое использует Client.
 // Вынесено в интерфейс, чтобы в unit-тестах инжектить fake (реальный
 // *ethclient.Client удовлетворяет интерфейсу).
@@ -222,6 +235,9 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 		}
 		return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainTransient, method, err)
 	}
+	// Запас на gas-лимит против skip→real разрыва под пайплайном (см.
+	// gasLimitHeadroomNum/Den) — иначе stale skip-оценка → OutOfGas-реверт.
+	gasLimit = gasLimit * gasLimitHeadroomNum / gasLimitHeadroomDen
 
 	chainID, err := c.eth.ChainID(ctx)
 	if err != nil {

@@ -163,6 +163,30 @@ func TestClient_GasPriceHeadroom(t *testing.T) {
 	}
 }
 
+// TestClient_GasLimitHeadroom: gasLimit подписанной tx = estimateGas × headroom.
+// Под пайплайном estimateGas может прийтись на дешёвый skip-путь контракта
+// (prior-stage transition того же товара ещё in-flight, не в блоке), а реальное
+// исполнение — на более дорогой путь (item уже Accepted/PutAway → реальный
+// SSTORE). Запас на gas-лимит предотвращает OutOfGas-реверты под смешанной
+// нагрузкой full-FSM. Серийный flusher этого не ловил (prior tx домайнивался
+// до estimate).
+func TestClient_GasLimitHeadroom(t *testing.T) {
+	eth := &fakeEthBackend{nonce: 0, estimateGas: 1000}
+	c := newTestClient(t, eth)
+	args := []*big.Int{big.NewInt(1)}
+
+	if _, err := c.sendMethod(context.Background(), "batchPutAway", args, args); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 sent tx, got %d", len(eth.sentTxs))
+	}
+	want := uint64(1000) * gasLimitHeadroomNum / gasLimitHeadroomDen
+	if got := eth.sentTxs[0].Gas(); got != want {
+		t.Errorf("gas limit headroom: want %d (1000×%d/%d), got %d", want, gasLimitHeadroomNum, gasLimitHeadroomDen, got)
+	}
+}
+
 func TestClient_ReseedNonce(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 5}
 	c := newTestClient(t, eth)
