@@ -31,6 +31,45 @@ SELECT
 ON CONFLICT (username) DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- 0.1 Пул операторов stress-op-01 … stress-op-30 для теста 07-full-flow.js.
+--     Каждый k6-VU логинится СВОИМ оператором: иначе «корзина сборки»
+--     (assembly_tasks.operator_id; scan-shipping-buffer WHERE operator_id=$1)
+--     делится между конкурентными VU и первый scan-shipping-buffer забирает
+--     чужие товары — товары застревают в ASSEMBLED, отгрузки не происходит.
+--     Пароль у всех — 'stressop'.
+-- ────────────────────────────────────────────────────────────────────────────
+INSERT INTO public.users (user_id, username, password_hash, role, is_active, created_at, updated_at)
+SELECT
+  gen_random_uuid(),
+  'stress-op-' || LPAD(gs.i::text, 2, '0'),
+  crypt('stressop', gen_salt('bf')),
+  'OPERATOR',
+  true,
+  now(),
+  now()
+FROM generate_series(1, 30) AS gs(i)
+ON CONFLICT (username) DO NOTHING;
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- 0.2 Выделенный SKU + штрихкод для теста 07-full-flow (STANDALONE).
+--     allocate выбирает товары глобально по SKU (oldest-first). На общем
+--     'E2E Seed Outbound SKU' заказы 07 разбирали pre-STORED пул теста 06
+--     (STRESS-PROD-QR), который НЕ проходил receiving/putaway on-chain →
+--     picking/shipping на контракте уходили в soft-skip (no-op). Отдельный SKU
+--     изолирует 07: allocate матчит ТОЛЬКО собственные товары потока, и
+--     picking/shipping становятся реальными FSM-переходами.
+-- ────────────────────────────────────────────────────────────────────────────
+INSERT INTO wms_inventory.skus (sku_id, name, description, volume, created_at, updated_at)
+SELECT gen_random_uuid(), 'STRESS-FLOW-SKU', 'Выделенный SKU для нагрузочного теста 07-full-flow', 1.0::numeric, now(), now()
+WHERE NOT EXISTS (SELECT 1 FROM wms_inventory.skus WHERE name = 'STRESS-FLOW-SKU');
+
+INSERT INTO wms_inventory.sku_barcodes (sku_id, barcode)
+SELECT s.sku_id, 'STRESS-FLOW-BC-01'
+FROM wms_inventory.skus s
+WHERE s.name = 'STRESS-FLOW-SKU'
+ON CONFLICT (barcode) DO NOTHING;
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- 1. Входящие поставки для теста 04-receiving-gate.js
 --    STRESS-TTN-0001 … STRESS-TTN-2000 в статусе CREATED
 --    (сервис знает только CREATED / GATE_IN_PROGRESS / GATE_CLOSED;
@@ -158,7 +197,7 @@ SELECT
   10
 FROM wms_inventory.cargoplaces c
 JOIN wms_inventory.inbound_shipments sh ON sh.shipment_id = c.shipment_id
-JOIN wms_inventory.skus s ON s.name = 'E2E Seed Outbound SKU'
+JOIN wms_inventory.skus s ON s.name = 'STRESS-FLOW-SKU'
 WHERE sh.ttn_code LIKE 'STRESS-FLOW-TTN-%'
 ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
@@ -287,8 +326,9 @@ ON CONFLICT (dispatch_code) DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- 5. NEW заказы и SCHEDULED рейсы для теста 07-full-flow (SHOP-5)
---    1000 заказов (↑ от 300) — отдельный пул от теста 06 (SHOP-7).
---    Тест 07 использует shared-iterations (ровно 2000 итераций, ≤1000 сборок).
+--    2000 заказов — 1:1 с товарами (1 на итерацию), чтобы КАЖДЫЙ товар мог быть
+--    аллоцирован и пройти все 4 стадии (сбалансированный 4-стадийный backlog).
+--    Пул изолирован от теста 06 (SHOP-7).
 -- ────────────────────────────────────────────────────────────────────────────
 INSERT INTO wms_inventory.orders
   (order_id, external_order_no, customer_id, warehouse_id, destination_id, status, created_at, updated_at)
@@ -301,7 +341,7 @@ SELECT
   'NEW',
   now(),
   now()
-FROM generate_series(1, 1000) AS gs(i)
+FROM generate_series(1, 2000) AS gs(i)
 CROSS JOIN public.users u
 CROSS JOIN wms_inventory.warehouses w
 CROSS JOIN wms_inventory.destinations d
@@ -316,7 +356,7 @@ SELECT
   s.sku_id,
   1
 FROM wms_inventory.orders o
-JOIN wms_inventory.skus s ON s.name = 'E2E Seed Outbound SKU'
+JOIN wms_inventory.skus s ON s.name = 'STRESS-FLOW-SKU'
 WHERE o.external_order_no LIKE 'STRESS-FLOW-ORD-%'
 ON CONFLICT DO NOTHING;
 

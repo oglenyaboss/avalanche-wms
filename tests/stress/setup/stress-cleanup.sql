@@ -30,9 +30,16 @@ WHERE aggregate_id IN (
 );
 
 -- Ops-таблицы
+-- Удаляем отгрузки по товару ИЛИ по рейсу: shippings ссылается и на product_id,
+-- и на dispatch_id. Без ветки по dispatch_id рейс STRESS с отгрузкой не-STRESS товара
+-- (например, оставшегося в буфере от прежних прогонов) роняет финальный DELETE рейсов
+-- по FK shippings_dispatch_id_fkey и откатывает весь cleanup.
 DELETE FROM wms_ops.shippings
 WHERE product_id IN (
   SELECT product_id FROM wms_inventory.products WHERE qr_code LIKE 'STRESS-%'
+)
+OR dispatch_id IN (
+  SELECT dispatch_id FROM wms_inventory.outbound_dispatches WHERE dispatch_code LIKE 'STRESS-%'
 );
 DELETE FROM wms_ops.assembly_tasks
 WHERE order_id IN (
