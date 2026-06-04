@@ -17,7 +17,7 @@
       "gasLimit": 200000000,
       "targetBlockRate": 1,
       "minBaseFee": 25000000000,
-      "targetGas": 200000000,
+      "targetGas": 2000000000,
       "baseFeeChangeDenominator": 36,
       "minBlockGasCost": 0,
       "maxBlockGasCost": 0,
