@@ -54,7 +54,7 @@ docker compose --profile test down -v
 | Путь | Назначение |
 |---|---|
 | `network-genesis.json` | Genesis сети avalanchego (network-id 1337), P-Chain с префандженым ewoq. |
-| `chain-genesis.json` | Genesis EVM-цепочки сабнета (chainId 99999) — тюнингованный feeConfig (gasLimit 200M, targetBlockRate 1). |
+| `chain-genesis.json` | Genesis EVM-цепочки сабнета (chainId 99999) — тюнингованный feeConfig (gasLimit 200M, targetBlockRate 1, **targetGas 2B** — рекалибровка fee-market под нагрузку, иначе baseFee растёт ×50 и адаптер залипает на `rpc-tx-fee-cap`; коммит `50ce2515`). |
 | `node-config.json` | Флаги узла: sybil-off, `http-host 0.0.0.0`, `http-allowed-hosts "*"`, преднабитый `track-subnets`, plugin-dir. |
 | `staking/` | Публичные креды staker1 локальной сети (только для тестов — см. `staking/README.md`). |
 | `subnet-node/Dockerfile` | avalanchego + плагин subnet-evm v0.8.0 (под `TARGETARCH`). |
@@ -67,3 +67,4 @@ docker compose --profile test down -v
 | RPC изнутри сети отвечает `403 Forbidden` | allowlist avalanchego против DNS-rebinding. В `node-config.json` должно стоять `"http-allowed-hosts": "*"`. |
 | `subnet-init` падает с `created subnetID … != expected …` | несвежий `subnet_data` в частичном состоянии → преднабитый `--track-subnets` больше не совпадает. Решение: `docker compose --profile test down -v`. |
 | RPC цепочки не отдаёт `0x1869f` | узел не трекает сабнет, либо VMID плагина ≠ VMID в CreateChainTx. Оба используют канонический `srEXiWaHuhNyGwPUi444Tu47ZEDwxTWrbQiuD7FmgSAQ6X7Dy`. |
+| `eth_estimateGas`: `gas required exceeds allowance (50000000)` при крупных пачках | дефолтный кап `rpc-gas-cap` subnet-evm = 50M на оценку газа. **Намеренно не переопределяется:** финальная архитектура — конвейер из множества tx с умеренной пачкой (`BATCH_SIZE`, default 10), per-tx оценка ≪ 50M, кап не упирается. Бьёт только при гигантских пачках (≳1800 событий/tx — отвергнутый ранний путь «одна огромная tx»); если к ним вернётесь, поднимите `rpc-gas-cap` в chain-config узла. |

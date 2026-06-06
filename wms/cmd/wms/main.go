@@ -35,7 +35,7 @@ func main() {
 	}
 
 	// PostgreSQL
-	dbPool, err := postgres.NewPool(ctx, cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBName)
+	dbPool, err := postgres.NewPool(ctx, cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBName, cfg.DBMaxConns)
 	if err != nil {
 		log.Fatalf("PostgreSQL connection failed: %v", err)
 	}

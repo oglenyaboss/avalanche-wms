@@ -65,14 +65,20 @@ func (r *Repository) WithTx(ctx context.Context, fn func(assemblyRepository) err
 }
 
 // GetOrdersByDestinationForUpdate возвращает NEW-заказы для магазина с блокировкой (те, которые сделаны данным магазином - destinationID)
-func (r *Repository) GetOrdersByDestinationForUpdate(ctx context.Context, destinationID uuid.UUID) ([]domain.Order, error) {
+func (r *Repository) GetOrdersByDestinationForUpdate(ctx context.Context, destinationID uuid.UUID, limit int) ([]domain.Order, error) {
+	// Bounded FIFO fetch с SKIP LOCKED: блокируем не ВСЕ NEW-заказы магазина (их могут быть
+	// тысячи → дорогой захват тысяч row-локов + сериализация конкурентных Allocate одного
+	// магазина), а только N самых старых незаблокированных. Параллельные Allocate берут
+	// непересекающиеся наборы. Идёт по партиальному индексу idx_orders_dest_new (миграция 0013).
 	const query = `
 		SELECT order_id, external_order_no, status
 		FROM wms_inventory.orders
 		WHERE destination_id = $1 AND status = 'NEW'
-		FOR UPDATE`
+		ORDER BY created_at
+		LIMIT $2
+		FOR UPDATE SKIP LOCKED`
 
-	rows, err := r.q.Query(ctx, query, destinationID)
+	rows, err := r.q.Query(ctx, query, destinationID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("assembly.Repository.GetOrdersByDestinationForUpdate query: %w", err)
 	}

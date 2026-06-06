@@ -41,6 +41,21 @@ type DLQPublisher interface {
 // быть committed ДО putaway (→PutAway) и т.д.
 var fsmOrder = []string{"receiving", "putaway", "picking", "shipping"}
 
+// InflightTx — отправленная (broadcast) но ещё не подтверждённая batch-tx.
+// Возвращается Send'ом и передаётся в Confirm (serial) либо в pipeline-окно.
+type InflightTx struct {
+	Aggregate string
+	TxHash    common.Hash
+	IDs       []uuid.UUID
+	Msgs      []*Message // для DLQ при терминальном фейле в Confirm
+}
+
+// ErrConfirmStalled — tx не замайнилась и не реверта в пределах receiptTimeout
+// (или receipt RPC недоступен). В pipeline'е это триггерит recovery (reseed nonce
+// + abandon окна), НЕ DLQ: tx может ещё быть в mempool, строки остаются SENT
+// (видимы, не потеряны) для redelivery/reconcile (invariant 4).
+var ErrConfirmStalled = errors.New("confirm stalled")
+
 // Flusher — pipeline: группировка по aggregate_type → обработка в FSM-порядке →
 // для каждого sub-batch: idempotency-filter → InsertPending → chain.BatchCall →
 // MarkSent → WaitReceipt → MarkCommitted / MarkFailed+DLQ.
@@ -65,16 +80,55 @@ func NewFlusher(chainCaller ChainCaller, store Store, dlq DLQPublisher, receiptT
 	}
 }
 
-// Flush обрабатывает mixed-batch: группирует по AggregateType, обрабатывает
-// sub-batch'и в FSM-порядке. При partial failure (например recv COMMITTED,
-// putaway FAILED) — возвращает error чтобы Kafka offsets не закоммитились;
-// на retry filterAndMarkPending корректно скипнет уже COMMITTED events.
+// Flush — serial-совместимая обёртка: Send всех sub-batch'ей, затем Confirm
+// каждого по очереди. Сохраняет старую семантику (timeout/stall → recordFailure,
+// reconcile-loop потом подтянет, если tx всё же замайнится). Pipeline использует
+// Send + Confirm раздельно (см. pipeline.go). При partial failure возвращает
+// error, чтобы Kafka offsets не закоммитились; на retry filterAndMarkPending
+// корректно скипнет уже COMMITTED / reconcile'ит уже SENT.
 func (f *Flusher) Flush(ctx context.Context, msgs []*Message) error {
+	inflight, sendErr := f.Send(ctx, msgs)
+	for i := range inflight {
+		tx := &inflight[i]
+		err := f.Confirm(ctx, tx)
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, ErrConfirmStalled) {
+			// Serial-путь фиксирует stall как failure (старое поведение flushSubBatch);
+			// reconcile-loop (N1) подтянет к COMMITTED, если tx всё же замайнится.
+			if rerr := f.recordFailure(ctx, tx.Msgs, tx.IDs, tx.TxHash.Hex(), err.Error()); rerr != nil {
+				return rerr
+			}
+			continue
+		}
+		return err
+	}
+	return sendErr
+}
+
+// Send группирует mixed-batch по aggregate_type, обрабатывает sub-batch'и в
+// FSM-порядке и БЕЗ ожидания receipt'а broadcast'ит каждую batch-tx. Возвращает
+// in-flight tx в FSM = nonce порядке.
+//
+// Семантика ошибок (как у старого flushSubBatch):
+//   - transient BatchCall error → возвращает (уже собранный inflight, error);
+//     caller ретраит весь drained-batch (Unshift). Уже-SENT sub-batch'и
+//     reconcile'ятся на redelivery, не переотправляются.
+//   - terminal revert → recordFailure (DLQ+MarkFailed), sub-batch НЕ попадает в
+//     inflight, переходим к следующему aggregate.
+//   - success → MarkSent + append в inflight.
+//
+// Partial inflight возвращается даже вместе с error — serial Flush дожимает уже
+// отправленные sub-batch'и; pipeline на ошибке Send просто делает Unshift и не
+// сабмитит окно (reconcile-путь подхватит SENT-строки).
+func (f *Flusher) Send(ctx context.Context, msgs []*Message) ([]InflightTx, error) {
 	if len(msgs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	grouped := groupByAggregate(msgs)
+	inflight := make([]InflightTx, 0, len(fsmOrder))
 
 	for _, agg := range fsmOrder {
 		sub, ok := grouped[agg]
@@ -82,61 +136,63 @@ func (f *Flusher) Flush(ctx context.Context, msgs []*Message) error {
 			continue
 		}
 		delete(grouped, agg)
-		if err := f.flushSubBatch(ctx, agg, sub); err != nil {
-			return err
+
+		pending, err := f.filterAndMarkPending(ctx, sub)
+		if err != nil {
+			return inflight, err
 		}
+		if len(pending) == 0 {
+			f.log.Info("all events already processed, skipping sub-batch", "aggregate", agg, "size", len(sub))
+			continue
+		}
+
+		ids, eventIDs, itemIDs := buildBatchArgs(pending)
+		txHash, err := f.chain.BatchCall(ctx, agg, eventIDs, itemIDs)
+		if err != nil {
+			if errors.Is(err, chain.ErrChainTransient) {
+				f.log.Warn("chain call transient error — will retry", "aggregate", agg, "err", err)
+				return inflight, fmt.Errorf("chain call transient: %w", err)
+			}
+			f.log.Error("chain call failed", "aggregate", agg, "err", err, "size", len(pending))
+			if rerr := f.recordFailure(ctx, pending, ids, "", err.Error()); rerr != nil {
+				return inflight, rerr
+			}
+			continue
+		}
+
+		if err := f.store.MarkSent(ctx, ids, txHash.Hex()); err != nil {
+			return inflight, fmt.Errorf("mark sent: %w", err)
+		}
+		inflight = append(inflight, InflightTx{Aggregate: agg, TxHash: txHash, IDs: ids, Msgs: pending})
 	}
+
 	for agg, sub := range grouped {
 		f.log.Error("unknown aggregate_type in batch — sending to DLQ", "aggregate", agg, "size", len(sub))
 		if err := f.dlq.PublishAll(ctx, sub, fmt.Sprintf("unknown aggregate_type: %s", agg)); err != nil {
-			return fmt.Errorf("dlq unknown aggregate %s: %w", agg, err)
+			return inflight, fmt.Errorf("dlq unknown aggregate %s: %w", agg, err)
 		}
 	}
-	return nil
+	return inflight, nil
 }
 
-// flushSubBatch обрабатывает один sub-batch одного aggregate_type.
-func (f *Flusher) flushSubBatch(ctx context.Context, aggregateType string, msgs []*Message) error {
-	pending, err := f.filterAndMarkPending(ctx, msgs)
+// Confirm дожидается receipt'а одной in-flight tx и применяет терминальный
+// результат: success → MarkCommitted; revert (status 0) → recordFailure
+// (DLQ+MarkFailed); timeout/RPC-fail → ErrConfirmStalled (строки остаются SENT,
+// без DLQ — pipeline запустит recovery, reconcile-loop подтянет).
+func (f *Flusher) Confirm(ctx context.Context, tx *InflightTx) error {
+	receipt, err := chain.WaitReceipt(ctx, f.chain, tx.TxHash, f.receiptTimeout)
 	if err != nil {
-		return err
-	}
-	if len(pending) == 0 {
-		f.log.Info("all events already processed, skipping sub-batch", "aggregate", aggregateType, "size", len(msgs))
-		return nil
-	}
-
-	ids, eventIDs, itemIDs := buildBatchArgs(pending)
-	txHash, err := f.chain.BatchCall(ctx, aggregateType, eventIDs, itemIDs)
-	if err != nil {
-		if errors.Is(err, chain.ErrChainTransient) {
-			f.log.Warn("chain call transient error — will retry", "aggregate", aggregateType, "err", err)
-			return fmt.Errorf("chain call transient: %w", err)
-		}
-		f.log.Error("chain call failed", "aggregate", aggregateType, "err", err, "size", len(pending))
-		return f.recordFailure(ctx, pending, ids, "", err.Error())
-	}
-
-	if err := f.store.MarkSent(ctx, ids, txHash.Hex()); err != nil {
-		return fmt.Errorf("mark sent: %w", err)
-	}
-
-	receipt, err := chain.WaitReceipt(ctx, f.chain, txHash, f.receiptTimeout)
-	if err != nil {
-		reason := "receipt timeout: " + err.Error()
-		f.log.Error("receipt timeout", "aggregate", aggregateType, "tx", txHash.Hex(), "err", err)
-		return f.recordFailure(ctx, pending, ids, txHash.Hex(), reason)
+		f.log.Warn("receipt not confirmed — stall", "aggregate", tx.Aggregate, "tx", tx.TxHash.Hex(), "err", err)
+		return fmt.Errorf("%w: tx %s: %v", ErrConfirmStalled, tx.TxHash.Hex(), err)
 	}
 	if receipt.Status == 0 {
-		reason := "execution reverted"
-		f.log.Error(reason, "aggregate", aggregateType, "tx", txHash.Hex())
-		return f.recordFailure(ctx, pending, ids, txHash.Hex(), reason)
+		f.log.Error("execution reverted", "aggregate", tx.Aggregate, "tx", tx.TxHash.Hex())
+		return f.recordFailure(ctx, tx.Msgs, tx.IDs, tx.TxHash.Hex(), "execution reverted")
 	}
-
-	if err := f.store.MarkCommitted(ctx, ids); err != nil {
+	if err := f.store.MarkCommitted(ctx, tx.IDs); err != nil {
 		return fmt.Errorf("mark committed: %w", err)
 	}
-	f.log.Info("sub-batch committed", "aggregate", aggregateType, "tx", txHash.Hex(), "size", len(pending))
+	f.log.Info("sub-batch committed", "aggregate", tx.Aggregate, "tx", tx.TxHash.Hex(), "size", len(tx.IDs))
 	return nil
 }
 

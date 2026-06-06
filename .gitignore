@@ -57,6 +57,5 @@ temp/
 # ── Local docs / research (kept locally, not tracked) ───
 docs/superpowers/
 docs/blockchain-wms-research/
-docs/load-testing/
 .figma-export/
 .spike-subnet/

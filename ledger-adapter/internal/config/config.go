@@ -23,8 +23,15 @@ type Config struct {
 	ReceiptPollTimeout time.Duration
 	ReconcileInterval  time.Duration
 	ReconcileMinAge    time.Duration
+	PipelineWindow     int
 	LogLevel           string
 }
+
+// pipelineWindowMax — потолок in-flight окна. Узел держит TxPoolAccountSlots=16
+// исполняемых слотов на аккаунт; sequential-nonce in-flight tx'ы одного signer'а
+// их занимают, и >8 рискует "account slots" реджектом (stall, маскирующийся под
+// Hole 1). Throughput всё равно gas-bound (~3 tx/блок), W=2 уже перекрывает 1500.
+const pipelineWindowMax = 8
 
 // Load reads configuration from environment variables with sensible defaults.
 //
@@ -48,6 +55,17 @@ func Load() (*Config, error) {
 		// MinAge должен быть > ReceiptPollTimeout, чтобы не гоняться с in-flight WaitReceipt.
 		ReconcileInterval: getDurationDefault("RECONCILE_INTERVAL", 30*time.Second),
 		ReconcileMinAge:   getDurationDefault("RECONCILE_MIN_AGE", time.Minute),
+		// PipelineWindow: сколько batch-tx держать in-flight одновременно (flusher
+		// pipeline). 1 = старое serial-поведение (один batch на блок). Дефолт 3.
+		PipelineWindow: getIntDefault("PIPELINE_WINDOW", 3),
+	}
+
+	if c.PipelineWindow < 1 {
+		c.PipelineWindow = 1
+	}
+	if c.PipelineWindow > pipelineWindowMax {
+		fmt.Fprintf(os.Stderr, "config: PIPELINE_WINDOW=%d clamped to %d (TxPoolAccountSlots ceiling)\n", c.PipelineWindow, pipelineWindowMax)
+		c.PipelineWindow = pipelineWindowMax
 	}
 
 	required := []struct {

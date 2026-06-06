@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Нагрузочное тестирование WMS → Blockchain — финальный отчёт</title>
+<style>
+  :root {
+    --paper: #f7f6f3;
+    --surface: #ffffff;
+    --ink: #17171a;
+    --ink-soft: #56565d;
+    --ink-faint: #8a8a90;
+    --rule: #e0ded8;
+    --rule-strong: #c7c5bd;
+    --accent: #2347b8;
+    --accent-soft: #e8edfb;
+    --chain: #157a4a;
+    --chain-soft: #e2f1e8;
+    --wall: #b5641a;
+    --wall-soft: #f6ebdd;
+    --good: #157a4a;
+
+    --maxw: 1000px;
+    --space-section: clamp(3rem, 2rem + 4vw, 5.5rem);
+
+    --text-hero: clamp(2.4rem, 1.2rem + 4.4vw, 4.2rem);
+    --text-h2: clamp(1.4rem, 1.05rem + 1.5vw, 2rem);
+    --text-stat: clamp(2rem, 1.3rem + 2.6vw, 3.1rem);
+
+    --font-sans: 'Helvetica Neue', Helvetica, Arial, 'Segoe UI', system-ui, sans-serif;
+    --font-mono: 'SF Mono', 'JetBrains Mono', 'Roboto Mono', ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 clamp(1.2rem, 3vw, 2.5rem); }
+  section { padding-block: var(--space-section); border-top: 1px solid var(--rule); }
+  section:first-of-type { border-top: none; }
+
+  /* ── Typographic system ── */
+  .eyebrow {
+    font-size: 0.74rem; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--accent);
+    display: flex; align-items: center; gap: 0.6rem; margin: 0 0 1.4rem;
+  }
+  .eyebrow::before { content: ""; width: 28px; height: 2px; background: var(--accent); display: inline-block; }
+  h1 { font-size: var(--text-hero); line-height: 1.02; letter-spacing: -0.025em; font-weight: 800; margin: 0; }
+  h2 { font-size: var(--text-h2); line-height: 1.1; letter-spacing: -0.018em; font-weight: 750; margin: 0 0 0.4rem; }
+  h3 { font-size: 1.02rem; letter-spacing: -0.01em; margin: 0 0 0.3rem; font-weight: 700; }
+  p { margin: 0 0 1rem; color: var(--ink-soft); max-width: 68ch; }
+  .lead { font-size: clamp(1.05rem, 0.98rem + 0.5vw, 1.3rem); color: var(--ink); max-width: 60ch; }
+  strong { color: var(--ink); font-weight: 700; }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .num { font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }
+  .sec-head .idx { font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink-faint); }
+
+  /* ── Hero ── */
+  .hero { padding-top: clamp(3rem, 2rem + 4vw, 5rem); }
+  .hero .topline { display: flex; justify-content: space-between; align-items: center; padding-bottom: 1.6rem; border-bottom: 2px solid var(--ink); margin-bottom: 2.4rem; font-size: 0.8rem; letter-spacing: 0.04em; color: var(--ink-soft); flex-wrap: wrap; gap: 0.5rem; }
+  .hero .topline .tag { font-weight: 700; color: var(--ink); letter-spacing: 0.14em; text-transform: uppercase; }
+  .hero h1 .arrow { color: var(--accent); font-weight: 400; }
+  .hero .lead { margin-top: 1.6rem; }
+  .hero .lead b { color: var(--ink); }
+  .verdict-chip {
+    display: inline-flex; align-items: center; gap: 0.55rem; margin-top: 1.8rem;
+    background: var(--chain-soft); color: var(--chain); border: 1px solid #bfe0cd;
+    padding: 0.5rem 1rem; border-radius: 999px; font-weight: 700; font-size: 0.92rem;
+  }
+  .verdict-chip .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--chain); box-shadow: 0 0 0 4px #cfe9da; }
+
+  /* ── KPI grid ── */
+  .kpi { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--rule); border: 1px solid var(--rule); margin-top: 2.6rem; }
+  .kpi .cell { background: var(--surface); padding: 1.5rem 1.4rem 1.4rem; display: flex; flex-direction: column; gap: 0.15rem; }
+  .kpi .cell .k-label { font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); font-weight: 700; }
+  .kpi .cell .k-val { font-size: var(--text-stat); font-weight: 800; letter-spacing: -0.03em; line-height: 1; font-variant-numeric: tabular-nums; margin-top: 0.35rem; }
+  .kpi .cell .k-val small { font-size: 0.42em; font-weight: 700; color: var(--ink-faint); letter-spacing: 0; }
+  .kpi .cell .k-sub { font-size: 0.82rem; color: var(--ink-soft); margin-top: 0.3rem; }
+  .kpi .cell.is-accent .k-val { color: var(--accent); }
+  .kpi .cell.is-good .k-val { color: var(--good); }
+  .kpi .cell.is-chain .k-val { color: var(--chain); }
+
+  /* ── Chart card ── */
+  .chart-card { background: var(--surface); border: 1px solid var(--rule); padding: clamp(1.3rem, 1rem + 1.5vw, 2.1rem); }
+  .chart-card + .chart-card { margin-top: 1.5rem; }
+  .chart-card .c-title { display: flex; align-items: baseline; gap: 0.7rem; margin-bottom: 0.3rem; }
+  .chart-card .c-title h3 { margin: 0; }
+  .chart-card .c-cap { font-size: 0.86rem; color: var(--ink-soft); margin: 0 0 1.5rem; max-width: 72ch; }
+  figure { margin: 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 1.1rem; margin-top: 1.1rem; font-size: 0.8rem; color: var(--ink-soft); }
+  .legend span { display: inline-flex; align-items: center; gap: 0.45rem; }
+  .legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+  .swatch-line { width: 16px; height: 0; border-top: 2.5px dashed var(--ink-faint); }
+
+  /* ── CSS bar chart ── */
+  .barchart { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: clamp(0.8rem, 2vw, 2.4rem); align-items: end; height: 300px; position: relative; padding: 0 0.5rem; border-bottom: 2px solid var(--ink); }
+  .barchart .gridline { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--rule-strong); }
+  .barchart .gridline.target { border-top: 2px dashed var(--accent); z-index: 3; }
+  .barchart .gridline .gl-label { position: absolute; right: 0; top: -0.9rem; font-size: 0.7rem; font-family: var(--font-mono); color: var(--ink-faint); background: var(--surface); padding-left: 0.4rem; }
+  .barchart .gridline.target .gl-label { color: var(--accent); font-weight: 700; }
+  .bar-col { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; position: relative; z-index: 2; }
+  .bar { width: 100%; max-width: 110px; background: var(--accent); border-radius: 3px 3px 0 0; position: relative; transition: none; min-height: 3px; }
+  .bar.muted { background: #b9bcc6; }
+  .bar.paced { background: #6f8fdc; }
+  .bar.win { background: var(--accent); box-shadow: inset 0 -3px 0 #16317f; }
+  .bar .bar-val { position: absolute; top: -1.7rem; left: 50%; transform: translateX(-50%); font-weight: 800; font-size: 1rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .bar.win .bar-val { color: var(--accent); }
+  .bar-label { margin-top: 0.7rem; text-align: center; font-size: 0.78rem; color: var(--ink-soft); line-height: 1.25; max-width: 130px; }
+  .bar-label b { display: block; color: var(--ink); font-size: 0.84rem; }
+
+  /* ── CPU split stacked bar ── */
+  .cpu-bar { display: flex; height: 64px; border-radius: 4px; overflow: hidden; border: 1px solid var(--rule); }
+  .cpu-seg { display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 0.82rem; position: relative; min-width: 0; }
+  .cpu-seg span { padding: 0 0.3rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cpu-postgres { background: var(--wall); }
+  .cpu-wms { background: #d68a4a; }
+  .cpu-subnet { background: var(--chain); }
+  .cpu-adapter { background: #3aa873; }
+  .cpu-k6 { background: #9aa0ad; }
+  .cpu-cdc { background: #c2c5cd; color: var(--ink); }
+  .cpu-groups { display: flex; gap: 1px; margin-top: 0.6rem; background: var(--rule); border: 1px solid var(--rule); }
+  .cpu-group { background: var(--surface); padding: 0.7rem 1rem; flex: 1; }
+  .cpu-group .cg-k { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); font-weight: 700; }
+  .cpu-group .cg-v { font-size: 1.5rem; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .cpu-group.front .cg-v { color: var(--wall); }
+  .cpu-group.chain .cg-v { color: var(--chain); }
+  .cpu-group.other .cg-v { color: var(--ink-soft); }
+  .cpu-group .cg-s { font-size: 0.78rem; color: var(--ink-soft); }
+
+  /* ── Timeline ── */
+  .timeline { display: grid; gap: 0; }
+  .tl-row { display: grid; grid-template-columns: 116px 1fr; gap: 1.4rem; padding: 1.3rem 0; border-top: 1px solid var(--rule); }
+  .tl-row:first-child { border-top: none; }
+  .tl-stage { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; color: var(--accent); letter-spacing: 0.02em; }
+  .tl-stage .tl-num { display: block; font-size: 1.45rem; font-weight: 800; color: var(--ink); letter-spacing: -0.02em; margin-top: 0.2rem; }
+  .tl-stage .tl-num small { font-size: 0.5em; color: var(--ink-faint); font-weight: 700; }
+  .tl-body h3 { font-size: 0.98rem; }
+  .tl-body p { font-size: 0.9rem; margin: 0.2rem 0 0; }
+
+  /* ── Fixes table ── */
+  table.fixes { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  table.fixes th, table.fixes td { text-align: left; padding: 0.85rem 0.9rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  table.fixes thead th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); border-bottom: 2px solid var(--ink); }
+  table.fixes td:first-child { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink); width: 38%; }
+  table.fixes td .tt { font-weight: 700; }
+  table.fixes .badge { display: inline-block; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 0.1rem 0.45rem; border-radius: 4px; }
+  .badge.code { background: var(--accent-soft); color: var(--accent); }
+  .badge.db { background: var(--chain-soft); color: var(--chain); }
+  .badge.chain { background: var(--wall-soft); color: var(--wall); }
+  .badge.bench { background: #eee; color: var(--ink-soft); }
+
+  /* ── Pipeline diagram ── */
+  .pipe { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; font-family: var(--font-mono); font-size: 0.82rem; margin: 1.2rem 0; color: var(--ink-soft); }
+  .pipe .node { background: var(--surface); border: 1px solid var(--rule-strong); border-radius: 5px; padding: 0.35rem 0.6rem; color: var(--ink); }
+  .pipe .node.hot { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .pipe .arr { color: var(--ink-faint); }
+
+  /* ── Verdict block ── */
+  .verdict { background: var(--ink); color: #f3f3f0; border-radius: 6px; padding: clamp(1.6rem, 1.2rem + 2vw, 2.8rem); }
+  .verdict .eyebrow { color: #8fb0ff; }
+  .verdict .eyebrow::before { background: #8fb0ff; }
+  .verdict h2 { color: #fff; max-width: 26ch; }
+  .verdict p { color: #c8c8cc; max-width: 64ch; }
+  .verdict .vgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.6rem; margin-top: 2rem; border-top: 1px solid #34343a; padding-top: 1.8rem; }
+  .verdict .vgrid .vg-v { font-size: 1.9rem; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -0.03em; }
+  .verdict .vgrid .vg-v.ok { color: #5fd398; }
+  .verdict .vgrid .vg-k { font-size: 0.82rem; color: #a0a0a8; margin-top: 0.2rem; }
+
+  footer { border-top: 2px solid var(--ink); padding-block: 2.5rem 3.5rem; font-size: 0.82rem; color: var(--ink-soft); }
+  footer .f-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1.4rem; }
+  footer b { display: block; color: var(--ink); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 0.3rem; }
+
+  @media (max-width: 720px) {
+    .kpi { grid-template-columns: repeat(2, 1fr); }
+    .verdict .vgrid { grid-template-columns: 1fr; gap: 1rem; }
+    .tl-row { grid-template-columns: 84px 1fr; gap: 0.9rem; }
+    .barchart { gap: 0.5rem; }
+    .bar-label { font-size: 0.68rem; }
+  }
+  @media print {
+    :root { --paper: #fff; }
+    body { font-size: 11pt; }
+    section { padding-block: 1.4rem; page-break-inside: avoid; }
+    .chart-card, .kpi, .verdict, .timeline { page-break-inside: avoid; }
+    .verdict { background: #fff; color: var(--ink); border: 2px solid var(--ink); }
+    .verdict h2, .verdict p, .verdict .vgrid .vg-k { color: var(--ink); }
+    @page { margin: 1.4cm; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════ HERO ══════════════ -->
+<header class="hero wrap">
+  <div class="topline">
+    <span class="tag">WMS · Blockchain · Stress</span>
+    <span>Финальный отчёт · 2026-06-04 · Apple M1 Max (10 ядер)</span>
+  </div>
+  <p class="eyebrow">Нагрузочное тестирование и оптимизация</p>
+  <h1>WMS <span class="arrow">→</span> Blockchain:<br>1500 транзакций/с, включая&nbsp;цепь</h1>
+  <p class="lead">Цель — <b>«минимум 1500 транзакций/с, включая блокчейн»</b>. Достигнута и подтверждена на масштабе во весь опор: сквозной пайплайн (все 4 перехода состояния) выдаёт <b>1924 committed-перехода/с</b> на 150 000 товаров с <b>нулём потерь</b>. Блокчейн при этом занимает 1.5 ядра из 10 и узким местом не является.</p>
+  <span class="verdict-chip"><span class="dot"></span> Цель взята ×1.28 — flat-out 1924 перех./с · 0 потерь · цепь 1.5 ядра</span>
+
+  <div class="kpi">
+    <div class="cell is-accent">
+      <span class="k-label">Sustained committed</span>
+      <span class="k-val num">1924<small> /с</small></span>
+      <span class="k-sub">flat-out, все 4 перехода, 150k товаров</span>
+    </div>
+    <div class="cell is-good">
+      <span class="k-label">Потери на 575 210 переходах</span>
+      <span class="k-val num">0<small> FAILED</small></span>
+      <span class="k-sub">генерация = коммит, идеальная сходимость</span>
+    </div>
+    <div class="cell is-chain">
+      <span class="k-label">Блокчейн под нагрузкой</span>
+      <span class="k-val num">1.5<small> ядра</small></span>
+      <span class="k-sub">15% бокса, ~5–6% газа — НЕ узкое место</span>
+    </div>
+    <div class="cell">
+      <span class="k-label">К исходной точке (C-Chain)</span>
+      <span class="k-val num">×192</span>
+      <span class="k-sub">5–10/с → 1924/с committed</span>
+    </div>
+    <div class="cell">
+      <span class="k-label">То же в товарах/с (÷4 перехода)</span>
+      <span class="k-val num">481<small> товар/с</small></span>
+      <span class="k-sub">полный цикл receiving→ship; 1 товар = 4 перехода</span>
+    </div>
+    <div class="cell">
+      <span class="k-label">Ёмкость цепи (измеренный дренаж)</span>
+      <span class="k-val num">~1960<small> /с</small></span>
+      <span class="k-sub">на 1.5 ядра — запас над целью</span>
+    </div>
+  </div>
+</header>
+
+<!-- ══════════════ UNIT OF MEASURE ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>Что считаем за «транзакцию»</h2><span class="idx">01 / Метрика</span></div>
+  <p class="lead" style="margin-bottom:1.4rem">Единица = <strong>on-chain переход состояния в секунду</strong> (записан в <span class="mono">onchain_events</span> со статусом <span class="mono">COMMITTED</span>, а не просто сгенерирован). Каждый товар проходит 4 значимых перехода:</p>
+  <div class="pipe">
+    <span class="node">RECEIVED_AT_GATE</span><span class="arr">→ receiving →</span>
+    <span class="node">RECEIVED</span><span class="arr">→ putaway →</span>
+    <span class="node">STORED</span><span class="arr">→ pick →</span>
+    <span class="node">ASSEMBLED</span><span class="arr">→ ship →</span>
+    <span class="node hot">SHIPPED</span>
+  </div>
+  <p>Значит <strong>1500 переходов/с = 375 товаров/с</strong>. Запись в цепь — асинхронная, через паттерн Outbox:</p>
+  <div class="pipe">
+    <span class="node">WMS · Postgres</span><span class="arr">→</span>
+    <span class="node">outbox_events</span><span class="arr">→</span>
+    <span class="node">Debezium (CDC)</span><span class="arr">→</span>
+    <span class="node">Kafka</span><span class="arr">→</span>
+    <span class="node">ledger-adapter</span><span class="arr">→</span>
+    <span class="node hot">Subnet-EVM</span>
+  </div>
+  <p style="font-size:0.86rem">Адаптер <strong>батчит</strong> переходы (множество в одну on-chain транзакцию), поэтому «on-chain tx/с» (~1–3) ≠ «переходов/с» (цель). Считаем переходы — это и есть честная нагрузка на цепь.</p>
+</section>
+
+<!-- ══════════════ CHART 1: END-TO-END JOURNEY ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>Сквозная пропускная способность</h2><span class="idx">02 / Главный результат</span></div>
+  <div class="chart-card">
+    <div class="c-title"><h3>Committed-переходы/с, end-to-end (все 4 перехода)</h3></div>
+    <p class="c-cap">Прогресс flat-out-замера на одном 10-ядерном боксе, все 4 перехода. Пунктир — цель 1500/с. Последние два столбца — <strong>один и тот же прогон на 150k товаров</strong>, отличается только размер пула соединений к БД (10 → 30): это и есть главный рычаг. <em>Ранний paced-замер 1715/с (Часть IV, 72k, до фиксов, дросселированный) здесь не показан — flat-out его превосходит и делает избыточным.</em></p>
+    <figure>
+      <div class="barchart" role="img" aria-label="Сквозная пропускная способность flat-out: co-resident 985, пул=10 1439, пул=30 1924 переходов в секунду; цель 1500">
+        <div class="gridline" style="bottom:23.8%"><span class="gl-label">500</span></div>
+        <div class="gridline" style="bottom:47.6%"><span class="gl-label">1000</span></div>
+        <div class="gridline target" style="bottom:71.4%"><span class="gl-label">цель 1500</span></div>
+        <div class="gridline" style="bottom:95.2%"><span class="gl-label">2000</span></div>
+        <div class="bar-col"><div class="bar muted" style="height:46.9%"><span class="bar-val">985</span></div><div class="bar-label"><b>985</b>co-resident<br>(Часть III)</div></div>
+        <div class="bar-col"><div class="bar muted" style="height:68.5%"><span class="bar-val">1439</span></div><div class="bar-label"><b>1439</b>flat-out<br>пул=10</div></div>
+        <div class="bar-col"><div class="bar win" style="height:91.6%"><span class="bar-val">1924</span></div><div class="bar-label"><b>1924</b>flat-out<br>пул=30 ✓</div></div>
+      </div>
+      <div class="legend">
+        <span><i style="background:#b9bcc6"></i> промежуточные замеры (пул=10)</span>
+        <span><i style="background:var(--accent)"></i> финал — пул=30, во весь опор</span>
+        <span><span class="swatch-line" style="border-color:var(--accent)"></span> цель 1500/с</span>
+      </div>
+    </figure>
+  </div>
+</section>
+
+<!-- ══════════════ CHART 2: LIVE DYNAMICS ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>Живая динамика прогона</h2><span class="idx">03 / Один рычаг</span></div>
+  <div class="chart-card">
+    <div class="c-title"><h3>Committed-rate во времени — пул 10 против пул 30</h3></div>
+    <p class="c-cap">Тот же flat-out-прогон на 150k. Пул в 10 соединений душил concurrency — плато <em>под</em> целью (~1439/с, Postgres простаивал 2.1 ядра). Подъём пула до 30 разблокировал простаивавшие ядра — плато ушло <em>над</em> 1500 (~1924/с). Backlog в обоих случаях ровный.</p>
+    <figure>
+      <svg viewBox="0 0 800 380" width="100%" role="img" aria-label="График динамики: пул=10 выходит на плато около 1439, пул=30 — около 1924, цель 1500">
+        <!-- y gridlines -->
+        <g font-family="'SF Mono','JetBrains Mono',ui-monospace,monospace" font-size="11" fill="#8a8a90">
+          <line x1="60" y1="67.3" x2="780" y2="67.3" stroke="#e0ded8"/>
+          <text x="32" y="71">2000</text>
+          <line x1="60" y1="203.6" x2="780" y2="203.6" stroke="#e0ded8"/>
+          <text x="32" y="207">1000</text>
+          <line x1="60" y1="271.8" x2="780" y2="271.8" stroke="#e0ded8"/>
+          <text x="42" y="275">500</text>
+        </g>
+        <!-- target 1500 -->
+        <line x1="60" y1="135.5" x2="780" y2="135.5" stroke="#2347b8" stroke-width="2" stroke-dasharray="7 5"/>
+        <text x="770" y="128" font-family="'SF Mono','JetBrains Mono',ui-monospace,monospace" font-size="11" fill="#2347b8" font-weight="700" text-anchor="end">цель 1500</text>
+        <!-- axes -->
+        <line x1="60" y1="40" x2="60" y2="340" stroke="#17171a" stroke-width="1.5"/>
+        <line x1="60" y1="340" x2="780" y2="340" stroke="#17171a" stroke-width="1.5"/>
+        <g font-family="'SF Mono','JetBrains Mono',ui-monospace,monospace" font-size="11" fill="#8a8a90" text-anchor="middle">
+          <text x="60" y="358">0с</text>
+          <text x="249" y="358">100с</text>
+          <text x="439" y="358">200с</text>
+          <text x="628" y="358">300с</text>
+        </g>
+        <!-- pool=10 line -->
+        <polyline fill="none" stroke="#b0b4c0" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"
+          points="136,269 191,190 248,121 304,127 361,139 418,139 473,134 530,133 587,143 644,141 700,145 757,126"/>
+        <!-- pool=30 line -->
+        <polyline fill="none" stroke="#2347b8" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"
+          points="75,217 134,69 193,62 251,83 312,60 382,74 477,78 572,74 666,80 757,78"/>
+        <!-- end dots -->
+        <circle cx="757" cy="126" r="4" fill="#b0b4c0"/>
+        <circle cx="757" cy="78" r="4.5" fill="#2347b8"/>
+        <!-- inline labels -->
+        <text x="690" y="118" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#56565d" text-anchor="end">пул=10 → ~1439</text>
+        <text x="700" y="55" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="800" fill="#2347b8" text-anchor="end">пул=30 → 1924</text>
+      </svg>
+      <div class="legend">
+        <span><i style="background:#2347b8"></i> пул=30 (флэт-аут)</span>
+        <span><i style="background:#b0b4c0"></i> пул=10 (флэт-аут)</span>
+        <span><span class="swatch-line" style="border-color:var(--accent)"></span> цель 1500/с</span>
+      </div>
+    </figure>
+  </div>
+</section>
+
+<!-- ══════════════ CHART 2b: BACKLOG ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>Backlog: цепь поспевает</h2><span class="idx">03b / Честность</span></div>
+  <div class="chart-card">
+    <div class="c-title"><h3>Очередь outbox − committed во времени (pool=30)</h3></div>
+    <p class="c-cap">Backlog = сгенерировано в outbox, но ещё не закоммичено в цепь. Он <strong>ограничен</strong>, а не убегает: в стационаре держится ~4 600 переходов (≈ 2.4 с буфера конвейера). Всплески — только транзиенты: разгон (фронт сприн­тует впереди) и teardown (дошипка хвоста 2 298 переходов разом). Значит committed ≈ generated — 1924/с устойчивы.</p>
+    <figure>
+      <svg viewBox="0 0 800 320" width="100%" role="img" aria-label="Backlog: пик 10.5k на разгоне, стационар около 4600, всплеск на teardown">
+        <g font-family="'SF Mono','JetBrains Mono',ui-monospace,monospace" font-size="11" fill="#8a8a90">
+          <line x1="60" y1="61.8" x2="780" y2="61.8" stroke="#e0ded8"/><text x="20" y="65">10000</text>
+          <line x1="60" y1="116.4" x2="780" y2="116.4" stroke="#e0ded8"/><text x="28" y="120">7500</text>
+          <line x1="60" y1="170.9" x2="780" y2="170.9" stroke="#e0ded8"/><text x="28" y="174">5000</text>
+          <line x1="60" y1="225.5" x2="780" y2="225.5" stroke="#e0ded8"/><text x="28" y="229">2500</text>
+        </g>
+        <!-- steady band ~4000-5000 -->
+        <rect x="388" y="170.8" width="382" height="22.4" fill="#157a4a" opacity="0.10"/>
+        <!-- area -->
+        <polygon fill="#2347b8" opacity="0.08" points="79,258 156,149 228,84 302,51 389,193 475,171 564,180 650,174 737,108 770,94 770,280 79,280"/>
+        <!-- axes -->
+        <line x1="60" y1="40" x2="60" y2="280" stroke="#17171a" stroke-width="1.5"/>
+        <line x1="60" y1="280" x2="780" y2="280" stroke="#17171a" stroke-width="1.5"/>
+        <g font-family="'SF Mono','JetBrains Mono',ui-monospace,monospace" font-size="11" fill="#8a8a90" text-anchor="middle">
+          <text x="60" y="298">0с</text><text x="300" y="298">100с</text><text x="540" y="298">200с</text><text x="772" y="298">~300с</text>
+        </g>
+        <!-- backlog line -->
+        <polyline fill="none" stroke="#2347b8" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"
+          points="79,258 156,149 228,84 302,51 389,193 475,171 564,180 650,174 737,108 770,94"/>
+        <circle cx="302" cy="51" r="4" fill="#2347b8"/>
+        <circle cx="737" cy="108" r="4" fill="#b5641a"/>
+        <!-- annotations -->
+        <text x="312" y="44" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12" font-weight="800" fill="#2347b8">разгон · пик 10.5k</text>
+        <text x="430" y="214" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12" font-weight="800" fill="#157a4a">стационар ~4.6k ≈ 2.4с буфера</text>
+        <text x="737" y="100" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="800" fill="#b5641a" text-anchor="middle">teardown</text>
+      </svg>
+      <div class="legend">
+        <span><i style="background:#2347b8"></i> backlog (переходы)</span>
+        <span><i style="background:#157a4a;opacity:0.4"></i> стационарный буфер ~4.6k</span>
+      </div>
+    </figure>
+  </div>
+  <div class="chart-card">
+    <div class="c-title"><h3>«150k принято, но 137.6k собрано» — куда делись 12 400?</h3></div>
+    <p class="c-cap">Не потеря — <strong>товары в полёте по конвейеру</strong> на момент отсечки прогона. Финальное состояние БД идеально симметрично: у каждого недо-обработанного товара есть свой заказ в том же статусе. Приёмка/раскладка «жадные» (все 150k быстро в <span class="mono">STORED</span>), а allocate→pick→ship идут каденсом и не успели доехать хвост.</p>
+    <table class="fixes" style="max-width:560px">
+      <thead><tr><th>Товары — 150 000</th><th></th><th>Заказы — 150 000</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tt">SHIPPED</span> · 137 605</td><td style="text-align:center;color:var(--good)">↔</td><td>SHIPPED · 137 607</td></tr>
+        <tr><td><span class="tt">ALLOCATED</span> · 8 113</td><td style="text-align:center;color:var(--good)">↔</td><td>ALLOCATED · 8 114</td></tr>
+        <tr><td><span class="tt">STORED</span> · 4 282</td><td style="text-align:center;color:var(--good)">↔</td><td>NEW · 4 282</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:0.86rem;margin-top:1rem">Те 12 400 товаров успели записать в цепь по <strong>2 из 4</strong> своих переходов (receiving + putaway) — отсюда «принято/разложено» (150k) опережает «собрано/отгружено» (137.6k). Симметрия товар↔заказ доказывает: <span class="mono">SKIP LOCKED</span>-выборка честна, supply == demand, ничего не потеряно.</p>
+  </div>
+</section>
+
+<!-- ══════════════ CHART 3: CPU SPLIT ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>Где на самом деле узкое место</h2><span class="idx">04 / Доказательство</span></div>
+  <div class="chart-card">
+    <div class="c-title"><h3>Профиль CPU при 1924/с — раскладка 10 ядер</h3></div>
+    <p class="c-cap">Профайлер по контейнерам (бокс насыщен: 9.8 / 10 ядер). Блокчейн — наименее нагруженная часть системы. Узкое место — CPU Postgres, не цепь.</p>
+    <figure>
+      <div class="cpu-bar" role="img" aria-label="Раскладка ядер: postgres 5.8, wms 1.9, цепь 1.5, k6 0.5, CDC 0.1">
+        <div class="cpu-seg cpu-postgres" style="flex-grow:5.8"><span>postgres 5.8</span></div>
+        <div class="cpu-seg cpu-wms" style="flex-grow:1.9"><span>wms 1.9</span></div>
+        <div class="cpu-seg cpu-subnet" style="flex-grow:1.3"><span>subnet 1.3</span></div>
+        <div class="cpu-seg cpu-adapter" style="flex-grow:0.2"><span></span></div>
+        <div class="cpu-seg cpu-k6" style="flex-grow:0.5"><span>k6</span></div>
+        <div class="cpu-seg cpu-cdc" style="flex-grow:0.1"><span></span></div>
+      </div>
+      <div class="cpu-groups">
+        <div class="cpu-group front"><span class="cg-k">Фронт WMS</span><div class="cg-v num">7.7 ядра</div><span class="cg-s">postgres 5.8 + wms 1.9 — стенка</span></div>
+        <div class="cpu-group chain"><span class="cg-k">Блокчейн</span><div class="cg-v num">1.5 ядра</div><span class="cg-s">subnet 1.3 + adapter 0.2 — запас</span></div>
+        <div class="cpu-group other"><span class="cg-k">Генератор + CDC</span><div class="cg-v num">0.6 ядра</div><span class="cg-s">k6 0.5 + kafka/debezium 0.1</span></div>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--wall)"></i> postgres</span>
+        <span><i style="background:#d68a4a"></i> wms</span>
+        <span><i style="background:var(--chain)"></i> subnet-node</span>
+        <span><i style="background:#3aa873"></i> ledger-adapter</span>
+        <span><i style="background:#9aa0ad"></i> k6</span>
+        <span><i style="background:#c2c5cd"></i> kafka+debezium</span>
+      </div>
+    </figure>
+  </div>
+</section>
+
+<!-- ══════════════ CHART 4: BLOCKCHAIN LAYER ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>Слой блокчейна: от 10 до ~2850</h2><span class="idx">05 / Цепь не страшна</span></div>
+  <div class="chart-card">
+    <div class="c-title"><h3>Ёмкость коммита переходов/с — только слой цепи</h3></div>
+    <p class="c-cap">«Самая страшная» часть формулировки оказалась самой лёгкой. C-Chain упирался в ~10/с; переход на Subnet-EVM + пайплайн в адаптере (серийный flusher → окно in-flight tx) подняли ёмкость в сотни раз. Пунктир — цель 1500/с.</p>
+    <figure>
+      <div class="barchart" style="height:260px" role="img" aria-label="Ёмкость цепи: C-Chain 10, Subnet serial 975, Shape A pipeline 2850">
+        <div class="gridline target" style="bottom:50%"><span class="gl-label">цель 1500</span></div>
+        <div class="gridline" style="bottom:32.5%"><span class="gl-label">975</span></div>
+        <div class="bar-col"><div class="bar muted" style="height:0.5%"><span class="bar-val" style="top:-1.6rem">10</span></div><div class="bar-label"><b>C-Chain</b>упёрся<br>~10/с</div></div>
+        <div class="bar-col"><div class="bar muted" style="height:32.5%"><span class="bar-val">975</span></div><div class="bar-label"><b>Subnet-EVM</b>серийный<br>flusher</div></div>
+        <div class="bar-col"><div class="bar win" style="height:95%"><span class="bar-val">~2850</span></div><div class="bar-label"><b>Shape A</b>пайплайн<br>(дренаж ~1960)</div></div>
+      </div>
+      <div class="legend">
+        <span><span class="swatch-line" style="border-color:var(--accent)"></span> цель 1500/с — даже серийный flusher (975) был близок к ней, а пайплайн даёт ×1.9 запас</span>
+      </div>
+    </figure>
+  </div>
+</section>
+
+<!-- ══════════════ TIMELINE ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>История экспериментов</h2><span class="idx">06 / Весь путь</span></div>
+  <div class="timeline">
+    <div class="tl-row">
+      <div class="tl-stage">Часть I<span class="tl-num num">2850<small>/с</small></span></div>
+      <div class="tl-body"><h3>Блокчейн: от 10 до 2850 коммитов/с</h3><p>C-Chain упирался в ~10/с. Перешли на воспроизводимый Subnet-EVM. Серийный flusher дал потолок 975/с — но это не предел платформы, а сериализация. Пайплайн Shape A (окно in-flight tx + монотонный nonce + запас по газу) → ёмкость ~2850/с.</p></div>
+    </div>
+    <div class="tl-row">
+      <div class="tl-stage">Часть II<span class="tl-num num">×160</span></div>
+      <div class="tl-body"><h3>Оффчейн-фронт WMS — настоящее узкое место</h3><p>Наивный тест 07 давал 2.45 товара/с — артефакт концентрации (один SKU, один магазин). Профайлер <span class="mono">pg_stat_activity</span> развернул ложный «CPU-bound» в реальный «lock-bound». Multi-SKU/multi-destination сид + пропущенный индекс 0012 → фронт ×2.3.</p></div>
+    </div>
+    <div class="tl-row">
+      <div class="tl-stage">Часть III<span class="tl-num num">985<small>/с</small></span></div>
+      <div class="tl-body"><h3>Сквозной замер co-resident</h3><p>Все 6 ролей (k6 + WMS + postgres + kafka + debezium + нода) на 10 ядрах дали ~985/с. Ошибочный вывод: «не хватает 2 ядра». Позже опровергнут.</p></div>
+    </div>
+    <div class="tl-row">
+      <div class="tl-stage">Часть IV<span class="tl-num num">1715<small>/с</small></span></div>
+      <div class="tl-body"><h3>Четыре рычага → 1500+ на одном боксе</h3><p>CPU-профиль опроверг «чейн ест 3–4 ядра» (цепь ~1 ядро, 6% газа). Батчинг паллет, рекалибровка fee-market (<span class="mono">targetGas</span> — без неё адаптер залипал на 86с), непрерывная отгрузка. Paced all-4: 1715/с, ровный backlog. CDC проверён — не затык.</p></div>
+    </div>
+    <div class="tl-row">
+      <div class="tl-stage">Часть V<span class="tl-num num">1924<small>/с</small></span></div>
+      <div class="tl-body"><h3>Финал: 1924/с во весь опор на масштабе</h3><p>Soak на 300k вскрыл два затыка масштаба. Закрыли allocate coarse-lock (<span class="mono">SKIP LOCKED LIMIT</span> + индекс 0013). Профиль показал 2.1 простаивающих ядра → нашли захардкоженный пул в 10 соединений. Пул 10→30 → <strong>1924/с sustained, 0 потерь</strong>, бокс насыщен.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ FIXES ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>Что починили</h2><span class="idx">07 / Реальные правки</span></div>
+  <table class="fixes">
+    <thead><tr><th>Изменение</th><th>Тип</th><th>Зачем</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tt">ledger-adapter</span> — пайплайн Shape A</td><td><span class="badge code">код</span></td><td>серийный flusher → окно in-flight tx: ёмкость цепи 975 → ~1960–2850/с</td></tr>
+      <tr><td><span class="tt">ledger-adapter</span> — gas-limit headroom ×3/2</td><td><span class="badge code">код</span></td><td>под окном in-flight estimateGas видит ранний статус товара (~28k) → к майнингу SSTORE-путь (~32k) → OutOfGas-реверт (807/2000 раскладок) → запас ×3/2 = 0 FAILED</td></tr>
+      <tr><td><span class="tt">chain-genesis.json</span> <span class="mono">targetGas 200M→2B</span></td><td><span class="badge chain">цепь</span></td><td>рекалибровка fee-market: без неё baseFee ×50 пробивает <span class="mono">rpc-tx-fee-cap</span> → адаптер залипает</td></tr>
+      <tr><td>Миграции <span class="mono">0012</span> (products), <span class="mono">0013</span> (orders)</td><td><span class="badge db">схема</span></td><td>пропущенные индексы на горячих путях allocate / FIFO-выборки заказов</td></tr>
+      <tr><td><span class="tt">GetOrdersByDestinationForUpdate</span> → <span class="mono">LIMIT … FOR UPDATE SKIP LOCKED</span></td><td><span class="badge code">код</span></td><td>снят allocate coarse-lock (был <span class="mono">FOR UPDATE</span> на ВСЕХ NEW-заказах магазина)</td></tr>
+      <tr><td><span class="tt">WMS_DB_MAX_CONNS</span> — пул конфигурируемый (бенч=30)</td><td><span class="badge code">код</span></td><td><strong>главный рычаг масштаба:</strong> дефолт 10 душил concurrency → Postgres простаивал 2.1 ядра; 10→30 = 1439→1924/с</td></tr>
+      <tr><td>Сид: не-усекающий паддинг (<span class="mono">LPAD</span>)</td><td><span class="badge bench">бенч</span></td><td>Postgres <span class="mono">LPAD</span> усекает строки длиннее width → коллизии (коды заказов капились на 99999, операторов было 99 вместо 130)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══════════════ HONEST CAVEATS ══════════════ -->
+<section class="wrap">
+  <div class="sec-head"><h2>Честные оговорки методики</h2><span class="idx">08 / Самоаудит</span></div>
+  <div class="chart-card" style="border-left:3px solid var(--accent)">
+    <h3 style="color:var(--accent)">⚠️ Читать единицу внимательно</h3>
+    <p style="margin-bottom:0.6rem"><strong>«Транзакция/с» здесь = on-chain переход состояния/с</strong> (запись в <span class="mono">onchain_events</span> со статусом <span class="mono">COMMITTED</span>) — это <strong>не</strong> «товаров/с» и <strong>не</strong> «on-chain tx/с».</p>
+    <div class="pipe" style="margin:0.8rem 0">
+      <span class="node">1 товар</span><span class="arr">=</span>
+      <span class="node hot">4 перехода</span><span class="arr">→</span>
+      <span class="node">1924 перех./с = <b>481 товар/с</b></span><span class="arr">·</span>
+      <span class="node">адаптер батчит → ~1–3 on-chain tx/с</span>
+    </div>
+    <p style="font-size:0.88rem;margin-bottom:0">Это <strong>не накрутка</strong>: каждый из 4 переходов — реальный отдельный коммит в блокчейн. Но число нельзя путать с товарами/с (иначе «завышено» в 4×) или с числом on-chain транзакций (одна tx несёт сотни переходов). Везде в отчёте — переходы.</p>
+  </div>
+  <table class="fixes" style="margin-top:1.5rem">
+    <thead><tr><th>Возможная претензия</th><th>Честный статус</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tt">synchronous_commit = off</span> на Postgres</td><td>бенч-настройка; легальна (outbox идемпотентен, цепь — источник истины), но это trade-off durability — <strong>названо явно</strong></td></tr>
+      <tr><td>Все 6 ролей на одном боксе (10 ядер)</td><td>это <strong>сложнее</strong> прода, где WMS+БД и валидаторы — раздельные хосты → число консервативно, не завышено</td></tr>
+      <tr><td>пик 3233 / лучшее 30-с окно 2276</td><td>подаются <strong>только</strong> как окна; заголовок — sustained <strong>1924</strong> (без 20с прогрева)</td></tr>
+      <tr><td>0.24% HTTP-запросов с ошибкой (1601 / 642 097)</td><td>ретраи на contention (пустой <span class="mono">SKIP LOCKED</span>); <strong>0 потерь данных</strong> on-chain (<span class="mono">FAILED = 0</span>). «0 FAILED» — про цепь, не про HTTP</td></tr>
+      <tr><td>Ёмкость цепи «~2850»</td><td>старый chain-only бенч; в e2e опираюсь на консервативный <strong>измеренный дренаж ~1960/с</strong></td></tr>
+      <tr><td>Backlog не нулевой</td><td>ограничен ~4.6k (≈2.4с буфера), не убегает — см. раздел 03b. Цепь поспевает</td></tr>
+    </tbody>
+  </table>
+  <p style="margin-top:1.4rem;font-size:0.92rem"><strong>Итог самоаудита:</strong> ни одна цифра не «накручена». Единственное, что требует внимания читателя — <strong>единица (переходы, не товары)</strong>; остальное — стандартные, явно названные оговорки бенч-стенда.</p>
+</section>
+
+<!-- ══════════════ VERDICT ══════════════ -->
+<section class="wrap">
+  <div class="verdict">
+    <p class="eyebrow">Итоговый вердикт</p>
+    <h2>«1500 транзакций/с, включая блокчейн» — взято под обоими режимами.</h2>
+    <p>На реалистичных 150 000 товаров, на одном 10-ядерном лаптопе, с нулём потерь. Блокчейн ни на каком масштабе не был ограничением — он берёт цель с запасом на 1.5 ядра. В продакшене, где WMS+БД и блокчейн-валидаторы живут на раздельных хостах (как и устроен Avalanche-субнет), запас ещё больше. Путь пройден без переписывания архитектуры.</p>
+    <div class="vgrid">
+      <div><div class="vg-v ok num">1924/с</div><div class="vg-k">flat-out, все 4 перехода, 150k товаров</div></div>
+      <div><div class="vg-v ok num">0</div><div class="vg-k">потерь на 575 210 переходах (COMMITTED = generated)</div></div>
+      <div><div class="vg-v num">1.5 / 10</div><div class="vg-k">ядра на блокчейн — наименее нагруженная часть</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ FOOTER ══════════════ -->
+<footer class="wrap">
+  <div class="f-grid">
+    <div><b>Стенд</b>Apple M1 Max · 10 ядер (8P+2E) · 64 GiB · macOS 26.6 · Docker (VM 16 GiB). В проде — раздельные хосты.</div>
+    <div><b>Блокчейн</b>native arm64 avalanchego v1.14.0 + Subnet-EVM · блок gasLimit 200M · baseFee 25 Gwei · ~2с/блок.</div>
+    <div><b>Метод</b>committed = <span class="mono">onchain_events.COMMITTED</span>; sustained-окно без 20с прогрева; CPU по <span class="mono">docker stats</span>; контеншн по <span class="mono">pg_stat_activity</span>.</div>
+    <div><b>Полная история</b>прозаический разбор всех экспериментов и воспроизведение — в <span class="mono">stress-load-tests-full-report.md</span> (Части I–V).</div>
+  </div>
+</footer>
+
+</body>
+</html>

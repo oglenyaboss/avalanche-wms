@@ -13,13 +13,18 @@ import (
 	"wms/internal/ledger"
 )
 
+// allocateOrderBatchLimit — сколько NEW-заказов магазина Allocate лочит и обрабатывает за вызов.
+// Bounded, чтобы не захватывать тысячи row-локов на больших пулах заказов (см.
+// GetOrdersByDestinationForUpdate). Каденс/повторные вызовы добирают остаток FIFO.
+const allocateOrderBatchLimit = 500
+
 type Service struct {
 	repo assemblyRepository
 }
 
 type assemblyRepository interface {
 	WithTx(ctx context.Context, fn func(assemblyRepository) error) error
-	GetOrdersByDestinationForUpdate(ctx context.Context, destinationID uuid.UUID) ([]domain.Order, error)
+	GetOrdersByDestinationForUpdate(ctx context.Context, destinationID uuid.UUID, limit int) ([]domain.Order, error)
 	GetOrderLinesByOrderID(ctx context.Context, orderID uuid.UUID) ([]domain.OrderLine, error)
 	GetAllocateProductsForSKU(ctx context.Context, skuID uuid.UUID, limit int) ([]domain.Product, error)
 	GetSKUByID(ctx context.Context, skuID uuid.UUID) (*domain.SKU, error)
@@ -53,7 +58,7 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 	var resp AllocateResponse
 
 	err := s.repo.WithTx(ctx, func(txRepo assemblyRepository) error {
-		orders, err := txRepo.GetOrdersByDestinationForUpdate(ctx, destinationID)
+		orders, err := txRepo.GetOrdersByDestinationForUpdate(ctx, destinationID, allocateOrderBatchLimit)
 		if err != nil {
 			return fmt.Errorf("assembly.Service.Allocate get orders: %w", err)
 		}

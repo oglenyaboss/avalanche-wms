@@ -32,6 +32,18 @@ VALUES (
 )
 ON CONFLICT (username) DO NOTHING;
 
+INSERT INTO public.users (user_id, username, password_hash, role, is_active, created_at, updated_at)
+VALUES (
+  gen_random_uuid(),
+  'admin',
+  crypt('admin', gen_salt('bf')),
+  'ADMIN',
+  true,
+  now(),
+  now()
+)
+ON CONFLICT (username) DO NOTHING;
+
 -- 2) Warehouse
 INSERT INTO wms_inventory.warehouses (name, address, contact, created_at, updated_at)
 VALUES (

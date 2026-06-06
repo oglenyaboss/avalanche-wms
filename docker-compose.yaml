@@ -11,6 +11,8 @@ services:
       POSTGRES_USER: ${DB_USER:-root}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-root}
       POSTGRES_DB: ${DB_NAME:-wms_blockchain_db}
+      # pgx pool size. Default 10 = historical production value; raise for load benches.
+      WMS_DB_MAX_CONNS: ${WMS_DB_MAX_CONNS:-10}
       KAFKA_BROKER: kafka:9092
       LEDGER_ADAPTER_URL: http://ledger-adapter:8085
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env or environment}
@@ -30,7 +32,9 @@ services:
     networks:
       - app_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      # curl без -f: получаем тело даже при 503 (degraded).
+      # grep проверяет status=ok|degraded — под нагрузкой WMS считается живым в обоих случаях.
+      test: ["CMD-SHELL", "curl -s http://localhost:8080/health | grep -qE '\"status\":\"(ok|degraded)\"'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -116,10 +120,15 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "unset KAFKA_OPTS JMX_PORT && /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      # nc -z: мгновенная TCP-проверка, не запускает JVM.
+      # Прежний check (kafka-broker-api-versions.sh) стартовал JVM каждые 10s,
+      # конкурировал за память с Kafka и убивал её под нагрузкой.
+      # retries=15 + start_period=30s: JVM Kafka стартует медленно.
+      test: ["CMD-SHELL", "nc -z localhost 9092"]
       interval: 10s
       timeout: 10s
-      retries: 5
+      retries: 15
+      start_period: 30s
     networks:
       - app_network
 
@@ -141,7 +150,7 @@ services:
       - app_network
 
   debezium:
-    image: debezium/connect:2.5
+    image: debezium/connect:2.6   # 2.5 некорректно работал с pg под нагрузкой
     container_name: debezium-connect
     ports:
       - "8083:8083"
@@ -293,11 +302,14 @@ services:
       PRIVATE_KEY: ${PRIVATE_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
       CONTRACT_ADDR: ${CONTRACT_ADDR:-0x0000000000000000000000000000000000000000}
       DLQ_TOPIC: wms.dlq.v1
-      BATCH_SIZE: "10"
+      BATCH_SIZE: ${BATCH_SIZE:-10}
       # Env-interpolated so e2e scenarios can widen the batch window (S3/10) or shrink
       # the receipt poll + reconcile cadence (N1/11) by exporting these before a
       # `docker compose up --force-recreate ledger-adapter`. Defaults = production values.
       BATCH_TIMEOUT: ${BATCH_TIMEOUT:-100ms}
+      # PIPELINE_WINDOW — сколько batch-tx держать in-flight одновременно (flusher
+      # pipeline). 1 = serial (старый потолок ≈900/s); 3 = дефолт. Tunable для бенча.
+      PIPELINE_WINDOW: ${PIPELINE_WINDOW:-3}
       RECEIPT_POLL_TIMEOUT: ${RECEIPT_POLL_TIMEOUT:-30s}
       RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-30s}
       RECONCILE_MIN_AGE: ${RECONCILE_MIN_AGE:-1m}
@@ -333,7 +345,7 @@ services:
   subnet-node1:
     build:
       context: ./deploy/subnet/subnet-node
-    profiles: [test]
+    profiles: [test, stress]
     container_name: subnet-node1
     volumes:
       - ./deploy/subnet/network-genesis.json:/genesis/network-genesis.json:ro
@@ -359,7 +371,7 @@ services:
   subnet-init:
     build:
       context: ./deploy/subnet/subnet-init
-    profiles: [test]
+    profiles: [test, stress]
     container_name: subnet_init
     restart: "no"
     depends_on:
@@ -374,7 +386,7 @@ services:
   contract-deploy:
     build:
       context: ./deploy/contracts
-    profiles: [test]
+    profiles: [test, stress]
     container_name: contract_deploy
     depends_on:
       subnet-init:
@@ -385,6 +397,33 @@ services:
     restart: "no"
     networks:
       - app_network
+
+  # k6 — нагрузочный прогон сюиты tests/stress (только профиль stress).
+  # Бенч-скрипты (bench-sustained.sh/bench08.sh) гоняют k6 с хоста на localhost:8081;
+  # этот сервис — для `make stress` (вся сюита 01–07 в Docker).
+  k6:
+    build:
+      context: ./tests/stress
+      dockerfile: Dockerfile
+    container_name: k6-stress
+    profiles: [stress]
+    restart: "no"
+    environment:
+      WMS_URL: http://wms-service:8080
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      DB_NAME: ${DB_NAME:-wms_blockchain_db}
+    volumes:
+      - ./tests/stress:/tests/stress:ro
+    networks:
+      - app_network
+    depends_on:
+      wms_app:
+        condition: service_started
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:

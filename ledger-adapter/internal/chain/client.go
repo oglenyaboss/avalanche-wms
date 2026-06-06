@@ -40,15 +40,57 @@ func isRevertError(err error) bool {
 	return strings.Contains(msg, "execution reverted") || strings.Contains(msg, "revert")
 }
 
+// gasPriceHeadroomNum/Den масштабируют SuggestGasPrice вверх. Под нагрузкой при
+// пайплайне base fee растёт, и in-flight legacy-tx по старой цене underpriced'ится
+// и зависает (триггер invariant 4 — sent-tx stall). ×3 даёт запас. Type-2
+// (dynamic fee) tx с щедрым GasFeeCap — более надёжная долгосрочная форма;
+// legacy×headroom — минимальный фикс.
+const (
+	gasPriceHeadroomNum = 3
+	gasPriceHeadroomDen = 1
+)
+
+// gasLimitHeadroomNum/Den масштабируют estimateGas вверх. Под пайплайном tx
+// оценивается, пока prior-stage transition того же товара ещё in-flight (не в
+// блоке): estimateGas видит item в раннем статусе → считает по дешёвому
+// skip-пути контракта (ItemTransitionFailed), а к моменту майнинга item уже
+// Accepted/PutAway → реальный SSTORE-путь дороже → OutOfGas без запаса
+// (full-FSM smoke: ~28k skip vs ~32k real putaway → 807/2000 OOG). ×3/2
+// покрывает разрыв с маржой, не раздувая лимит чрезмерно (упаковка блока).
+// Серийный flusher этого не ловил — prior tx домайнивался до estimate.
+const (
+	gasLimitHeadroomNum = 3
+	gasLimitHeadroomDen = 2
+)
+
+// ethBackend — подмножество *ethclient.Client, которое использует Client.
+// Вынесено в интерфейс, чтобы в unit-тестах инжектить fake (реальный
+// *ethclient.Client удовлетворяет интерфейсу).
+type ethBackend interface {
+	PendingNonceAt(ctx context.Context, account common.Address) (uint64, error)
+	SuggestGasPrice(ctx context.Context) (*big.Int, error)
+	EstimateGas(ctx context.Context, call ethereum.CallMsg) (uint64, error)
+	ChainID(ctx context.Context) (*big.Int, error)
+	SendTransaction(ctx context.Context, tx *types.Transaction) error
+	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+	BlockNumber(ctx context.Context) (uint64, error)
+	Close()
+}
+
 // Client обёртка над ethclient с методами для BatchMappingWMS.
-// sendMu сериализует nonce-critical секцию в sendMethod.
+// sendMu сериализует nonce-critical секцию в sendMethod: локальный монотонный
+// nonce (nonce++ только при успешном SendTransaction) позволяет держать
+// несколько tx in-flight в одном блоке без per-send PendingNonceAt — иначе
+// pipeline сериализовался бы на скорости майнинга блоков (старое поведение).
 type Client struct {
-	eth          *ethclient.Client
+	eth          ethBackend
 	privateKey   *ecdsa.PrivateKey
 	fromAddress  common.Address
 	contractAddr common.Address
 	parsedABI    abi.ABI
 	sendMu       sync.Mutex
+	nonce        uint64 // следующий nonce для отправки; guarded by sendMu
+	nonceSeeded  bool   // seed произошёл; guarded by sendMu
 }
 
 // NewClient подключается к RPC, парсит приватник и ABI.
@@ -154,23 +196,31 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 		return common.Hash{}, fmt.Errorf("pack %s: %w", method, err)
 	}
 
-	// Сериализуем nonce-fetch + sign + send: один fromAddress.
+	// Сериализуем nonce-allocation + sign + send: один fromAddress.
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
+	// Локальный монотонный nonce: seed один раз из PendingNonceAt, дальше ++.
 	// Все RPC sub-calls (PendingNonceAt, SuggestGasPrice, ChainID,
 	// SendTransaction) — чистая сеть/RPC, не contract-level revert. Оборачиваем
 	// через ErrChainTransient, чтобы Flusher classified их как retry-able и не
 	// слал в DLQ при транзитивном блипе. См. MR !35 M7.
-	nonce, err := c.eth.PendingNonceAt(ctx, c.fromAddress)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("%w: nonce: %v", ErrChainTransient, err)
+	if !c.nonceSeeded {
+		n, nerr := c.eth.PendingNonceAt(ctx, c.fromAddress)
+		if nerr != nil {
+			return common.Hash{}, fmt.Errorf("%w: nonce: %v", ErrChainTransient, nerr)
+		}
+		c.nonce = n
+		c.nonceSeeded = true
 	}
+	nonce := c.nonce
 
 	gasPrice, err := c.eth.SuggestGasPrice(ctx)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("%w: gas price: %v", ErrChainTransient, err)
 	}
+	// Headroom против underpricing in-flight tx при росте base fee под нагрузкой.
+	gasPrice = new(big.Int).Div(new(big.Int).Mul(gasPrice, big.NewInt(gasPriceHeadroomNum)), big.NewInt(gasPriceHeadroomDen))
 
 	gasLimit, err := c.eth.EstimateGas(ctx, ethereum.CallMsg{
 		From: c.fromAddress,
@@ -185,6 +235,9 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 		}
 		return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainTransient, method, err)
 	}
+	// Запас на gas-лимит против skip→real разрыва под пайплайном (см.
+	// gasLimitHeadroomNum/Den) — иначе stale skip-оценка → OutOfGas-реверт.
+	gasLimit = gasLimit * gasLimitHeadroomNum / gasLimitHeadroomDen
 
 	chainID, err := c.eth.ChainID(ctx)
 	if err != nil {
@@ -202,5 +255,25 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	if err := c.eth.SendTransaction(ctx, signed); err != nil {
 		return common.Hash{}, fmt.Errorf("%w: send tx: %v", ErrChainTransient, err)
 	}
+	// nonce++ ТОЛЬКО после успешного SendTransaction — никаких дыр в nonce
+	// (invariant 3). При любой ошибке выше nonce не трогался → retry
+	// переиспользует то же значение.
+	c.nonce++
 	return signed.Hash(), nil
+}
+
+// ReseedNonce пере-инициализирует локальный nonce из on-chain PendingNonceAt.
+// Нужно pipeline-recovery'ю (invariant 4): после stall'а in-flight tx
+// перечитываем актуальный nonce, чтобы не продолжать слать с устаревшим
+// значением и не плодить дыры/коллизии.
+func (c *Client) ReseedNonce(ctx context.Context) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	n, err := c.eth.PendingNonceAt(ctx, c.fromAddress)
+	if err != nil {
+		return fmt.Errorf("reseed nonce: %w", err)
+	}
+	c.nonce = n
+	c.nonceSeeded = true
+	return nil
 }
