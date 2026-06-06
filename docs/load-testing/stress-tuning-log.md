@@ -1,5 +1,7 @@
 # Stress Tuning Log — goal: 1500 events/s on-chain (incl. blockchain)
 
+> ⚠️ **Исторический рабочий лог — хронология экспериментов (до коррекции 2026-06-04).** Итоговые выводы и числа — в `stress-load-tests-full-report.md`. В частности, вывод строк 60–61 про `proposerMinBlockDelay` как «пол» блока ~2с **исправлен** в §2.3 отчёта: реальная причина — ACP-226 `InitialDelayExcess` свежего субнета; `proposerMinBlockDelay=0` в avalanchego v1.14.0 уже стоит по умолчанию для L1, так что его правка была no-op.
+
 Project: `stresstest` compose (isolated). Hardware: Mac arm64, Docker 16.7GB/10CPU.
 
 ## Baseline (run 1 — full suite, emulated amd64 C-Chain, batch_size=10)

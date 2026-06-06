@@ -30,7 +30,7 @@ var receiptDelays = []time.Duration{
 // выйдет timeout. ethereum.NotFound (tx ещё не замайнен) — продолжаем poll.
 // Другая ошибка — возвращаем немедленно.
 //
-// Backoff: 50ms → 100ms → 200ms → 500ms → 1s → 2s → 2s → ...
+// Каденс: 50ms (первый poll), далее 100ms на каждый следующий (последний элемент receiptDelays повторяется).
 func WaitReceipt(
 	ctx context.Context,
 	fetcher ReceiptFetcher,

@@ -239,7 +239,7 @@ CREATE INDEX CONCURRENTLY idx_products_allocate
 ### Реальные исправления (рекомендуется закоммитить)
 | Изменение | Тип | Зачем |
 |---|---|---|
-| `ledger-adapter` Shape A пайплайн (5 коммитов; рычаги: окно in-flight `PIPELINE_WINDOW` default 3 / потолок 8 = `TxPoolAccountSlots`, размер пачки `BATCH_SIZE`) | код | блокчейн: серийный flusher → пайплайн (975→ёмкость ~1960–2850/с) |
+| `ledger-adapter` Shape A пайплайн (5 коммитов; рычаги: окно in-flight `PIPELINE_WINDOW` default 3 / потолок 8 (½ от `TxPoolAccountSlots`=16), размер пачки `BATCH_SIZE`) | код | блокчейн: серийный flusher → пайплайн (975→ёмкость ~1960–2850/с) |
 | `ledger-adapter` gas-limit headroom ×3/2 (`1b68adcc`, 5-й коммит пайплайна) | код | под окном in-flight `EstimateGas` видит товар в раннем статусе (~28k skip-cost), а к майнингу он уже Accepted → реальный SSTORE-путь (~32k) → **OutOfGas-реверт** (full-FSM smoke: 807/2000 раскладок упало). Запас ×3/2 → **0 FAILED**. Серийный flusher этого не ловил (предыдущая tx майнилась до оценки) |
 | `chain-genesis.json` `targetGas 200M→2B` | конфиг цепи | рекалибровка fee-market: без неё адаптер залипает под нагрузкой (baseFee ×50 → пробой `rpc-tx-fee-cap`) |
 | Миграция `0012_products_allocate_index` | схема БД | пропущенный индекс на горячем пути allocate (products) |
@@ -267,7 +267,8 @@ CREATE INDEX CONCURRENTLY idx_products_allocate
 
 ## 7. Методология и воспроизведение
 
-Все харнессы в worktree `.claude/worktrees/stress_tests` (untracked):
+Все харнессы закоммичены в `tests/stress/` (см. также `tests/stress/README.md`):
+- `profile-e2e-cpu.sh [VUS]` — **канон**: сквозной committed/backlog + per-container CPU-split; им снят заголовочный замер. Кнобы `N_ITEMS`/`PER_CP`/`SHIP_EVERY`/`PACE_RPS`/`CPU_SAMPLE`.
 - `profile-front.sh [VUS]` — фронт-потолок, чейн на паузе; `env SKU_COUNT, N_ITEMS`. Профайлер: `wait_event` + горячие запросы + CPU по контейнерам.
 - `profile-e2e.sh [VUS]` — сквозной committed, чейн включён; живой семплер committed/backlog.
 - `run-throughput.sh`, `bench-sustained.sh`, `bench08.sh` — ранние харнессы (front-throughput, drain back-half).
@@ -363,7 +364,7 @@ M1 Max = 8P+2E ядра; macOS (браузер/Telegram/Bitrix24/Docker-GUI) д�
 > ✅ **РАЗРЕШЕНО в [Части V](#10-часть-v--финал-1924с-во-весь-опор-на-масштабе-150k):** обе предпосылки выполнены (allocate `SKIP LOCKED` + индекс 0013, и пул 10→30) → на **150k товаров во весь опор получено 1924/с sustained, 0 потерь** прямо на одном боксе. Горизонтальное масштабирование WMS НЕ потребовалось — хватило снять захардкоженный пул.
 
 ### 9.7. Новые артефакты
-Харнессы: `profile-e2e-cpu.sh` (CPU-split + committed, кнобы `PER_CP`/`SHIP_EVERY`/`CPU_SAMPLE`/`PACE_RPS`), `reset-chain.sh` (таргетный редеплой цепи, сохраняет pg), `basefee-sampler.sh`, `feecheck.py`. Канонические фиксы (`chain-genesis.json` `targetGas=2B`, миграции 0012/0013, allocate `SKIP LOCKED`, конфигурируемый пул, `09-throughput.js` + `stress-throughput-seed.sql`) вынесены в коммиты — см. [§6](#6-что-изменено-и-рекомендации-для-прода).
+Харнессы: `profile-e2e-cpu.sh` (CPU-split + committed, кнобы `PER_CP`/`SHIP_EVERY`/`CPU_SAMPLE`/`PACE_RPS`), `reset-chain.sh` (таргетный редеплой цепи, сохраняет pg), `basefee-sampler.sh`. Канонические фиксы (`chain-genesis.json` `targetGas=2B`, миграции 0012/0013, allocate `SKIP LOCKED`, конфигурируемый пул, `09-throughput.js` + `stress-throughput-seed.sql`) вынесены в коммиты — см. [§6](#6-что-изменено-и-рекомендации-для-прода).
 
 ---
 

@@ -299,9 +299,9 @@
   <div class="sec-head"><h2>Живая динамика прогона</h2><span class="idx">03 / Один рычаг</span></div>
   <div class="chart-card">
     <div class="c-title"><h3>Committed-rate во времени — пул 10 против пул 30</h3></div>
-    <p class="c-cap">Тот же flat-out-прогон на 150k. Пул в 10 соединений душил concurrency — плато <em>под</em> целью (~1480/с, Postgres простаивал 2.1 ядра). Подъём пула до 30 разблокировал простаивавшие ядра — плато ушло <em>над</em> 1500 (~1924/с). Backlog в обоих случаях ровный.</p>
+    <p class="c-cap">Тот же flat-out-прогон на 150k. Пул в 10 соединений душил concurrency — плато <em>под</em> целью (~1439/с, Postgres простаивал 2.1 ядра). Подъём пула до 30 разблокировал простаивавшие ядра — плато ушло <em>над</em> 1500 (~1924/с). Backlog в обоих случаях ровный.</p>
     <figure>
-      <svg viewBox="0 0 800 380" width="100%" role="img" aria-label="График динамики: пул=10 выходит на плато около 1480, пул=30 — около 1924, цель 1500">
+      <svg viewBox="0 0 800 380" width="100%" role="img" aria-label="График динамики: пул=10 выходит на плато около 1439, пул=30 — около 1924, цель 1500">
         <!-- y gridlines -->
         <g font-family="'SF Mono','JetBrains Mono',ui-monospace,monospace" font-size="11" fill="#8a8a90">
           <line x1="60" y1="67.3" x2="780" y2="67.3" stroke="#e0ded8"/>
@@ -333,7 +333,7 @@
         <circle cx="757" cy="126" r="4" fill="#b0b4c0"/>
         <circle cx="757" cy="78" r="4.5" fill="#2347b8"/>
         <!-- inline labels -->
-        <text x="690" y="118" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#56565d" text-anchor="end">пул=10 → ~1480</text>
+        <text x="690" y="118" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#56565d" text-anchor="end">пул=10 → ~1439</text>
         <text x="700" y="55" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="800" fill="#2347b8" text-anchor="end">пул=30 → 1924</text>
       </svg>
       <div class="legend">
@@ -413,7 +413,7 @@
         <div class="cpu-seg cpu-subnet" style="flex-grow:1.3"><span>subnet 1.3</span></div>
         <div class="cpu-seg cpu-adapter" style="flex-grow:0.2"><span></span></div>
         <div class="cpu-seg cpu-k6" style="flex-grow:0.5"><span>k6</span></div>
-        <div class="cpu-seg cpu-cdc" style="flex-grow:0.3"><span></span></div>
+        <div class="cpu-seg cpu-cdc" style="flex-grow:0.1"><span></span></div>
       </div>
       <div class="cpu-groups">
         <div class="cpu-group front"><span class="cg-k">Фронт WMS</span><div class="cg-v num">7.7 ядра</div><span class="cg-s">postgres 5.8 + wms 1.9 — стенка</span></div>
