@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WMS — Нагрузочное тестирование: путь к 1500 TPS включая блокчейн</title>
+<style>
+  :root{
+    --bg:oklch(17% 0.02 260); --bg-2:oklch(21% 0.025 260); --surface:oklch(24% 0.03 260);
+    --line:oklch(34% 0.03 260); --text:oklch(93% 0.01 260); --muted:oklch(70% 0.02 260);
+    --accent:oklch(72% 0.17 250); --good:oklch(74% 0.17 150); --warn:oklch(80% 0.15 85);
+    --bad:oklch(68% 0.20 25); --proj:oklch(72% 0.16 300);
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,monospace;
+    --sans:"Inter",-apple-system,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.55;font-size:clamp(15px,0.9rem + 0.2vw,17px)}
+  .wrap{max-width:1080px;margin:0 auto;padding:clamp(1.5rem,4vw,4rem) clamp(1rem,3vw,2rem)}
+  header.hero{border-left:3px solid var(--accent);padding:0.4rem 0 0.4rem 1.4rem;margin-bottom:2.2rem}
+  .kicker{font-family:var(--mono);font-size:0.8rem;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent)}
+  h1{font-size:clamp(1.8rem,1rem + 3vw,3rem);line-height:1.05;margin:0.3rem 0 0.6rem;letter-spacing:-0.02em}
+  h2{font-size:clamp(1.3rem,1rem + 1vw,1.7rem);margin:3rem 0 1rem;letter-spacing:-0.01em;padding-bottom:0.4rem;border-bottom:1px solid var(--line)}
+  h3{font-size:1.05rem;margin:1.6rem 0 0.5rem;color:var(--text)}
+  p{color:var(--muted);margin:0.6rem 0}
+  .sub{color:var(--muted);font-size:1.05rem;max-width:64ch}
+  .grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));margin:1.5rem 0}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:1.1rem 1.2rem}
+  .card .n{font-family:var(--mono);font-size:1.85rem;font-weight:600;letter-spacing:-0.02em}
+  .card .l{font-size:0.82rem;color:var(--muted);margin-top:0.2rem}
+  .card.good .n{color:var(--good)} .card.bad .n{color:var(--bad)} .card.warn .n{color:var(--warn)}
+  .card.accent .n{color:var(--accent)} .card.proj .n{color:var(--proj)}
+  table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:0.92rem}
+  th,td{text-align:left;padding:0.55rem 0.7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:0.76rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);font-weight:600}
+  td.num,th.num{font-family:var(--mono);text-align:right;white-space:nowrap}
+  tr:hover td{background:var(--bg-2)}
+  .badge{display:inline-block;font-family:var(--mono);font-size:0.72rem;padding:0.12rem 0.5rem;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+  .b-pass{color:var(--good)} .b-fail{color:var(--bad)} .b-warn{color:var(--warn)} .b-meas{color:var(--accent)} .b-proj{color:var(--proj)}
+  .callout{background:var(--bg-2);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:0 12px 12px 0;padding:1rem 1.3rem;margin:1.5rem 0}
+  .callout.bad{border-left-color:var(--bad)} .callout.proj{border-left-color:var(--proj)} .callout.good{border-left-color:var(--good)}
+  .callout h3{margin-top:0}
+  code,.mono{font-family:var(--mono);font-size:0.88em;background:var(--bg-2);padding:0.08rem 0.35rem;border-radius:5px}
+  pre{background:var(--bg-2);border:1px solid var(--line);border-radius:12px;padding:1rem 1.2rem;overflow-x:auto;font-family:var(--mono);font-size:0.83rem;line-height:1.5;color:var(--text)}
+  .ladder{display:flex;flex-direction:column;gap:0.45rem;margin:1.2rem 0}
+  .rung{display:grid;grid-template-columns:minmax(0,1fr) 220px 90px;align-items:center;gap:0.8rem;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:0.5rem 0.9rem}
+  .rung .track{height:20px;border-radius:6px;background:var(--bg-2);position:relative;overflow:hidden}
+  .rung .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,var(--accent),var(--proj))}
+  .rung.bad .fill{background:var(--bad)} .rung.good .fill{background:var(--good)}
+  .rung .lab{font-size:0.85rem} .rung .lab b{font-family:var(--mono)}
+  .rung .val{font-family:var(--mono);text-align:right;font-weight:600}
+  .rung.target{border-color:var(--proj);border-style:dashed}
+  .rung.target .fill{background:repeating-linear-gradient(45deg,var(--proj),var(--proj) 6px,transparent 6px,transparent 12px)}
+  footer{margin-top:3.5rem;padding-top:1.5rem;border-top:1px solid var(--line);color:var(--muted);font-size:0.85rem}
+  .legend{display:flex;gap:1rem;flex-wrap:wrap;font-size:0.8rem;color:var(--muted);margin:0.5rem 0 1.5rem}
+  .legend span{display:inline-flex;align-items:center;gap:0.35rem}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  a{color:var(--accent)} ul{color:var(--muted)} li{margin:0.3rem 0}
+</style>
+</head>
+<body>
+<div style="position:sticky;top:0;z-index:99;background:oklch(30% 0.13 25);color:oklch(96% 0.02 25);border-bottom:2px solid oklch(68% 0.20 25);padding:0.85rem 1.5rem;font-family:system-ui,sans-serif;font-size:0.95rem;line-height:1.45">
+  ⚠️ <strong>УСТАРЕВШИЙ ОТЧЁТ (3 июня).</strong> Содержит промежуточные числа — <strong>975/с</strong> как headline, <strong>600/с</strong>, <strong>195×</strong> — которые <strong>ретрактированы</strong> в финальной версии (975/с = потолок серийного flusher'а, а не платформы). Актуальный результат — <strong>1924 перехода/с sustained</strong>. См. <code>stress-load-tests-final-report.html</code> и <code>stress-load-tests-full-report.md</code>.
+</div>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="kicker">WMS · Blockchain Ledger · Нагрузочное тестирование</div>
+    <h1>Путь к 1500&nbsp;TPS<br>включая блокчейн</h1>
+    <p class="sub">Сквозной пайплайн WMS&nbsp;→ outbox → Debezium → Kafka → ledger-adapter → Avalanche. Где была стена, как её снесли, до куда дошли и что осталось. Все цифры — с живого стенда.</p>
+  </header>
+
+  <div class="legend">
+    <span><span class="dot" style="background:var(--accent)"></span>measured — измерено на стенде</span>
+    <span><span class="dot" style="background:var(--proj)"></span>соседний стенд — тот же Subnet-EVM v0.8.0 / то же железо, параллельный submitter</span>
+    <span><span class="dot" style="background:var(--good)"></span>pass</span>
+    <span><span class="dot" style="background:var(--bad)"></span>wall</span>
+  </div>
+
+  <h2>Итог</h2>
+  <div class="grid">
+    <div class="card good"><div class="n">7/8</div><div class="l">k6-сценариев проходят пороги под нагрузкой (мисс — латентность /health)</div></div>
+    <div class="card good"><div class="n">2500/s</div><div class="l">синхронная генерация событий WMS (outbox) — запас 1.6× к цели</div></div>
+    <div class="card accent"><div class="n">975/s</div><div class="l">on-chain commit rate, <b>измерено</b> (1&nbsp;нода и 3&nbsp;ноды). Было 5/s на C-Chain = <b>195×</b></div></div>
+    <div class="card good"><div class="n">1820/s</div><div class="l"><b>устойчиво</b> (пик 2510) на соседнем стенде, параллельный submitter (BatchMapping b=10, 200M) — тот же Subnet-EVM v0.8.0 / железо; цель 1500 взята sustained</div></div>
+  </div>
+  <p><strong>Что доказано цифрами.</strong> Синхронная часть WMS держит 2500&nbsp;событий/с — с запасом к цели. Узкое место — блокчейн. На штатном <strong>C-Chain цель недостижима в принципе</strong> (лимит газа 15M от Apricot&nbsp;Phase&nbsp;1 + динамический fee-троттлинг → ~10/s). Перенос на <strong>Subnet-EVM</strong> (целевая архитектура проекта) с нативной сборкой и тюненым genesis поднял <b>реальный on-chain commit rate с&nbsp;5/s до&nbsp;975/s</b> — рост в&nbsp;195&nbsp;раз, подтверждённый устойчивым дренажом десятков тысяч событий и на одной, и на трёх нодах. Синхронная часть (2500/s) опережает цепочку (975/s) <em>by design</em>: outbox поглощает всплеск, а ledger-adapter дренирует его с устойчивой скоростью 975/s — backlog ограничен длительностью прогона, а не растёт неограниченно (это и есть смысл outbox-паттерна).</p>
+  <p><strong>Честно про 1500/s — и почему 975/s это не потолок платформы.</strong> 975/s — это потолок <em>последовательного</em> flusher'а (1 транзакция «в полёте»): <code>1950&nbsp;событий&nbsp;/&nbsp;2с-блок</code>. При этом такой батч наполняет блок всего на&nbsp;<b>~27%</b> (~56M из 200M газа), а больше в <em>одну</em> транзакцию не влезает — упор в лимит 128&nbsp;KB на транзакцию. Узкое место, таким образом, <b>не время блока, а одна-транзакция-в-полёте</b>. Бюджет газа на стоковых 2с-блоках = <code>200M&nbsp;/&nbsp;2с&nbsp;≈&nbsp;100M&nbsp;газа/с</code> → <b>~3200&nbsp;items/с</b> потолок при <code>~31k</code> газа/item. Это подтверждено эмпирически: на <b>соседнем стенде</b> (тот же Subnet-EVM&nbsp;v0.8.0, то же железо) <b>параллельный</b> submitter дал <b>1820&nbsp;items/с устойчиво</b> (пик 2510) для BatchMappingWMS&nbsp;b=10 @200M — apples-to-apples с нашими 975/с sustained, цель 1500 взята с запасом ~21%. Single-op (MappingWMS, ~2890&nbsp;tx/блок) — 858 устойчиво / 1545 пик. Всё на обычных 2с-блоках, набивая блок тысячами транзакций. Время блока (2с) — это <b>стартовое значение ACP-226</b> (см.&nbsp;§4/§5), а не жёсткий floor; но суб-секунда для 1500/s <em>не нужна</em>. Рычаг — <b>конвейеризация flusher'а</b> (несколько транзакций в полёте), а не время блока. Подробно — §5.</p>
+
+  <!-- ===================== WMS FUNCTIONAL ===================== -->
+  <h2>1. Функциональная нагрузка WMS API <span class="badge b-meas">measured</span></h2>
+  <p>Полный прогон 8 сценариев k6. Все исходные баги ревью (data-exhaustion 04/05/07, DESTINATION_ID&nbsp;06, ложный 404 в&nbsp;01) устранены и не воспроизводятся под нагрузкой.</p>
+  <table>
+    <thead><tr><th>Сценарий</th><th class="num">p95</th><th class="num">fail</th><th class="num">checks</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>01 · smoke</td><td class="num">6.7 ms</td><td class="num">0.00%</td><td class="num">11/11</td><td><span class="badge b-pass">pass</span></td></tr>
+      <tr><td>02 · health (→200 VU, 5м)</td><td class="num">553 ms</td><td class="num">0.00%</td><td class="num">381 124/381 124</td><td><span class="badge b-warn">p95&gt;500ms</span></td></tr>
+      <tr><td>03 · auth</td><td class="num">10.3 ms</td><td class="num">0.00%</td><td class="num">74 368/74 368</td><td><span class="badge b-pass">pass</span></td></tr>
+      <tr><td>04 · receiving-gate</td><td class="num">16.6 ms</td><td class="num">0.00%</td><td class="num">10 000/10 000</td><td><span class="badge b-pass">pass</span></td></tr>
+      <tr><td>05 · receiving-table</td><td class="num">14.1 ms</td><td class="num">0.00%</td><td class="num">18 000/18 000</td><td><span class="badge b-pass">pass</span></td></tr>
+      <tr><td>06 · assembly (11.6k rps)</td><td class="num">72.4 ms</td><td class="num">0.00%</td><td class="num">4.17M/4.17M</td><td><span class="badge b-pass">pass</span></td></tr>
+      <tr><td>07 · full-flow</td><td class="num">86 ms</td><td class="num">0.00%</td><td class="num">6002/6004</td><td><span class="badge b-pass">99.96%</span></td></tr>
+      <tr><td>08 · blockchain-tps (sync)</td><td class="num">41 ms</td><td class="num">0.00%</td><td class="num">15 000/15 000</td><td><span class="badge b-pass">2500 ev/s</span></td></tr>
+    </tbody>
+  </table>
+  <p><strong>02-health</strong> — единственный мисс: p95 553&nbsp;ms против &lt;500&nbsp;ms при 200&nbsp;VU (латентность, 0% ошибок). <strong>07</strong> — 2/6004 на <code>shipping:ship</code> (гонка terminal-состояния). Синхронная пропускная способность WMS — <b>2500 событий/с</b>.</p>
+
+  <!-- ===================== LADDER ===================== -->
+  <h2>2. Лестница тюнинга блокчейна <span class="badge b-meas">measured</span></h2>
+  <p>Каждая ступень — отдельный замер: сброс продуктов → флуд putaway → poll on-chain commit rate (<code>bench08.sh</code> / <code>bench-sustained.sh</code>, окнами 2с). Бары в лог-масштабе.</p>
+  <div class="ladder">
+    <div class="rung bad"><div class="lab"><b>bs=10</b> · C-Chain эмуляция amd64 <span class="badge b-meas">baseline</span></div><div class="track"><div class="fill" style="width:1%"></div></div><div class="val" style="color:var(--bad)">5/s</div></div>
+    <div class="rung bad"><div class="lab"><b>bs=300</b> · C-Chain эмуляция — QEMU-bound (13.5M-газ tx ~30с)</div><div class="track"><div class="fill" style="width:2%"></div></div><div class="val" style="color:var(--bad)">9/s</div></div>
+    <div class="rung bad"><div class="lab"><b>bs=300</b> · C-Chain <span style="color:var(--good)">native arm64</span> — fee-троттлинг (~30с/блок)</div><div class="track"><div class="fill" style="width:2%"></div></div><div class="val" style="color:var(--warn)">10/s</div></div>
+    <div class="rung good"><div class="lab"><b>bs=1500</b> · <span style="color:var(--proj)">Subnet-EVM</span> 100M-газ native</div><div class="track"><div class="fill" style="width:40%"></div></div><div class="val" style="color:var(--good)">600/s</div></div>
+    <div class="rung good"><div class="lab"><b>bs=1950</b> · Subnet-EVM 200M-газ, rpc-gas-cap 200M, <b>1 нода</b> <span class="badge b-meas">serial max</span></div><div class="track"><div class="fill" style="width:65%"></div></div><div class="val" style="color:var(--good)">975/s</div></div>
+    <div class="rung good"><div class="lab"><b>bs=1950</b> · Subnet-EVM, <b>3 ноды</b> (имитация прода) <span class="badge b-meas">measured</span></div><div class="track"><div class="fill" style="width:65%"></div></div><div class="val" style="color:var(--good)">975/s</div></div>
+    <div class="rung good"><div class="lab"><b>параллельный submitter</b> · Subnet-EVM, несколько tx/блок (b=10, 200M) · пик 2510 <span class="badge b-meas">соседний стенд</span></div><div class="track"><div class="fill" style="width:100%"></div></div><div class="val" style="color:var(--good)">1820/s</div></div>
+  </div>
+  <p>Устойчивый serial-замер на bs=1950: <b>1950 событий каждые 2с-блока → 975/s</b>, продренировано 39&nbsp;000+ событий без сбоев (0 FAILED в установившемся режиме), одинаково на 1 и 3 нодах. Это ровно <code>batch_size / block_time</code> — модель подтверждена. <b>Но это потолок именно последовательного flusher'а</b>: блок при этом заполнен лишь на ~27% (56M из 200M газа). Последняя ступень — не «быстрее блоки», а <b>несколько транзакций в блоке</b>: на соседнем Subnet-EVM-стенде параллельный submitter намерил 1820 items/с устойчиво (пик 2510) на тех же 2с-блоках (см.&nbsp;§5).</p>
+
+  <!-- ===================== C-CHAIN WALL ===================== -->
+  <h2>3. Почему C-Chain не может 1500/s <span class="badge b-meas">measured</span></h2>
+  <p>В отличие от Subnet-EVM (где потолок упирался в последовательный flusher, §5), на C-Chain стену держит <b>сама платформа</b> — и эти лимиты не снимаются параллельной отправкой:</p>
+  <div class="callout bad">
+    <h3>Две стены C-Chain</h3>
+    <p><strong>① Apricot Phase 1 фиксирует лимит газа блока = 15M</strong> (genesis объявляет 100M — AP1 переопределяет; в v1.12.2 нет ACP-176). Максимум ~535 событий/блок.</p>
+    <p><strong>② Динамический fee block-gas-cost троттлинг.</strong> По timestamp'ам блоков: высокогазовые блоки (8.45M) принудительно разносятся на ~30с. <em>Не зависит от архитектуры</em> — поэтому native arm64 (10/s) ≈ эмуляция (9/s) на bs=300.</p>
+    <p>Итог: абсолютный потолок C-Chain ~10/s при больших батчах. <b>native arm64 (снятие <code>--platform=linux/amd64</code>) обязателен</b> — под QEMU 40M+-газ блоки не исполняются вовремя; на Subnet-EVM выигрыш раскрывается.</p>
+  </div>
+
+  <!-- ===================== SUBNET ===================== -->
+  <h2>4. Subnet-EVM — стена снесена, 5/s → 975/s <span class="badge b-meas">measured</span></h2>
+  <p>Развёрнут реальный Subnet-EVM через <code>avalanche-cli</code> (тюненый genesis, native arm64). Контракт <code>BatchMappingWMS</code> задеплоен, адаптер подключён к реальному адресу — все коммиты верифицированы on-chain.</p>
+  <pre>feeConfig: gasLimit 200000000, targetBlockRate 1,
+           minBlockGasCost 0, maxBlockGasCost 0   # троттлинг отключён
+chain-config: rpc-gas-cap 200000000              # снят лимит estimateGas (был 50M)</pre>
+  <p>Ограничения снимались по мере подъёма батча:</p>
+  <table>
+    <thead><tr><th>Ограничение</th><th class="num">Лимит</th><th>Решение / результат</th></tr></thead>
+    <tbody>
+      <tr><td>C-Chain лимит газа (AP1)</td><td class="num">15M</td><td>Subnet-EVM genesis <code>feeConfig.gasLimit</code> = 200M ✓</td></tr>
+      <tr><td>fee block-gas-cost троттлинг</td><td class="num">~30с/блок</td><td><code>minBlockGasCost=0</code> ✓</td></tr>
+      <tr><td>QEMU (amd64 на arm-Mac)</td><td class="num">5–20×</td><td>нативный arm64 образ ✓</td></tr>
+      <tr><td>RPC estimateGas cap</td><td class="num">50M</td><td><code>rpc-gas-cap</code> = 200M ✓</td></tr>
+      <tr><td><b>Размер транзакции</b></td><td class="num">128 KB</td><td>жёсткий cap EVM → <b>~2000 событий/tx</b> (64 байта/событие)</td></tr>
+      <tr><td><b>Время блока (стартовый floor)</b></td><td class="num">~2 с</td><td><b>ACP-226</b> dynamic min-delay (Granite/v1.14.0): стартовый <code>excess&nbsp;=&nbsp;7&nbsp;970&nbsp;124</code> = <code>D·ln(2000)+1</code> → ровно ~2000&nbsp;мс. <code>proposerMinBlockDelay</code> тут ни при чём — в v1.14.0 он уже <code>=0</code> для L1, поэтому проба «=0» была no-op</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ===================== PATH TO 1500 ===================== -->
+  <h2>5. От 975/s к 1500/s — рычаг найден и доказан <span class="badge b-meas">measured · соседний стенд</span></h2>
+  <p>975/s — это потолок <b>последовательного flusher'а</b>, а не платформы. Он держит ровно одну транзакцию «в полёте» → 1&nbsp;tx/блок → блок заполнен на ~27% (56M из 200M газа). Узкое место — <b>именно сериализация отправки</b>, и снимается оно параллелизмом, а не ускорением блоков. Больше событий в <em>одну</em> tx не упаковать (лимит 128&nbsp;KB ≈ 2000 событий), но в <em>блок</em> влезают тысячи транзакций — он ограничен газом (200M), а не размером tx.</p>
+  <div class="callout good">
+    <h3>Доказано на соседнем стенде: параллельный submitter → 1820/с устойчиво (пик 2510)</h3>
+    <p>Тот же <b>Subnet-EVM v0.8.0</b>, то же железо (один macOS-хост), но submitter с <b>несколькими транзакциями в полёте</b> (per-lane nonce, fire-and-forget, 24 горутины), на стоковых 2с-блоках. Сравнение честное — <b>устойчиво</b> (как наши 975/с: дренаж десятков тысяч событий) против <b>пик</b> (лучшее окно):</p>
+    <ul style="margin:0.4rem 0">
+      <li><b>BatchMappingWMS b=10 @200M:</b> <b>1820 items/с устойчиво</b>, 2510 пик — apples-to-apples с 975/с, цель 1500 sustained взята (+21%)</li>
+      <li><b>BatchMappingWMS b=10 @100M:</b> 1230 устойчиво, 1870 пик</li>
+      <li><b>MappingWMS (1 оп/tx, ~69k газа) @200M:</b> 858 устойчиво, 1545 пик, ~2890 tx/блок — без батчинга sustained не дотягивает (упор в gas/tx); батчинг и решает</li>
+    </ul>
+    <p>Сходится с бюджетом газа: <code>200M / 2с ≈ 100M газа/с</code> → ~3200 items/с теоретический потолок при ~31k газа/item. То есть 1500/s — не «расчётный», а <b>наблюдавшийся sustained на платформе</b> результат. Оговорка: соседний стенд бил батчами b=10 (много tx в блоке), наш — 1950 событий в одной tx; сопоставимо на уровне «бизнес-событий/с».</p>
+  </div>
+  <p>Что осталось в этом стенде — <b>портировать конвейер в flusher ledger-adapter</b>: держать N транзакций в полёте (incrementing nonce, асинхронный приём receipt'ов) вместо <code>BatchCall → WaitReceipt</code> по одной. Даже 2&nbsp;tx/блок = 1950/s. Правка <b>correctness-критичная</b> (порядок nonce, crash-recovery, идемпотентность #44/#47, коммит Kafka-оффсета только после COMMITTED) — делается с командой и под тестами. Референс уже есть: параллельный loadgen соседнего стенда.</p>
+  <div class="callout">
+    <h3>Почему «сделать блок 1с» — неправильный рычаг</h3>
+    <p>2с — это <b>стартовое значение ACP-226</b> (Granite/v1.14.0), а не жёсткий floor консенсуса. Минимальная задержка <code>m = M·e^(excess/D)</code>: M=1&nbsp;мс, D=2²⁰, стартовый <code>excess=7&nbsp;970&nbsp;124 = D·ln(2000)+1</code> → ровно ~2000&nbsp;мс. Опускается флагом <code>min-delay-target</code> (мс) — <b>не</b> <code>proposerMinBlockDelay</code> (он в v1.14.0 уже =0, поэтому прежняя проба «=0» была no-op). Но excess ползёт максимум <b>200/блок (~3600 блоков, чтобы вдвое)</b>, и это состояние заголовка → <b>сбрасывается в 2с при каждом передеплое</b>. Для воспроизводимого бенчмарка — многочасовой налог на каждый прогон ради того, что параллелизм даёт сразу. Суб-секунда Avalanche реальна (это и есть смысл ACP-226), но для 1500/s она не нужна.</p>
+  </div>
+
+  <!-- ===================== MULTINODE ===================== -->
+  <h2>6. Multi-node — имитация прода <span class="badge b-meas">measured</span></h2>
+  <p>Subnet-EVM развёрнут с <b>3 валидаторами</b> (NodeID 7Xhw2 / MFrZF / NFBbb) — реальная топология прода. Повторный прогон bs=1950: <b>975/s — идентично одной ноде.</b></p>
+  <div class="callout good">
+    <h3>Это корректный, ожидаемый результат — не регресс</h3>
+    <p>В блокчейне каждый валидатор <em>переисполняет каждый блок</em>, поэтому TPS не растёт с числом нод — он равен или чуть ниже одно-нодового. Получив ту же цифру 975/s на трёх нодах, мы подтвердили: пропускная способность <b>сохраняется</b> при переходе к децентрализованной прод-топологии. Масштабирование TPS даёт не число валидаторов, а параметры цепи (§4) и параллелизм адаптера (§5).</p>
+  </div>
+
+  <!-- ===================== METHOD ===================== -->
+  <h2>Методология и воспроизводимость</h2>
+  <ul>
+    <li>Изолированный compose-проект <code>stresstest</code> + отдельные volumes — данные основного стека не затронуты.</li>
+    <li>Реальная цепочка: контракт развёрнут (receipt верифицирован), <code>ledger-adapter</code> на реальном адресе (не <code>0x0</code>); все коммиты — реальные on-chain транзакции.</li>
+    <li>Замер: дельта <code>onchain_events WHERE status='COMMITTED'</code> + backlog через <code>NOT EXISTS</code>, окнами 2с; устойчивый дренаж 20–36k backlog (а не короткий всплеск).</li>
+    <li>Артефакты: <code>deploy/subnet/wms-genesis.json</code>, <code>wms-chainconfig.json</code>, <code>bench08.sh</code>, <code>bench-sustained.sh</code>, L7-прокси <code>subnet-proxy.py</code> (dockerized адаптер → host-нода с Host-rewrite).</li>
+    <li>Газ: событие 08 — skipped-transition putaway (~28k); реальный FSM-переход ~45k. Потолок serial упирается в <b>размер транзакции</b>, не в газ, поэтому профиль газа на 975/s не влияет.</li>
+  </ul>
+
+  <footer>
+    Живые прогоны на стенде: Mac arm64, Docker 16.7&nbsp;GB / 10&nbsp;CPU. avalanche-cli 1.9.6, avalanchego v1.14.0 (subnet), v1.12.2 (C-Chain). 2&nbsp;июня&nbsp;2026.<br>
+    <span class="badge b-meas">measured</span> — снято на стенде (этот или соседний Subnet-EVM v0.8.0 / то же железо). Диагноз времени блока (ACP-226 dynamic min-delay) сверен с исходниками avalanchego v1.14.0 (<code>vms/evm/acp226</code>) и subnet-evm v0.8.0.<br>
+    <em>Ревизия 3&nbsp;июня&nbsp;2026:</em> floor 2с переатрибутирован с <code>proposerMinBlockDelay</code> на ACP-226 (стартовый <code>excess</code>); путь к 1500/s — <b>параллельный submitter</b> (доказан sustained на соседнем стенде: 1820 items/с устойчиво, пик 2510), а не ускорение блоков.
+  </footer>
+
+</div>
+</body>
+</html>
