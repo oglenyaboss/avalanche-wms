@@ -5,7 +5,7 @@
 #
 # Usage: ./profile-e2e-cpu.sh [VUS]   env: SKU_COUNT=70 N_ITEMS=24000
 set -u
-cd /Users/lenya/Projects/university/blockchain_project/.claude/worktrees/stress_tests
+cd "$(git rev-parse --show-toplevel)" || exit 1
 export PATH="$HOME/.foundry/bin:$PATH"
 export COMPOSE_PROJECT_NAME=stresstest
 

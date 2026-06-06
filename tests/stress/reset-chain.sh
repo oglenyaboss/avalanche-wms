@@ -3,7 +3,7 @@
 # preserving postgres (OLTP tuning + base data) and kafka. Targeted reset = wipe subnet_data +
 # shared_state, rebuild subnet trio (new chain + contract), restart adapter to repoint.
 set -u
-cd /Users/lenya/Projects/university/blockchain_project/.claude/worktrees/stress_tests
+cd "$(git rev-parse --show-toplevel)" || exit 1
 export COMPOSE_PROJECT_NAME=stresstest
 export PATH="$HOME/.foundry/bin:$PATH"
 
