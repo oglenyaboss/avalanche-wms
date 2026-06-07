@@ -1,0 +1,17 @@
+[Unit]
+Description=AvalancheGo (geo subnet validator)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/opt/avalanchego/avalanchego --config-file=/etc/avalanchego/node-config.json
+Restart=on-failure
+RestartSec=5
+MemoryHigh=750M
+MemoryMax=900M
+CPUQuota=60%
+OOMScoreAdjust=800
+Environment=GOMEMLIMIT=650MiB
+LimitNOFILE=32768
+[Install]
+WantedBy=multi-user.target
