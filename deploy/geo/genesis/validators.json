@@ -1,0 +1,39 @@
+{
+  "networkID": 1338,
+  "note": "Public validator identities baked into the geo subnet genesis as initialStakers. No private keys here — staking creds live gitignored under deploy/geo/staking/<name>/. Generated via deploy/geo/remote/harvest-nodeid.sh (info.getNodeID).",
+  "validators": [
+    {
+      "name": "dino",
+      "host": "vpn-dino",
+      "region": "MD",
+      "role": "validator (Phase 0 seed)",
+      "nodeID": "NodeID-LesoTxBYvcsELUerCVSZ5NRYKFYWCV2tx",
+      "signer": {
+        "publicKey": "0x880964193870b32c718e05f5c65fb171117a8ff3dcceb89da6af6c32ab4bf8ed7558a9d02105efb4f6f48fa79834c75a",
+        "proofOfPossession": "0x86fb2ec460eed7a730a6390214fb65923485efe10bac2ecbf43cfe5dd4fa032fdb360e4788c5523acb374b4145cadd5402da42840934125ab4c8e66e466889dd107c3c3f8227a4482cc960a11f543956aba14a592dffbc2ea22f7927fd585e71"
+      }
+    },
+    {
+      "name": "alex",
+      "host": "vpn-alex",
+      "region": "RO",
+      "role": "validator (Phase 0)",
+      "nodeID": "NodeID-KCHqR7dwSSZbmiPCnmCbTi1iTa9BuhXNz",
+      "signer": {
+        "publicKey": "0x839aa4e7e07158cff46db8b9bb573ffbfac79f48dd3e1415f6bc233b09ee4b8b1936c3f1df913bf69faa15dc03c3b4f5",
+        "proofOfPossession": "0x858dae2ead4a5aae52b77609c3baf422f6f2c47dc0770c04f6616c710c90e4b16c72f0ff7c5bfcced949596ab592dfba19896348fd9340cecf5e92d08cfa85507cd2f636f1337172fdfdb490560a036b09d67ca638bbf0d811a35f4f7350ae3c"
+      }
+    },
+    {
+      "name": "itldc",
+      "host": "vpn-itldc",
+      "region": "NL",
+      "role": "validator (baked into genesis now; boots in Phase 1)",
+      "nodeID": "NodeID-6dAHTdMCmDjVGR9XVKmYWR3kvhDbV64pC",
+      "signer": {
+        "publicKey": "0x906119599f90e83681219b019b8793d831ebeccd315d471e8385a8a9390de95b31315576a2c92131c829d55428c424d1",
+        "proofOfPossession": "0x818780a598abb0387b021d382960667c726baf1c9405d7843d6dce1cc244d2328f7ad4f78ed2e78bc349c573e5a83d9d04fd16f22b323ffd46afd7fd6c053392cb3dc2c4f0022ba7a0b1940de1aaadecd4cfdf9d7166038479a2373d071f8086"
+      }
+    }
+  ]
+}
