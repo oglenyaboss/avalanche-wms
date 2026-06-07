@@ -58,8 +58,10 @@ echo "  after tx1 (both up): $bn1   (blocks produced: $([ "$bn1" -gt "$bn0" ] &&
 echo "  while alex DOWN:      $bnDown"
 echo "  after alex back:      $bnFinal"
 if [ "$bnDown" -gt "$bn1" ] 2>/dev/null; then
-  echo "  => SURVIVED node loss: blocks kept advancing with a validator down (fault tolerance)."
+  echo "  => SURVIVED node loss: blocks advanced with a validator down (fault tolerance)."
+elif [ "$bnFinal" -gt "$bnDown" ] 2>/dev/null; then
+  echo "  => HALTED while down, RESUMED on return (strict quorum / BFT safety-over-liveness)."
 else
-  echo "  => HALTED with a validator down; resumed on return: $([ "$bnFinal" -gt "$bnDown" ] && echo YES || echo 'no new tx). '" (strict quorum / BFT)."
+  echo "  => froze while down, no resume yet (send another tx to confirm)."
 fi
 echo "=================================================="
