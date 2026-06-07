@@ -1,0 +1,13 @@
+{
+  "network-id": 1338,
+  "genesis-file": "/etc/avalanchego/network-genesis.geo.json",
+  "sybil-protection-enabled": false,
+  "http-host": "127.0.0.1",
+  "http-port": 9650,
+  "staking-port": 9651,
+  "plugin-dir": "/opt/avalanchego/plugins",
+  "data-dir": "/var/lib/avalanchego",
+  "snow-sample-size": 3,
+  "snow-quorum-size": 2,
+  "log-level": "info"
+}
