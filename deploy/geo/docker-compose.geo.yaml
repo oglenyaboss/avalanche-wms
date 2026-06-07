@@ -1,0 +1,36 @@
+# Geo node-home: a local RPC node behind NAT that joins the geo subnet network (1338) by
+# bootstrapping OUTBOUND to dino, syncs the subnet-evm chain, and serves RPC on 127.0.0.1:9750.
+# Reuses the deploy/subnet/subnet-node image READ-ONLY (avalanchego v1.14.0 + subnet-evm plugin) —
+# does not modify anything under deploy/subnet (C-5 isolation). Profile `geo` keeps it out of the
+# default/test/stress stacks. Config is generated (gitignored) by genesis/gen-configs.sh.
+#
+#   cd deploy/geo && docker compose -f docker-compose.geo.yaml --profile geo up -d --build geo-node-home
+#
+name: geo
+
+services:
+  geo-node-home:
+    build:
+      context: ../subnet/subnet-node
+    profiles: [geo]
+    container_name: geo-node-home
+    volumes:
+      - ./genesis/network-genesis.geo.json:/genesis/network-genesis.geo.json:ro
+      - ./genesis/node-config.home.gen.json:/node-config.json:ro
+      - geo_home_data:/data
+    ports:
+      # loopback only — RPC carries the prefunded ewoq key, must not be exposed on the LAN.
+      - "127.0.0.1:9750:9650"
+    command: ["./avalanchego", "--config-file=/node-config.json"]
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - |
+          curl -sf http://localhost:9650/ext/health | grep -qE '"healthy":[[:space:]]*true'
+      interval: 10s
+      retries: 40
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  geo_home_data:

@@ -36,3 +36,26 @@ echo "SYBIL=$SYBIL  TRACK_SUBNETS='${TRACK:-<empty, pre-subnet>}'"
 render dino "$DINO_IP" "" ""
 render alex "$ALEX_IP" "$DINO_IP:9651" "$DINO_NODEID"
 render itldc "$ITLDC_IP" "$DINO_IP:9651" "$DINO_NODEID"
+
+# node-home: non-validator RPC node behind NAT (docker). Outbound bootstrap to dino, generates
+# its own staking cert in /data (nodeID irrelevant — not in genesis). Container paths (/plugins,
+# /data, http-host 0.0.0.0); exposed on the host as 127.0.0.1:9750.
+cat > node-config.home.gen.json <<EOF
+{
+  "network-id": 1338,
+  "genesis-file": "/genesis/network-genesis.geo.json",
+  "sybil-protection-enabled": $SYBIL,
+  "http-host": "0.0.0.0",
+  "http-port": 9650,
+  "staking-port": 9651,
+  "plugin-dir": "/plugins",
+  "data-dir": "/data",
+  "bootstrap-ips": "$DINO_IP:9651",
+  "bootstrap-ids": "$DINO_NODEID",
+  "track-subnets": "${TRACK}",
+  "snow-sample-size": 3,
+  "snow-quorum-size": 2,
+  "log-level": "info"
+}
+EOF
+echo "  wrote node-config.home.gen.json (RPC node, bootstrap=$DINO_IP:9651)"
