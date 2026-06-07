@@ -1,0 +1,6 @@
+artifacts/
+staking/
+genesis/network-genesis.geo.json
+*.key
+*.crt
+*.log
