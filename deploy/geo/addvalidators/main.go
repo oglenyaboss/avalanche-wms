@@ -98,24 +98,32 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("parse VM_ID: %w", err)
 	}
 
-	key := genesis.EWOQKey
-	kc := secp256k1fx.NewKeychain(key)
-	wallet, err := primary.MakeWallet(ctx, cfg.uri, kc, kc, primary.WalletConfig{})
-	if err != nil {
-		return fmt.Errorf("make wallet: %w", err)
-	}
-	pWallet := wallet.P()
-
-	// Idempotency: reuse an existing chain of this name, else create subnet + chain.
+	// Idempotency check first: to issue AddSubnetValidatorTx against an EXISTING subnet, the
+	// wallet must load that subnet's owner via WalletConfig.SubnetIDs at construction time
+	// (otherwise "failed to fetch owner: not found"). On a fresh create the wallet learns the
+	// owner from its own CreateSubnetTx, so SubnetIDs is only needed in the found case.
 	blockchainID, subnetStr, found, err := findChain(cfg.uri, cfg.chainName)
 	if err != nil {
 		return fmt.Errorf("idempotency check: %w", err)
 	}
 	var subnetID ids.ID
+	walletCfg := primary.WalletConfig{}
 	if found {
 		if subnetID, err = ids.FromString(subnetStr); err != nil {
 			return fmt.Errorf("parse existing subnetID %q: %w", subnetStr, err)
 		}
+		walletCfg.SubnetIDs = []ids.ID{subnetID}
+	}
+
+	key := genesis.EWOQKey
+	kc := secp256k1fx.NewKeychain(key)
+	wallet, err := primary.MakeWallet(ctx, cfg.uri, kc, kc, walletCfg)
+	if err != nil {
+		return fmt.Errorf("make wallet: %w", err)
+	}
+	pWallet := wallet.P()
+
+	if found {
 		fmt.Printf("==> chain %q exists: blockchain=%s subnet=%s — skipping creation\n", cfg.chainName, blockchainID, subnetID)
 	} else {
 		fmt.Println("==> IssueCreateSubnetTx")

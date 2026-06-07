@@ -35,3 +35,4 @@ render() { # name public-ip bootstrap-ips bootstrap-ids
 echo "SYBIL=$SYBIL  TRACK_SUBNETS='${TRACK:-<empty, pre-subnet>}'"
 render dino "$DINO_IP" "" ""
 render alex "$ALEX_IP" "$DINO_IP:9651" "$DINO_NODEID"
+render itldc "$ITLDC_IP" "$DINO_IP:9651" "$DINO_NODEID"
