@@ -2,6 +2,7 @@ artifacts/
 staking/
 genesis/network-genesis.geo.json
 genesis/hosts.env
+genesis/chain-ids.env
 *.gen.json
 *.key
 *.crt
