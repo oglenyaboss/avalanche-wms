@@ -33,11 +33,16 @@ type Config struct {
 	PrivateKeys []string
 }
 
-// pipelineWindowMax — потолок in-flight окна. Узел держит TxPoolAccountSlots=16
-// исполняемых слотов на аккаунт; sequential-nonce in-flight tx'ы одного signer'а
-// их занимают, и >8 рискует "account slots" реджектом (stall, маскирующийся под
-// Hole 1). Throughput всё равно gas-bound (~3 tx/блок), W=2 уже перекрывает 1500.
-const pipelineWindowMax = 8
+// perSignerWindow — сколько batch-tx in-flight держим на ОДИН signer-аккаунт. Узел
+// держит TxPoolAccountSlots=16 исполняемых слотов на аккаунт; 8 — это 50% запас (НЕ
+// сам лимит, см. obs 10635) против "account slots" реджекта sequential-nonce tx'ов
+// одного signer'а. Эффективный потолок окна = perSignerWindow × N_signers: каждый
+// batch шардится по N аккаунтам (один tx на signer), per-signer in-flight остаётся
+// ≤ окно, но суммарная slot-ёмкость = N×16 и N независимых nonce-цепей убирают
+// cross-product head-of-line stall. На WAN-цепи глубина окна = throughput (Little:
+// in-flight ÷ latency), потолок НЕ в газе — гео-чейн при 200M gasLimit жжёт
+// ~0.04%/блок (запас ~30×); лимитирует feeding-cadence и WAN receipt-latency.
+const perSignerWindow = 8
 
 // Load reads configuration from environment variables with sensible defaults.
 //
@@ -64,14 +69,6 @@ func Load() (*Config, error) {
 		// PipelineWindow: сколько batch-tx держать in-flight одновременно (flusher
 		// pipeline). 1 = старое serial-поведение (один batch на блок). Дефолт 3.
 		PipelineWindow: getIntDefault("PIPELINE_WINDOW", 3),
-	}
-
-	if c.PipelineWindow < 1 {
-		c.PipelineWindow = 1
-	}
-	if c.PipelineWindow > pipelineWindowMax {
-		fmt.Fprintf(os.Stderr, "config: PIPELINE_WINDOW=%d clamped to %d (TxPoolAccountSlots ceiling)\n", c.PipelineWindow, pipelineWindowMax)
-		c.PipelineWindow = pipelineWindowMax
 	}
 
 	required := []struct {
@@ -104,6 +101,18 @@ func Load() (*Config, error) {
 	}
 	if len(c.PrivateKeys) == 0 {
 		c.PrivateKeys = []string{c.PrivateKey}
+	}
+
+	// Потолок in-flight окна масштабируется с числом signer'ов: каждый держит
+	// perSignerWindow слотов, multi-signer спред даёт суммарно perSignerWindow×N.
+	pipelineWindowMax := perSignerWindow * len(c.PrivateKeys)
+	if c.PipelineWindow < 1 {
+		c.PipelineWindow = 1
+	}
+	if c.PipelineWindow > pipelineWindowMax {
+		fmt.Fprintf(os.Stderr, "config: PIPELINE_WINDOW=%d clamped to %d (perSignerWindow=%d × %d signers)\n",
+			c.PipelineWindow, pipelineWindowMax, perSignerWindow, len(c.PrivateKeys))
+		c.PipelineWindow = pipelineWindowMax
 	}
 
 	// Инвариант: reconcile-loop не должен трогать строку, пока её ещё дожимает
