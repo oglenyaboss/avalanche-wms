@@ -15,6 +15,11 @@
 # untouched alongside — the adapter simply points elsewhere.
 services:
   ledger-adapter:
+    # WAN-цепь: одиночный stall (receipt > timeout на медленном/холодном блоке) роняет
+    # consumer с exit. Designed-recovery = exit→restart→reconcile→resume, но без restart
+    # policy контейнер остаётся мёртвым и прогон коллапсит (committed=0). unless-stopped
+    # включает самовосстановление; reconcile-loop подтянет домайненные за downtime tx.
+    restart: unless-stopped
     networks:
       - app_network
       - geo_default          # join node-home's network → reach geo-node-home:9650 by container name
@@ -29,6 +34,12 @@ services:
       # tx по N аккаунтам (N× ёмкость txpool-слотов → насыщение WAN-цепи). Пусто →
       # single-signer (PRIVATE_KEY). Аккаунты фондятся deploy/geo/fund-signers.sh.
       PRIVATE_KEYS: "${PRIVATE_KEYS:-}"
+      # WAN-цепь коммитит бёрстами: интервал блока под нагрузкой 25–100с (а холодный
+      # первый блок ~33с), тогда как локальный дефолт RECEIPT_POLL_TIMEOUT=30s роняет
+      # consumer по receipt-timeout на первом же медленном блоке (committed=0, коллапс).
+      # 120с покрывает WAN-разброс; reconcile-min-age держит инвариант (> timeout).
+      RECEIPT_POLL_TIMEOUT: "${RECEIPT_POLL_TIMEOUT:-120s}"
+      RECONCILE_MIN_AGE: "${RECONCILE_MIN_AGE:-180s}"
 
 networks:
   geo_default:
