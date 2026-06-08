@@ -5,9 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/segmentio/kafka-go"
 )
+
+// maxConfirmConcurrency — потолок одновременных receipt-poll'ов в пределах одного
+// batch'а. Параллельный confirm снимает serial-bottleneck (collector блокировался
+// бы на первой незамайненной tx и сериализовал окно против block-производства), но
+// слишком много одновременных poll'ов к единственному observer-узлу (node-home)
+// воссоздали бы RPC-contention, из-за которой receipt'ы таймаутят (та самая
+// первопричина stall'ов). Collector обрабатывает batch'и по одному (FIFO), поэтому
+// это и есть глобальный потолок одновременных poll'ов. 16 — баланс.
+const maxConfirmConcurrency = 16
 
 // drainedBatch — единица offset-commit'а: ВСЕ kafka-сообщения одного слитого
 // batch'а вместе с in-flight tx'ами, на которые Send их разбил. Offsets
@@ -131,23 +141,46 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 }
 
-// confirmAndCommit подтверждает все txs одного batch'а FIFO и коммитит его
-// offsets целиком только при полном успехе.
+// confirmAndCommit подтверждает все txs одного batch'а ПАРАЛЛЕЛЬНО (до
+// maxConfirmConcurrency одновременно) и коммитит его offsets целиком только при
+// полном успехе. Параллельность load-bearing для multi-signer throughput'а: на
+// WAN-цепи каждый receipt ждёт своего блока, и serial-collector блокировался бы на
+// первой незамайненной tx, сериализуя всё окно (residence ≫ block cadence). batch
+// готов по max(receipt latency), а не sum. Порядок МЕЖДУ batch'ами остаётся FIFO
+// (Run обрабатывает по одному batch'у), поэтому per-partition offset high-water mark
+// монотонен — мы коммитим offsets только после полного успеха ЭТОГО batch'а.
 func (p *Pipeline) confirmAndCommit(ctx context.Context, db drainedBatch) error {
-	for i := range db.txs {
-		tx := &db.txs[i]
-		err := p.confirmer.Confirm(ctx, tx)
-		if err == nil {
-			continue
+	if n := len(db.txs); n > 0 {
+		results := make([]error, n)
+		sem := make(chan struct{}, maxConfirmConcurrency)
+		var wg sync.WaitGroup
+		for i := range db.txs {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				results[i] = p.confirmer.Confirm(ctx, &db.txs[i])
+			}(i)
 		}
-		if errors.Is(err, ErrConfirmStalled) {
-			p.log.Error("in-flight tx stalled — abandoning window, offsets NOT committed (redelivery reconciles)",
-				"tx", tx.TxHash.Hex(), "aggregate", tx.Aggregate)
-			return fmt.Errorf("%w: %v", ErrPipelineStalled, err)
+		wg.Wait()
+		// Stall имеет приоритет: даже одна незамайненная tx → бросаем окно без
+		// коммита (фатально → рестарт + reconcile). Не отменяем братьев на лету —
+		// они дожимаются своими receiptTimeout'ами, классификация после.
+		for i, err := range results {
+			if errors.Is(err, ErrConfirmStalled) {
+				p.log.Error("in-flight tx stalled — abandoning window, offsets NOT committed (redelivery reconciles)",
+					"tx", db.txs[i].TxHash.Hex(), "aggregate", db.txs[i].Aggregate)
+				return fmt.Errorf("%w: %v", ErrPipelineStalled, err)
+			}
 		}
-		// Не-stall (transient store/DLQ ошибка в Confirm) — тоже бросаем без
-		// коммита; рестарт + redelivery — безопасное восстановление.
-		return fmt.Errorf("confirm %s: %w", tx.Aggregate, err)
+		for i, err := range results {
+			if err != nil {
+				// Не-stall (transient store/DLQ ошибка или ctx-отмена) — бросаем без
+				// коммита; рестарт/shutdown + redelivery — безопасное восстановление.
+				return fmt.Errorf("confirm %s: %w", db.txs[i].Aggregate, err)
+			}
+		}
 	}
 	if err := p.committer.CommitMessages(ctx, db.kafkaMsgs...); err != nil {
 		return fmt.Errorf("commit offsets: %w", err)

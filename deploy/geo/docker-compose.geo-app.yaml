@@ -1,0 +1,35 @@
+# docker-compose.geo-app.yaml — repoint the WMS ledger-adapter at the GEO subnet chain.
+#
+# Layer this over the base compose (use deploy/geo/run-app-on-geo.sh, which exports GEO_RPC_URL and
+# GEO_CONTRACT_ADDR from the geo env files):
+#   docker compose -f docker-compose.yaml -f deploy/geo/docker-compose.geo-app.yaml up -d --force-recreate --no-deps ledger-adapter
+#
+# Why only the adapter: the wms backend is chain-decoupled (writes the outbox; Debezium→Kafka→adapter
+# is the ONLY bridge to the chain), so this single override makes the whole app produce geo-anchored
+# on-chain proofs. The *_FILE vars are blanked so a stale shared_state/{rpc_url,contract_addr,
+# deployer_key}.txt left by a past `--profile test` run can't shadow these direct values
+# (ledger-adapter config.go consults <NAME>_FILE only when it is non-empty).
+#
+# Isolation (C-5): additive override only. Does NOT touch deploy/subnet, deploy/contracts, the base
+# docker-compose.yaml, or the shared_state volume. The local subnet-node1 chain may keep running
+# untouched alongside — the adapter simply points elsewhere.
+services:
+  ledger-adapter:
+    networks:
+      - app_network
+      - geo_default          # join node-home's network → reach geo-node-home:9650 by container name
+    environment:
+      RPC_URL_FILE: ""
+      CONTRACT_ADDR_FILE: ""
+      PRIVATE_KEY_FILE: ""
+      RPC_URL: "${GEO_RPC_URL:?set GEO_RPC_URL via deploy/geo/run-app-on-geo.sh}"
+      CONTRACT_ADDR: "${GEO_CONTRACT_ADDR:?run deploy/geo/contracts/deploy-geo.sh first}"
+      PRIVATE_KEY: "0x56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027"  # ewoq, funded on geo
+      # PRIVATE_KEYS (comma-separated) включает multi-signer: flusher шардит in-flight
+      # tx по N аккаунтам (N× ёмкость txpool-слотов → насыщение WAN-цепи). Пусто →
+      # single-signer (PRIVATE_KEY). Аккаунты фондятся deploy/geo/fund-signers.sh.
+      PRIVATE_KEYS: "${PRIVATE_KEYS:-}"
+
+networks:
+  geo_default:
+    external: true           # created by deploy/geo/docker-compose.geo.yaml (project `geo`)

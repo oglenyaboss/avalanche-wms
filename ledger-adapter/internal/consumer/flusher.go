@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"math/big"
 	"time"
@@ -57,22 +58,33 @@ type InflightTx struct {
 var ErrConfirmStalled = errors.New("confirm stalled")
 
 // Flusher — pipeline: группировка по aggregate_type → обработка в FSM-порядке →
-// для каждого sub-batch: idempotency-filter → InsertPending → chain.BatchCall →
-// MarkSent → WaitReceipt → MarkCommitted / MarkFailed+DLQ.
+// для каждого sub-batch: idempotency-filter → InsertPending → шардинг по signer'у →
+// chain.BatchCall → MarkSent → WaitReceipt → MarkCommitted / MarkFailed+DLQ.
 type Flusher struct {
-	chain          ChainCaller
+	chains         []ChainCaller // N signer-аккаунтов; Send шардит по ним по ProductID
+	receiptReader  ChainCaller   // = chains[0]; receipt-чтения node-global (Confirm/reconcile)
 	store          Store
 	dlq            DLQPublisher
 	receiptTimeout time.Duration
 	log            *slog.Logger
 }
 
-func NewFlusher(chainCaller ChainCaller, store Store, dlq DLQPublisher, receiptTimeout time.Duration, log *slog.Logger) *Flusher {
+// NewFlusher принимает один или несколько signer-клиентов (≥1). Send шардит
+// in-flight tx по ProductID между ними (signerIndex) — каждый item остаётся на
+// одном signer'е, поэтому per-signer nonce-порядок = FSM-порядок (контракт требует
+// Accepted→PutAway→Picked→Shipped на item). N signer'ов = N× in-flight ёмкость
+// (каждый ограничен TxPoolAccountSlots) → насыщение WAN-цепи. receipt-чтения идут
+// через chains[0] (любой узел возвращает любой receipt).
+func NewFlusher(chains []ChainCaller, store Store, dlq DLQPublisher, receiptTimeout time.Duration, log *slog.Logger) *Flusher {
 	if log == nil {
 		log = slog.Default()
 	}
+	if len(chains) == 0 {
+		panic("NewFlusher: need ≥1 signer client")
+	}
 	return &Flusher{
-		chain:          chainCaller,
+		chains:         chains,
+		receiptReader:  chains[0],
 		store:          store,
 		dlq:            dlq,
 		receiptTimeout: receiptTimeout,
@@ -146,24 +158,32 @@ func (f *Flusher) Send(ctx context.Context, msgs []*Message) ([]InflightTx, erro
 			continue
 		}
 
-		ids, eventIDs, itemIDs := buildBatchArgs(pending)
-		txHash, err := f.chain.BatchCall(ctx, agg, eventIDs, itemIDs)
-		if err != nil {
-			if errors.Is(err, chain.ErrChainTransient) {
-				f.log.Warn("chain call transient error — will retry", "aggregate", agg, "err", err)
-				return inflight, fmt.Errorf("chain call transient: %w", err)
+		// Шардим pending по signer'у (ProductID → signerIndex): item остаётся на
+		// одном signer'е → per-signer nonce-порядок = FSM-порядок. Один aggregate
+		// одного batch'а → до N txs (по shard'у на signer), in-flight ёмкость ×N.
+		shards := shardBySigner(pending, len(f.chains))
+		for si, shard := range shards {
+			if len(shard) == 0 {
+				continue
 			}
-			f.log.Error("chain call failed", "aggregate", agg, "err", err, "size", len(pending))
-			if rerr := f.recordFailure(ctx, pending, ids, "", err.Error()); rerr != nil {
-				return inflight, rerr
+			ids, eventIDs, itemIDs := buildBatchArgs(shard)
+			txHash, err := f.chains[si].BatchCall(ctx, agg, eventIDs, itemIDs)
+			if err != nil {
+				if errors.Is(err, chain.ErrChainTransient) {
+					f.log.Warn("chain call transient error — will retry", "aggregate", agg, "signer", si, "err", err)
+					return inflight, fmt.Errorf("chain call transient: %w", err)
+				}
+				f.log.Error("chain call failed", "aggregate", agg, "signer", si, "err", err, "size", len(shard))
+				if rerr := f.recordFailure(ctx, shard, ids, "", err.Error()); rerr != nil {
+					return inflight, rerr
+				}
+				continue
 			}
-			continue
+			if err := f.store.MarkSent(ctx, ids, txHash.Hex()); err != nil {
+				return inflight, fmt.Errorf("mark sent: %w", err)
+			}
+			inflight = append(inflight, InflightTx{Aggregate: agg, TxHash: txHash, IDs: ids, Msgs: shard})
 		}
-
-		if err := f.store.MarkSent(ctx, ids, txHash.Hex()); err != nil {
-			return inflight, fmt.Errorf("mark sent: %w", err)
-		}
-		inflight = append(inflight, InflightTx{Aggregate: agg, TxHash: txHash, IDs: ids, Msgs: pending})
 	}
 
 	for agg, sub := range grouped {
@@ -180,7 +200,7 @@ func (f *Flusher) Send(ctx context.Context, msgs []*Message) ([]InflightTx, erro
 // (DLQ+MarkFailed); timeout/RPC-fail → ErrConfirmStalled (строки остаются SENT,
 // без DLQ — pipeline запустит recovery, reconcile-loop подтянет).
 func (f *Flusher) Confirm(ctx context.Context, tx *InflightTx) error {
-	receipt, err := chain.WaitReceipt(ctx, f.chain, tx.TxHash, f.receiptTimeout)
+	receipt, err := chain.WaitReceipt(ctx, f.receiptReader, tx.TxHash, f.receiptTimeout)
 	if err != nil {
 		f.log.Warn("receipt not confirmed — stall", "aggregate", tx.Aggregate, "tx", tx.TxHash.Hex(), "err", err)
 		return fmt.Errorf("%w: tx %s: %v", ErrConfirmStalled, tx.TxHash.Hex(), err)
@@ -254,7 +274,7 @@ func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]
 		case txHash != "":
 			// Уже broadcast'нуто (crash-recovery S2 / receipt-timeout N1). НЕ resubmit:
 			// reconcile существующую tx, tx_hash остаётся стабильным.
-			terminal, rerr := reconcileReceipt(ctx, f.chain, f.store, []uuid.UUID{m.EventID}, txHash, f.log)
+			terminal, rerr := reconcileReceipt(ctx, f.receiptReader, f.store, []uuid.UUID{m.EventID}, txHash, f.log)
 			if rerr != nil {
 				return nil, fmt.Errorf("reconcile %s: %w", m.EventID, rerr)
 			}
@@ -296,4 +316,27 @@ func groupByAggregate(msgs []*Message) map[string][]*Message {
 		groups[m.AggregateType] = append(groups[m.AggregateType], m)
 	}
 	return groups
+}
+
+// shardBySigner делит сообщения на n групп по signerIndex(ProductID). Каждый item
+// (все его FSM-стадии разделяют ProductID) всегда попадает в одну группу → один
+// signer → монотонный per-signer nonce = FSM-порядок (cross-batch и intra-batch).
+func shardBySigner(msgs []*Message, n int) [][]*Message {
+	shards := make([][]*Message, n)
+	for _, m := range msgs {
+		shards[signerIndex(m.ProductID, n)] = append(shards[signerIndex(m.ProductID, n)], m)
+	}
+	return shards
+}
+
+// signerIndex — детерминированный ProductID → [0,n). FNV-1a по 16 байтам UUID
+// равномерно распределяет товары; uuid.Nil маппится консистентно (item'ы с
+// незаданным ProductID идут к одному signer'у, FSM-порядок сохраняется).
+func signerIndex(productID uuid.UUID, n int) int {
+	if n <= 1 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write(productID[:])
+	return int(h.Sum32() % uint32(n))
 }

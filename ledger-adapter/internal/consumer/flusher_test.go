@@ -208,7 +208,7 @@ func newFlusherT() (*Flusher, *stubChain, *stubStore, *stubDLQ) {
 	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
 	st := newStubStore()
 	dq := &stubDLQ{}
-	f := NewFlusher(ch, st, dq, 2*time.Second, slog.Default())
+	f := NewFlusher([]ChainCaller{ch}, st, dq, 2*time.Second, slog.Default())
 	return f, ch, st, dq
 }
 

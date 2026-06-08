@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/ethclient"
 	"golang.org/x/sync/errgroup"
 
 	"ledger-adapter/internal/chain"
@@ -61,19 +63,39 @@ func run(log *slog.Logger) error {
 	defer pool.Close()
 	repo := store.NewRepository(pool)
 
-	cli, err := chain.NewClient(cfg.RpcURL, cfg.PrivateKey, cfg.ContractAddr)
-	if err != nil {
+	// Multi-signer: один Client на signer-ключ. Flusher шардит in-flight tx по
+	// ProductID между ними (N× in-flight ёмкость). clients[0] обслуживает receipt-
+	// чтения (Confirm/reconcile/health) — receipt'ы node-global.
+	callers := make([]consumer.ChainCaller, 0, len(cfg.PrivateKeys))
+	clients := make([]*chain.Client, 0, len(cfg.PrivateKeys))
+	// Закрываем все клиенты одним deferred-closure (ranges по слайсу на момент
+	// выполнения → закроет и те, что успели создаться при раннем return).
+	defer func() {
+		for _, cl := range clients {
+			cl.Close()
+		}
+	}()
+	for i, key := range cfg.PrivateKeys {
+		cl, cerr := chain.NewClient(cfg.RpcURL, key, cfg.ContractAddr)
+		if cerr != nil {
+			return fmt.Errorf("signer %d: %w", i, cerr)
+		}
+		clients = append(clients, cl)
+		callers = append(callers, cl)
+		log.Info("chain client ready", "signer_index", i, "signer", cl.FromAddress().Hex())
+	}
+	// Fail-fast: каждый signer должен быть профинансирован, иначе его tx'ы под
+	// нагрузкой реверят (out-of-funds) и портят замер/целостность.
+	if err := assertSignersFunded(rootCtx, cfg.RpcURL, clients, log); err != nil {
 		return err
 	}
-	defer cli.Close()
-	log.Info("chain client ready", "signer", cli.FromAddress().Hex())
 
 	brokers := strings.Split(cfg.KafkaBrokers, ",")
 	prod := dlq.NewProducer(brokers, cfg.DLQTopic)
 	defer func() { _ = prod.Close() }()
 
-	flusher := consumer.NewFlusher(cli, repo, prod, cfg.ReceiptPollTimeout, log)
-	reconciler := consumer.NewReconciler(cli, repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log)
+	flusher := consumer.NewFlusher(callers, repo, prod, cfg.ReceiptPollTimeout, log)
+	reconciler := consumer.NewReconciler(clients[0], repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log)
 
 	g, gCtx := errgroup.WithContext(rootCtx)
 	g.Go(func() error {
@@ -91,7 +113,7 @@ func run(log *slog.Logger) error {
 		return reconciler.Run(gCtx)
 	})
 
-	srv := startHealthServer(log, cfg.Port, cli)
+	srv := startHealthServer(log, cfg.Port, clients[0])
 
 	runErr := g.Wait()
 	log.Info("consumer stopped, shutting down http")
@@ -106,6 +128,28 @@ func run(log *slog.Logger) error {
 		return runErr
 	}
 	log.Info("consumer drained, bye")
+	return nil
+}
+
+// assertSignersFunded fail-fast'ит, если любой signer не профинансирован: под
+// нагрузкой out-of-funds tx реверят и портят и замер, и WMS↔chain целостность.
+// Throwaway-dial — отдельно от signer-клиентов, только для проверки на старте.
+func assertSignersFunded(ctx context.Context, rpcURL string, clients []*chain.Client, log *slog.Logger) error {
+	ec, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		return fmt.Errorf("balance-check dial: %w", err)
+	}
+	defer ec.Close()
+	for i, cl := range clients {
+		bal, err := ec.BalanceAt(ctx, cl.FromAddress(), nil)
+		if err != nil {
+			return fmt.Errorf("signer %d (%s) balance: %w", i, cl.FromAddress().Hex(), err)
+		}
+		if bal.Sign() == 0 {
+			return fmt.Errorf("signer %d (%s) is UNFUNDED — fund it before start", i, cl.FromAddress().Hex())
+		}
+		log.Info("signer funded", "signer_index", i, "addr", cl.FromAddress().Hex(), "balance_wei", bal.String())
+	}
 	return nil
 }
 

@@ -25,6 +25,12 @@ type Config struct {
 	ReconcileMinAge    time.Duration
 	PipelineWindow     int
 	LogLevel           string
+	// PrivateKeys — набор signer-аккаунтов (multi-signer). Всегда ≥1. Если задан
+	// PRIVATE_KEYS (comma-separated) — используется он; иначе [PrivateKey]. Flusher
+	// шардит in-flight tx по ProductID между этими аккаунтами: каждый аккаунт
+	// ограничен TxPoolAccountSlots узла, поэтому N аккаунтов = N× in-flight, что
+	// насыщает WAN-цепь (single signer голодит её — ~16 слотов < block-ёмкость).
+	PrivateKeys []string
 }
 
 // pipelineWindowMax — потолок in-flight окна. Узел держит TxPoolAccountSlots=16
@@ -84,6 +90,20 @@ func Load() (*Config, error) {
 			return nil, err
 		}
 		*r.field = v
+	}
+
+	// Multi-signer: PRIVATE_KEYS (comma-separated) шардит in-flight нагрузку по N
+	// аккаунтам. Падаем на единственный PRIVATE_KEY, если не задан. PRIVATE_KEY
+	// остаётся required (back-compat + дефолтный signer[0]).
+	if raw := os.Getenv("PRIVATE_KEYS"); raw != "" {
+		for _, k := range strings.Split(raw, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				c.PrivateKeys = append(c.PrivateKeys, k)
+			}
+		}
+	}
+	if len(c.PrivateKeys) == 0 {
+		c.PrivateKeys = []string{c.PrivateKey}
 	}
 
 	// Инвариант: reconcile-loop не должен трогать строку, пока её ещё дожимает
