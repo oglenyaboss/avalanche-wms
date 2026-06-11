@@ -65,6 +65,9 @@ fixtures в `/tmp` — их готовят обёртки (ниже).
 ## Как воспроизвести заголовок (150k → ~1924/с sustained)
 
 ```bash
+# 0. STRESS-тюнинг postgres — ⚠️ ОБЯЗАТЕЛЬНО на свежем стеке (см. tune-ловушку ниже)
+COMPOSE_PROJECT_NAME=stresstest ./tests/stress/setup/apply-postgres-tune.sh
+
 # 1. поднять WMS с увеличенным пулом — ⚠️ ОБЯЗАТЕЛЬНО (см. ловушку ниже)
 WMS_DB_MAX_CONNS=30 docker compose up -d wms_app
 
@@ -72,6 +75,15 @@ WMS_DB_MAX_CONNS=30 docker compose up -d wms_app
 #    засидит, прогонит k6, снимет committed-rate + CPU-split)
 N_ITEMS=150000 ./tests/stress/profile-e2e-cpu.sh 70
 ```
+
+> ⚠️ **Tune-ловушка (важнее pool-ловушки).** Заголовок 1924/с зависит от OLTP-тюнинга postgres
+> (`synchronous_commit=off` + буферы), который **жил только в volume** (ALTER SYSTEM) и **не был в
+> репозитории**. `docker compose down -v` его стирает → свежий postgres стартует на дефолтах
+> (`synchronous_commit=on`) → commit-путь адаптера (масса мелких InsertPending) становится
+> fsync-bound → e2e падает до ~**455/с** (цепь голодает, 1 батч/блок), а фронт (булк-инсерты)
+> не страдает — отсюда парадокс «pool-30 медленнее pool-10». Лечится `apply-postgres-tune.sh`
+> (см. [`setup/postgres-tune.sql`](setup/postgres-tune.sql)). Проверка:
+> `docker exec postgres_db psql -U root -d wms_blockchain_db -tAc "SHOW synchronous_commit"` → `off`.
 
 > ⚠️ **Pool-ловушка.** `profile-e2e-cpu.sh` поднимает **только** `ledger-adapter`, а `wms_app`
 > не трогает. Если не поднять WMS с `WMS_DB_MAX_CONNS=30` вручную, он стартует с дефолтным

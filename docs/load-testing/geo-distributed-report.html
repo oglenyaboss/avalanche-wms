@@ -1,0 +1,151 @@
+<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Гео-распределённое тестирование WMS → Subnet-EVM</title><style>
+:root{--paper:#f7f6f3;--surface:#fff;--ink:#17171a;--ink-soft:#56565d;--ink-faint:#8a8a90;--rule:#e0ded8;
+--rule-strong:#c7c5bd;--accent:#2347b8;--accent-soft:#e8edfb;--chain:#157a4a;--chain-soft:#e2f1e8;
+--wall:#b5641a;--wall-soft:#f6ebdd;--bad:#c0392b;--maxw:1000px;
+--space-section:clamp(3rem,2rem + 4vw,5.5rem);--text-hero:clamp(2.4rem,1.2rem + 4.4vw,4.2rem);
+--text-h2:clamp(1.4rem,1.05rem + 1.5vw,2rem);--text-stat:clamp(2rem,1.3rem + 2.6vw,3.1rem);
+--font-sans:'Helvetica Neue',Helvetica,Arial,'Segoe UI',system-ui,sans-serif;
+--font-mono:'SF Mono','JetBrains Mono','Roboto Mono',ui-monospace,monospace;}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-sans);
+font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 clamp(1.2rem,3vw,2.5rem)}
+section{padding-block:var(--space-section);border-top:1px solid var(--rule)}section:first-of-type{border-top:none}
+.eyebrow{font-size:.74rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);
+display:flex;align-items:center;gap:.6rem;margin:0 0 1.4rem}
+.eyebrow::before{content:"";width:28px;height:2px;background:var(--accent);display:inline-block}
+h1{font-size:var(--text-hero);line-height:1.02;letter-spacing:-.025em;font-weight:800;margin:0}
+h2{font-size:var(--text-h2);line-height:1.1;letter-spacing:-.018em;font-weight:750;margin:0 0 .4rem}
+h3{font-size:1.02rem;letter-spacing:-.01em;margin:1.6rem 0 .3rem;font-weight:700}
+p{margin:0 0 1rem;color:var(--ink-soft);max-width:70ch}.lead{font-size:clamp(1.05rem,.98rem + .5vw,1.3rem);color:var(--ink);max-width:60ch}
+strong{color:var(--ink);font-weight:700}.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.num{font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.hero{padding-top:clamp(3rem,2rem + 4vw,5rem)}
+.statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--rule);
+border:1px solid var(--rule);margin:2rem 0}
+.stat{background:var(--surface);padding:1.3rem 1.4rem}
+.stat .v{font-size:var(--text-stat);font-weight:800;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums}
+.stat .k{font-size:.78rem;color:var(--ink-faint);margin-top:.5rem;text-transform:uppercase;letter-spacing:.06em}
+.stat.chain .v{color:var(--chain)}.stat.accent .v{color:var(--accent)}.stat.wall .v{color:var(--wall)}
+.nodes{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin:2rem 0}
+.node{background:var(--surface);border:1px solid var(--rule);padding:1.2rem 1.3rem;position:relative}
+.node .flag{font-size:1.6rem}.node .nm{font-weight:750;margin:.3rem 0 .1rem}
+.node .id{font-family:var(--font-mono);font-size:.72rem;color:var(--ink-faint);word-break:break-all}
+.node .ok{position:absolute;top:1.2rem;right:1.3rem;width:9px;height:9px;border-radius:50%;background:var(--chain)}
+figure.fig{margin:1.6rem 0 0;background:var(--surface);border:1px solid var(--rule);padding:1rem 1.1rem .6rem}
+figure.fig figcaption{font-size:.8rem;color:var(--ink-faint);margin-bottom:.6rem;text-transform:uppercase;letter-spacing:.05em}
+svg.chart{width:100%;height:auto;display:block}
+.chart .grid{stroke:var(--rule);stroke-width:1}.chart .ax{fill:var(--ink-faint);font-size:11px;font-family:var(--font-mono)}
+.chart .ax-y{text-anchor:end}.chart .ax-x{text-anchor:middle}
+.chart .fault{fill:var(--wall-soft);opacity:.7}.chart .fault-lbl{fill:var(--wall);text-anchor:middle;font-weight:700}
+.legend{display:flex;gap:1.2rem;flex-wrap:wrap;margin:.6rem 0 .2rem;font-size:.8rem;color:var(--ink-soft)}
+.lk{display:flex;align-items:center;gap:.4rem}.lk i{width:14px;height:3px;border-radius:2px;display:inline-block}
+table{width:100%;border-collapse:collapse;margin:1.4rem 0;font-size:.92rem}
+th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--rule)}
+th{font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-faint);font-weight:700}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.callout{background:var(--chain-soft);border-left:3px solid var(--chain);padding:1rem 1.2rem;margin:1.6rem 0;border-radius:0 4px 4px 0}
+.callout.warn{background:var(--wall-soft);border-color:var(--wall)}
+.callout p{color:var(--ink);margin:0}
+footer{padding:2.5rem 0 4rem;color:var(--ink-faint);font-size:.82rem;font-family:var(--font-mono)}
+</style></head><body>
+<div class="wrap">
+<section class="hero">
+  <div class="eyebrow">Гео-распределённый блокчейн · нагрузка и отказоустойчивость</div>
+  <h1>WMS → Subnet-EVM<br>в трёх странах</h1>
+  <p class="lead">Устойчивый прогон складского пайплайна против реально распределённой сети из четырёх
+  валидаторов (Молдова · Румыния · Нидерланды) под честным stake-weighted BFT, с инъекцией отказа
+  узла в середине нагрузки.</p>
+  <div class="statgrid">
+    <div class="stat chain"><div class="v">27.2</div><div class="k">событий/с, устойчиво</div></div>
+    <div class="stat accent"><div class="v">1.9 с</div><div class="k">коммит p50</div></div>
+    <div class="stat chain"><div class="v">18</div><div class="k">блоков под kill-1 · консенсус жив</div></div>
+    <div class="stat chain"><div class="v">0</div><div class="k">потеряно под kill-1</div></div>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Топология</div>
+  <h2>Четыре независимых валидатора в 3 юрисдикциях</h2>
+  <p>Сеть networkID <span class="mono">1338</span>, субсеть-EVM chainId
+  <span class="mono">0x1869f</span>. Все узлы — нативный avalanchego под systemd на
+  VPS с 1 ядром, пирятся по WAN, финализируют под snow-консенсусом (sample 3 / quorum 2).</p>
+  <div class="nodes"><div class="node"><span class="ok"></span><div class="flag">🇲🇩</div><div class="nm">dino · MD 🇲🇩</div><div class="id">высота 471 · peers 4 · RSS 123 МБ · CPU 6.6 %</div></div><div class="node"><span class="ok"></span><div class="flag">🇷🇴</div><div class="nm">alex · RO 🇷🇴</div><div class="id">высота 471 · peers 4 · RSS 120 МБ · CPU -73.4 %</div></div><div class="node"><span class="ok"></span><div class="flag">🇳🇱</div><div class="nm">itldc · NL 🇳🇱</div><div class="id">высота 471 · peers 4 · RSS 124 МБ · CPU 13.3 %</div></div><div class="node"><span class="ok"></span><div class="flag">🇲🇩</div><div class="nm">evolvica · MD 🇲🇩</div><div class="id">высота 471 · peers 4 · RSS 130 МБ · CPU 7.1 %</div></div></div>
+</section>
+
+<section>
+  <div class="eyebrow">Методология</div>
+  <h2>Что именно измерялось</h2>
+  <p>Нагрузка подаётся k6-харнессом (<span class="mono">tests/stress/09-throughput.js</span>) в режиме
+  <span class="mono">constant-arrival-rate</span>: реальный складской поток приёмка → раскладка →
+  сборка → отгрузка по HTTP API WMS на устойчивом темпе 8 итер/с в течение
+  7m. WMS пишет события в outbox → Debezium CDC → ledger-adapter батчует и
+  отправляет on-chain. Метрики снимаются двумя независимыми потоками: из БД (коммиты, очередь,
+  задержка, целостность) и <strong>напрямую с каждого узла</strong> (consensus-высота, пиры, RSS, CPU
+  через <span class="mono">/ext/metrics</span>). Все запросы к БД оконены отметкой начала прогона.</p>
+  <div class="callout warn"><p><strong>Честная оговорка о задержке.</strong> Величина
+  «задержка коммита» = <span class="mono">updated_at − created_at</span> строки on-chain-события: это
+  сквозная задержка пайплайна (ожидание батча + отправка + опрос receipt), а <strong>не</strong> чистое
+  время финализации консенсуса. Финализация субсети — порядка одного блока.</p></div>
+</section>
+
+<section>
+  <div class="eyebrow">Устойчивая пропускная способность</div>
+  <h2>Фронт поглощает нагрузку, очередь полностью слилась</h2>
+  <p>k6-фронт прошёл <strong>3,361</strong> итераций с отказами HTTP всего
+  <strong>0.07%</strong> — WMS поглощает поток (outbox развязывает фронт от цепочки).
+  Цепочка устойчиво коммитит <strong>~27.2 событий/с</strong>; в этом прогоне предложенный
+  темп слегка превысил эту ёмкость, поэтому очередь outbox постепенно росла (пик 3,569) и
+  затем <strong>полностью слилась</strong> до 0 — всплеск выше ёмкости поглощён без потери
+  уже закоммиченных событий. Склад генерирует единицы событий/с, так что измеренная ёмкость кратно
+  перекрывает реальную потребность.</p>
+  <figure class="fig"><figcaption>Накопленные коммиты и очередь outbox, событий</figcaption><svg viewBox="0 0 920 300" class="chart" role="img" aria-label="Накопленные коммиты и очередь outbox, событий"><line x1="56" y1="270.0" x2="902" y2="270.0" class="grid"/><text x="48" y="273.0" class="ax ax-y">0</text><line x1="56" y1="206.5" x2="902" y2="206.5" class="grid"/><text x="48" y="209.5" class="ax ax-y">3153</text><line x1="56" y1="143.0" x2="902" y2="143.0" class="grid"/><text x="48" y="146.0" class="ax ax-y">6306</text><line x1="56" y1="79.5" x2="902" y2="79.5" class="grid"/><text x="48" y="82.5" class="ax ax-y">9459</text><line x1="56" y1="16.0" x2="902" y2="16.0" class="grid"/><text x="48" y="19.0" class="ax ax-y">12612</text><text x="56.0" y="292" class="ax ax-x">0s</text><text x="197.0" y="292" class="ax ax-x">86s</text><text x="338.0" y="292" class="ax ax-x">172s</text><text x="479.0" y="292" class="ax ax-x">258s</text><text x="620.0" y="292" class="ax ax-x">344s</text><text x="761.0" y="292" class="ax ax-x">430s</text><text x="902.0" y="292" class="ax ax-x">517s</text><rect x="252.4" y="16" width="263.5" height="254" class="fault"/><text x="384.1" y="28" class="ax fault-lbl">alex down</text><path d="M56.0,270.0 L65.8,270.0 L74.0,269.6 L83.8,269.1 L92.0,267.5 L101.8,265.4 L110.0,263.0 L119.8,259.7 L129.6,256.9 L137.8,255.8 L147.6,252.0 L155.8,247.5 L165.6,242.4 L173.8,237.7 L183.6,235.7 L191.8,233.7 L201.6,232.0 L209.8,229.3 L219.6,226.3 L227.8,223.1 L237.6,220.8 L245.8,217.6 L255.6,215.5 L265.5,214.2 L273.6,214.2 L283.5,214.2 L291.6,211.7 L301.5,209.5 L309.6,209.5 L319.5,209.5 L327.6,209.5 L337.5,205.9 L345.6,203.7 L355.5,201.4 L365.3,201.4 L373.5,201.4 L383.3,199.3 L391.5,197.4 L401.3,197.4 L409.5,197.4 L419.3,195.5 L427.5,193.6 L437.3,193.6 L445.5,192.3 L455.3,192.3 L463.5,192.3 L473.3,191.4 L481.5,191.4 L491.3,191.4 L499.5,191.4 L509.3,190.2 L519.1,188.0 L527.3,185.3 L537.1,182.2 L545.3,174.7 L555.1,170.9 L563.3,168.6 L573.1,163.2 L581.3,159.5 L591.1,155.1 L600.9,151.9 L609.1,146.6 L618.9,143.0 L627.1,137.5 L636.9,134.4 L645.1,131.0 L654.9,126.8 L663.1,123.1 L672.9,118.9 L682.7,116.1 L690.9,111.0 L700.7,106.8 L708.9,100.8 L718.7,97.0 L726.9,93.6 L736.7,92.5 L746.5,88.7 L754.7,85.5 L764.5,78.0 L772.7,76.6 L782.5,70.5 L792.4,64.5 L800.5,59.9 L810.4,56.4 L818.5,55.2 L828.4,50.0 L838.2,44.7 L846.4,40.8 L856.2,39.2 L864.4,39.2 L874.2,38.1 L882.4,37.4 L892.2,34.8 L902.0,34.8" fill="none" stroke="#157a4a" stroke-width="2" stroke-linejoin="round"/><path d="M56.0,270.0 L65.8,268.2 L74.0,266.9 L83.8,264.2 L92.0,263.4 L101.8,264.1 L110.0,264.2 L119.8,263.8 L129.6,260.3 L137.8,258.1 L147.6,258.1 L155.8,258.9 L165.6,261.5 L173.8,262.5 L183.6,264.5 L191.8,264.4 L201.6,261.9 L209.8,263.1 L219.6,261.3 L227.8,261.7 L237.6,259.2 L245.8,260.5 L255.6,260.0 L265.5,259.2 L273.6,256.4 L283.5,254.6 L291.6,253.7 L301.5,251.8 L309.6,247.2 L319.5,242.8 L327.6,240.7 L337.5,241.1 L345.6,239.5 L355.5,241.4 L365.3,239.1 L373.5,236.9 L383.3,235.9 L391.5,234.9 L401.3,231.8 L409.5,227.2 L419.3,224.6 L427.5,221.1 L437.3,217.7 L445.5,215.7 L455.3,213.3 L463.5,211.3 L473.3,210.5 L481.5,208.7 L491.3,205.5 L499.5,202.9 L509.3,200.3 L519.1,201.0 L527.3,198.1 L537.1,200.0 L545.3,202.0 L555.1,204.9 L563.3,206.2 L573.1,207.6 L581.3,207.7 L591.1,206.6 L600.9,206.9 L609.1,206.2 L618.9,207.8 L627.1,210.4 L636.9,213.7 L645.1,216.5 L654.9,213.8 L663.1,216.3 L672.9,217.9 L682.7,217.9 L690.9,219.6 L700.7,219.0 L708.9,220.0 L718.7,219.5 L726.9,220.0 L736.7,218.2 L746.5,217.3 L754.7,222.2 L764.5,227.0 L772.7,230.5 L782.5,236.3 L792.4,242.0 L800.5,246.4 L810.4,249.6 L818.5,253.6 L828.4,258.4 L838.2,261.9 L846.4,264.5 L856.2,266.7 L864.4,266.7 L874.2,267.4 L882.4,270.0 L892.2,270.0 L902.0,270.0" fill="none" stroke="#b5641a" stroke-width="2" stroke-linejoin="round"/></svg><div class="legend"><span class="lk"><i style="background:#157a4a"></i>committed (накопл.)</span> <span class="lk"><i style="background:#b5641a"></i>backlog (очередь)</span></div></figure>
+</section>
+
+<section>
+  <div class="eyebrow">Задержка коммита</div>
+  <h2>Сквозная задержка пайплайна</h2>
+  <p>p50 <strong>1.9 с</strong> · p95 7.92 с · p99 19.91 с.
+  Под нагрузкой задержка остаётся в секундном диапазоне; всплеск в окне отказа (ниже) — это замедление
+  WAN-финализации при 2 из 3 узлов, а не сбой.</p>
+  <div class="chart-empty">нет данных</div>
+</section>
+
+<section>
+  <div class="eyebrow">Синхронизация узлов</div>
+  <h2>Узлы идут синхронно</h2>
+  <p>Высота субсети по каждому валидатору в течение прогона. Расхождение между узлами —
+  <strong>0 блок(ов)</strong>: реплики держат единое состояние.
+  Провал линии alex в затенённом окне — это инъекция отказа; после возврата высота догоняется.</p>
+  <figure class="fig"><figcaption>Высота субсети по узлам (consensus last_accepted_height)</figcaption><svg viewBox="0 0 920 300" class="chart" role="img" aria-label="Высота субсети по узлам (consensus last_accepted_height)"><line x1="56" y1="270.0" x2="902" y2="270.0" class="grid"/><text x="48" y="273.0" class="ax ax-y">316</text><line x1="56" y1="206.5" x2="902" y2="206.5" class="grid"/><text x="48" y="209.5" class="ax ax-y">358</text><line x1="56" y1="143.0" x2="902" y2="143.0" class="grid"/><text x="48" y="146.0" class="ax ax-y">400</text><line x1="56" y1="79.5" x2="902" y2="79.5" class="grid"/><text x="48" y="82.5" class="ax ax-y">442</text><line x1="56" y1="16.0" x2="902" y2="16.0" class="grid"/><text x="48" y="19.0" class="ax ax-y">483</text><text x="56.0" y="292" class="ax ax-x">-16s</text><text x="197.0" y="292" class="ax ax-x">72s</text><text x="338.0" y="292" class="ax ax-x">161s</text><text x="479.0" y="292" class="ax ax-x">250s</text><text x="620.0" y="292" class="ax ax-x">339s</text><text x="761.0" y="292" class="ax ax-x">428s</text><text x="902.0" y="292" class="ax ax-x">517s</text><rect x="271.9" y="16" width="255.5" height="254" class="fault"/><text x="399.6" y="28" class="ax fault-lbl">alex down</text><path d="M56.0,270.0 L63.9,270.0 L71.9,270.0 L81.4,270.0 L89.3,270.0 L97.3,270.0 L105.2,267.0 L113.1,263.9 L121.1,262.4 L129.0,259.4 L136.9,256.3 L146.5,253.3 L154.4,250.3 L162.3,245.7 L170.3,242.7 L178.2,239.7 L186.2,235.1 L194.1,232.1 L202.0,229.0 L211.5,226.0 L219.5,226.0 L227.4,224.5 L235.4,219.9 L243.3,218.4 L251.2,213.9 L259.2,210.8 L267.1,207.8 L276.6,204.8 L284.6,203.2 L292.5,203.2 L300.4,203.2 L308.4,201.7 L316.3,200.2 L325.8,198.7 L333.8,198.7 L341.7,198.7 L349.6,198.7 L357.6,195.7 L365.5,194.1 L373.4,192.6 L383.0,191.1 L390.9,191.1 L398.8,189.6 L406.8,188.1 L414.7,188.1 L422.7,188.1 L430.6,186.5 L438.5,186.5 L448.0,185.0 L456.0,185.0 L463.9,183.5 L471.9,183.5 L479.8,183.5 L487.7,182.0 L495.7,182.0 L503.6,182.0 L513.1,182.0 L521.1,180.5 L529.0,179.0 L536.9,177.4 L544.9,172.9 L552.8,169.9 L560.7,165.3 L570.3,162.3 L578.2,159.2 L586.1,154.7 L594.1,151.6 L602.0,148.6 L609.9,144.1 L617.9,141.0 L627.4,136.5 L635.3,133.4 L643.3,130.4 L651.2,127.4 L659.2,122.8 L667.1,119.8 L675.0,116.8 L684.5,112.2 L692.5,109.2 L700.4,106.1 L708.4,101.6 L716.3,97.0 L724.2,94.0 L732.2,91.0 L740.1,89.4 L749.6,86.4 L757.6,81.9 L765.5,77.3 L773.4,74.3 L781.4,71.2 L789.3,66.7 L797.2,63.6 L805.2,59.1 L814.7,56.1 L822.6,53.0 L830.6,48.5 L838.5,45.4 L846.4,42.4 L854.4,39.4 L863.9,39.4 L871.8,37.8 L879.8,34.8 L887.7,34.8" fill="none" stroke="#2347b8" stroke-width="2" stroke-linejoin="round"/><path d="M67.1,270.0 L75.0,270.0 L84.6,270.0 L92.5,270.0 L100.4,268.5 L110.0,265.4 L117.9,262.4 L125.8,260.9 L135.4,257.9 L143.3,253.3 L152.8,250.3 L160.8,247.2 L168.7,244.2 L176.6,239.7 L186.2,235.1 L194.1,232.1 L202.0,229.0 L211.5,227.5 L219.5,226.0 L227.4,224.5 L236.9,219.9 L244.9,216.9 L254.4,212.3 L263.9,209.3 L271.9,206.3 L492.5,182.0 L500.4,182.0 L510.0,182.0 L517.9,180.5 L527.4,179.0 L535.3,177.4 L543.3,174.4 L552.8,169.9 L560.7,166.8 L568.7,162.3 L578.2,159.2 L586.1,154.7 L595.7,151.6 L603.6,147.1 L613.1,144.1 L621.1,139.5 L629.0,136.5 L636.9,131.9 L646.5,128.9 L654.4,125.9 L662.3,122.8 L671.8,118.3 L679.8,113.7 L689.3,110.7 L697.2,107.6 L706.8,106.1 L714.7,106.1 L724.2,106.1 L732.2,106.1 L740.1,106.1 L749.6,86.4 L757.6,81.9 L765.5,77.3 L775.0,74.3 L783.0,69.7 L792.5,66.7 L800.4,62.1 L808.4,57.6 L817.9,54.5 L825.8,50.0 L833.7,47.0 L843.3,43.9 L851.2,40.9 L859.1,39.4 L868.7,39.4 L876.6,36.3 L884.5,34.8 L894.1,34.8" fill="none" stroke="#157a4a" stroke-width="2" stroke-linejoin="round"/><path d="M75.0,270.0 L83.0,270.0 L92.5,270.0 L100.4,268.5 L108.4,267.0 L116.3,263.9 L125.8,260.9 L133.8,257.9 L141.7,253.3 L151.2,251.8 L159.2,247.2 L167.1,244.2 L176.6,241.2 L184.6,236.6 L192.5,232.1 L202.0,229.0 L210.0,227.5 L217.9,226.0 L227.4,224.5 L235.4,219.9 L243.3,218.4 L251.2,213.9 L260.8,210.8 L268.7,207.8 L276.6,204.8 L286.2,203.2 L294.1,203.2 L302.0,203.2 L311.5,203.2 L319.5,200.2 L327.4,200.2 L335.4,198.7 L344.9,198.7 L352.8,197.2 L360.8,194.1 L370.3,194.1 L378.2,191.1 L386.1,191.1 L395.7,191.1 L403.6,189.6 L411.5,188.1 L419.5,188.1 L429.0,188.1 L436.9,186.5 L446.5,186.5 L454.4,185.0 L462.3,185.0 L471.9,183.5 L479.8,183.5 L487.7,183.5 L495.7,182.0 L505.2,182.0 L513.1,182.0 L521.1,180.5 L530.6,179.0 L538.5,175.9 L546.5,172.9 L556.0,168.3 L563.9,166.8 L573.4,160.8 L581.4,157.7 L589.3,153.2 L597.2,151.6 L606.8,145.6 L614.7,142.5 L622.6,138.0 L632.2,135.0 L640.1,131.9 L648.0,128.9 L657.6,124.3 L665.5,121.3 L673.4,118.3 L681.4,113.7 L690.9,110.7 L698.8,106.1 L708.4,106.1 L716.3,106.1 L724.2,95.5 L732.2,95.5 L740.1,95.5 L749.6,95.5 L757.6,91.0 L765.5,77.3 L773.4,74.3 L783.0,71.2 L790.9,66.7 L798.8,62.1 L808.4,59.1 L816.3,54.5 L824.2,51.5 L833.7,50.0 L841.7,43.9 L849.6,40.9 L857.6,39.4 L867.1,39.4 L875.0,36.3 L883.0,34.8 L890.9,34.8" fill="none" stroke="#b5641a" stroke-width="2" stroke-linejoin="round"/><path d="M81.4,270.0 L89.3,270.0 L97.3,270.0 L106.8,267.0 L114.7,263.9 L122.7,262.4 L130.6,257.9 L138.5,254.8 L148.1,253.3 L156.0,248.8 L163.9,245.7 L171.9,242.7 L179.8,238.1 L189.3,235.1 L197.3,230.5 L205.2,227.5 L213.1,227.5 L221.1,226.0 L229.0,223.0 L238.5,218.4 L246.5,216.9 L254.4,212.3 L262.3,209.3 L270.3,206.3 L278.2,203.2 L287.7,203.2 L295.7,203.2 L303.6,201.7 L311.5,201.7 L319.5,200.2 L327.4,198.7 L336.9,198.7 L344.9,198.7 L352.8,197.2 L360.8,194.1 L370.3,194.1 L378.2,191.1 L386.1,191.1 L394.1,191.1 L402.0,189.6 L410.0,188.1 L419.5,188.1 L427.4,188.1 L435.4,186.5 L443.3,186.5 L451.2,185.0 L459.2,183.5 L468.7,183.5 L476.6,183.5 L484.6,183.5 L492.5,182.0 L500.4,182.0 L510.0,182.0 L517.9,180.5 L525.8,179.0 L533.8,177.4 L541.7,174.4 L551.2,171.4 L559.2,166.8 L567.1,162.3 L575.0,159.2 L583.0,156.2 L592.5,153.2 L600.4,148.6 L608.4,145.6 L616.3,141.0 L624.2,138.0 L633.8,135.0 L641.7,130.4 L649.6,127.4 L657.6,122.8 L667.1,121.3 L675.0,116.8 L683.0,113.7 L690.9,110.7 L700.4,106.1 L708.4,101.6 L716.3,98.5 L724.2,94.0 L732.2,91.0 L741.7,89.4 L749.6,86.4 L757.6,81.9 L765.5,77.3 L773.4,74.3 L783.0,71.2 L790.9,66.7 L798.8,62.1 L806.8,59.1 L816.3,54.5 L824.2,51.5 L832.2,50.0 L840.1,43.9 L848.0,40.9 L857.6,39.4 L865.5,39.4 L873.4,36.3 L881.4,34.8 L889.3,34.8 L898.8,34.8" fill="none" stroke="#8a8a90" stroke-width="2" stroke-linejoin="round"/><path d="M81.4,270.0 L90.9,270.0 L98.9,268.5 L108.4,267.0 L116.3,263.9 L125.8,260.9 L133.8,257.9 L143.3,253.3 L152.8,250.3 L160.8,247.2 L170.3,244.2 L178.2,239.7 L187.7,235.1 L195.7,230.5 L205.2,227.5 L213.1,226.0 L222.7,224.5 L230.6,223.0 L240.1,218.4 L248.1,215.4 L257.6,212.3 L265.5,209.3 L275.0,204.8 L284.6,204.8 L292.5,204.8 L302.0,203.2 L310.0,201.7 L319.5,200.2 L327.4,200.2 L336.9,200.2 L344.9,198.7 L354.4,197.2 L362.3,195.7 L371.9,192.6 L381.4,192.6 L389.3,192.6 L398.8,191.1 L406.8,189.6 L416.3,189.6 L424.2,189.6 L433.8,188.1 L441.7,186.5 L451.2,186.5 L459.2,185.0 L468.7,185.0 L476.6,185.0 L486.1,183.5 L494.1,183.5 L503.6,183.5 L511.5,182.0 L521.1,180.5 L530.6,179.0 L538.5,177.4 L548.0,172.9 L556.0,168.3 L565.5,163.8 L573.4,160.8 L583.0,156.2 L590.9,153.2 L600.4,148.6 L609.9,145.6 L617.9,141.0 L627.4,136.5 L635.3,133.4 L644.9,130.4 L652.8,125.9 L662.3,122.8 L670.3,118.3 L679.8,115.2 L689.3,110.7 L697.2,107.6 L706.8,103.1 L714.7,98.5 L724.2,94.0 L732.2,91.0 L741.7,87.9 L751.2,84.9 L759.1,80.3 L768.7,75.8 L776.6,72.7 L786.1,69.7 L795.7,65.2 L803.6,60.6 L813.1,56.1 L821.1,53.0 L830.6,48.5 L840.1,43.9 L848.0,40.9 L857.6,39.4 L865.5,39.4 L875.0,36.3 L883.0,34.8 L892.5,34.8 L902.0,34.8" fill="none" stroke="#2347b8" stroke-width="2" stroke-linejoin="round"/></svg><div class="legend"><span class="lk"><i style="background:#2347b8"></i>dino MD 🇲🇩</span> <span class="lk"><i style="background:#157a4a"></i>alex RO 🇷🇴</span> <span class="lk"><i style="background:#b5641a"></i>itldc NL 🇳🇱</span> <span class="lk"><i style="background:#8a8a90"></i>evolvica MD 🇲🇩</span> <span class="lk"><i style="background:#2347b8"></i>node-home</span></div></figure>
+</section>
+
+<section>
+  <div class="eyebrow">Отказоустойчивость · kill-1-of-3</div>
+  <h2>Отказ узла под живой нагрузкой</h2>
+  <p><strong>Консенсус.</strong> Пока alex был выключен, валидаторы финализировали (высота субсети +18 блок(ов)).<br><br><strong>Пайплайн — выстоял.</strong> С 4 валидаторами потеря одного оставляет <strong>75 % &gt; порога 73.33 %</strong>, поэтому observer-нода node-home осталась healthy и <strong>не замёрзла</strong> (продвинулась на 19 блок(ов) — против ~0 в 3-нодовой конфигурации); под отказом закоммичено 1356 событий, <strong>0 потеряно</strong> — никаких receipt-таймаутов, double-submit и реверзов.<br><br><strong>Деградация изящная.</strong> WAN-финализация при выключенном узле замедлилась (p99 задержки подрос, backlog временно вырос), но полностью слился за 191 с; отгрузки сошлись (2478 = 2478). Closed-loop подтверждение, что 4-й валидатор устраняет лимит 3-нодовой конфигурации.</p>
+  <div class="callout "><p><strong>Вывод.</strong> С 4 валидаторами потеря 1 узла оставляет 75 % &gt; 73.33 %: observer не замерзает, пайплайн коммитит под отказом, <strong>0 потерь</strong>. Лимит 3-нодовой конфигурации (отдельный отчёт <span class='mono'>geo-3node-before</span>) закрыт добавлением валидатора — closed-loop before→after. Запас тонкий (75 % vs 73.33 % ≈ 1.7 п.п.): сильное многонодовое WAN-разделение могло бы снова просадить observer ниже порога — но это уже отказ 2+ узлов, а не одного.</p></div>
+</section>
+
+<section>
+  <div class="eyebrow">Ресурсы узлов</div>
+  <h2>Стоимость узла под нагрузкой</h2>
+  <table><thead><tr><th>Узел</th><th>Гео</th><th class="num">Высота</th><th class="num">Пиры</th>
+  <th class="num">RSS пик</th><th class="num">CPU сред.</th></tr></thead>
+  <tbody><tr><td>dino</td><td>MD</td><td class='num'>471</td><td class='num'>4</td><td class='num'>123 МБ</td><td class='num'>6.6 %</td></tr><tr><td>alex</td><td>RO</td><td class='num'>471</td><td class='num'>4</td><td class='num'>120 МБ</td><td class='num'>-73.4 %</td></tr><tr><td>itldc</td><td>NL</td><td class='num'>471</td><td class='num'>4</td><td class='num'>124 МБ</td><td class='num'>13.3 %</td></tr><tr><td>evolvica</td><td>MD</td><td class='num'>471</td><td class='num'>4</td><td class='num'>130 МБ</td><td class='num'>7.1 %</td></tr><tr><td>node-home</td><td>local</td><td class='num'>471</td><td class='num'>4</td><td class='num'>148 МБ</td><td class='num'>3.4 %</td></tr></tbody></table>
+  <p>Каждый валидатор — 1 ядро, ~1 ГБ RAM. Под устойчивой нагрузкой потребление остаётся скромным,
+  что подтверждает практичность гео-развёртывания на дешёвых VPS.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Целостность</div>
+  <h2>WMS ↔ chain</h2>
+  <p>Счётчики отгрузок сходятся: в WMS 2,478 отгружено, on-chain
+  2,478 событий <span class="mono">shipping</span> в COMMITTED —
+  <strong>совпадение</strong>. <strong>Полная</strong> сквозная согласованность: ни одно событие не потеряно — каждое отгруженное место имеет on-chain-доказательство на гео-цепочке.</p>
+</section>
+
+<footer>Сгенерировано из geo-bench-20260607-170629/geo-bench.json · networkID 1338 ·
+chain cdyDs36NCEZnWhM6zkyUXY9LiJWiB4zQq8uAGJTvHJDsw1SbS</footer>
+</div></body></html>

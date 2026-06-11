@@ -40,12 +40,19 @@ render itldc "$ITLDC_IP" "$DINO_IP:9651" "$DINO_NODEID"
 # node-home: non-validator RPC node behind NAT (docker). Outbound bootstrap to dino, generates
 # its own staking cert in /data (nodeID irrelevant — not in genesis). Container paths (/plugins,
 # /data, http-host 0.0.0.0); exposed on the host as 127.0.0.1:9750.
+#
+# http-allowed-hosts ["*"]: the WMS ledger-adapter reaches this node container-to-container as
+# http://geo-node-home:9650, so avalanchego's default Host-header filter (localhost/127.0.0.1 only)
+# would reject it ("invalid host specified"). "*" disables only DNS-rebinding protection, which is
+# moot here — the RPC port is published loopback-only (127.0.0.1:9750) and otherwise reachable just
+# on the private geo_default docker network. It does NOT expose the ewoq-bearing RPC to the LAN.
 cat > node-config.home.gen.json <<EOF
 {
   "network-id": 1338,
   "genesis-file": "/genesis/network-genesis.geo.json",
   "sybil-protection-enabled": $SYBIL,
   "http-host": "0.0.0.0",
+  "http-allowed-hosts": ["*"],
   "http-port": 9650,
   "staking-port": 9651,
   "plugin-dir": "/plugins",

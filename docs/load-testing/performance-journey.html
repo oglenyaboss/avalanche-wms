@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Путь к производительности · WMS × Блокчейн</title>
+<meta name="description" content="Иммерсивный разбор пути оптимизации блокчейн-слоя WMS: залипающая 3D-сцена, олицетворяющая саму систему — от требования 1500 транзакций/с до гео-распределённой сети." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+<style>
+/* ═══════════════ ТОКЕНЫ ═══════════════ */
+:root {
+  --bg:#05070d; --bg-2:#080b14; --bg-panel:rgba(14,19,32,0.72);
+  --line:rgba(150,170,210,0.14); --line-soft:rgba(150,170,210,0.06);
+  --ink:#e9eef8; --ink-2:#aab4c9; --ink-dim:#6f7a90;
+  --cyan:#38e0d4; --cyan-deep:#1aa79e; --amber:#ffb02e; --red:#ff4757; --red-deep:#c4283a;
+  --green:#3ddc84; --violet:#8b7bff;
+  --display:'Space Grotesk',system-ui,sans-serif; --body:'Manrope',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace;
+  --t-hero:clamp(2.4rem,1rem+5.5vw,6rem); --t-h2:clamp(1.5rem,1rem+2vw,2.7rem);
+  --t-h3:clamp(1.05rem,0.9rem+0.8vw,1.45rem); --t-body:clamp(0.98rem,0.93rem+0.25vw,1.12rem);
+  --t-small:clamp(0.78rem,0.74rem+0.2vw,0.9rem); --t-mono:clamp(0.7rem,0.66rem+0.2vw,0.82rem);
+  --gutter:clamp(1.1rem,4vw,5.5rem); --maxw:1180px; --ease:cubic-bezier(0.16,1,0.3,1);
+}
+*,*::before,*::after{box-sizing:border-box;}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%;}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font-size:var(--t-body);line-height:1.6;overflow-x:hidden;-webkit-font-smoothing:antialiased;}
+h1,h2,h3,.eyebrow,.stat-num{font-family:var(--display);}
+strong{color:var(--ink);font-weight:700;}
+.mono{font-family:var(--mono);}
+
+/* ── фон-fallback (виден, если 3D не стартовал) ── */
+.backdrop{position:fixed;inset:0;z-index:-2;background:
+  radial-gradient(120% 80% at 12% -10%,rgba(56,224,212,0.10),transparent 45%),
+  radial-gradient(120% 90% at 92% 8%,rgba(139,123,255,0.10),transparent 50%),
+  linear-gradient(180deg,var(--bg),var(--bg-2));}
+.backdrop::before{content:"";position:absolute;inset:0;background-image:
+  linear-gradient(var(--line-soft) 1px,transparent 1px),linear-gradient(90deg,var(--line-soft) 1px,transparent 1px);
+  background-size:64px 64px;mask-image:radial-gradient(140% 100% at 50% 30%,#000 35%,transparent 80%);}
+
+/* ═══════════════ ВЕРХ: прогресс + бренд ═══════════════ */
+.topbar{position:fixed;top:0;left:0;right:0;z-index:40;display:flex;align-items:center;justify-content:space-between;
+  padding:clamp(0.7rem,1.5vw,1.1rem) var(--gutter);pointer-events:none;}
+.brand{font-family:var(--mono);font-size:var(--t-mono);letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-2);display:flex;align-items:center;gap:0.6rem;}
+.brand .dot{width:8px;height:8px;border-radius:50%;background:var(--cyan);box-shadow:0 0 12px var(--cyan);animation:pulse 2.4s ease-in-out infinite;}
+@keyframes pulse{50%{opacity:0.35;transform:scale(0.7);}}
+.brand .sep{color:var(--ink-dim);}
+.progress{position:fixed;top:0;left:0;height:2px;width:0%;background:linear-gradient(90deg,var(--cyan),var(--violet));box-shadow:0 0 14px rgba(56,224,212,0.6);z-index:41;transition:width 0.1s linear;}
+
+/* ═══════════════ JUMP-NAV ═══════════════ */
+.railnav{position:fixed;right:clamp(0.5rem,1.2vw,1.1rem);top:50%;transform:translateY(-50%);z-index:40;display:flex;flex-direction:column;gap:0.5rem;align-items:flex-end;}
+.railnav a{display:flex;align-items:center;gap:0.6rem;text-decoration:none;color:var(--ink-dim);font-family:var(--mono);font-size:0.62rem;letter-spacing:0.04em;flex-direction:row-reverse;}
+.railnav .tick{width:20px;height:2px;background:var(--line);transition:all 0.4s var(--ease);flex-shrink:0;}
+.railnav .lbl{opacity:0;transform:translateX(6px);transition:all 0.4s var(--ease);white-space:nowrap;text-transform:uppercase;}
+.railnav a:hover .lbl{opacity:1;transform:translateX(0);}
+.railnav a:hover .tick{background:var(--ink-2);width:28px;}
+.railnav a.active .tick{width:32px;background:var(--cyan);box-shadow:0 0 10px rgba(56,224,212,0.7);}
+.railnav a.active{color:var(--cyan);}
+.railnav a.active .lbl{opacity:1;transform:translateX(0);}
+
+/* ═══════════════ JOURNEY: full-bleed 3D + плавающие шаги ═══════════════ */
+.journey{position:relative;}
+.stage{position:sticky;top:0;height:100vh;height:100dvh;width:100%;overflow:hidden;z-index:1;}
+#scene{position:absolute;inset:0;width:100%;height:100%;opacity:0;transition:opacity 1.1s ease;}
+#scene.live{opacity:1;}
+.labels{position:absolute;inset:0;pointer-events:none;z-index:2;overflow:hidden;}
+/* 3D-подписи компонентов (CSS2D) */
+.lbl{font-family:var(--mono);font-size:0.7rem;letter-spacing:0.04em;color:var(--ink);white-space:nowrap;
+  padding:0.28rem 0.55rem;border:1px solid var(--line);border-left:2px solid var(--cyan);border-radius:6px;
+  background:rgba(8,11,19,0.74);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  opacity:0;transition:opacity 0.5s ease,border-color 0.4s ease,color 0.4s ease;transform:translate(-50%,-50%);}
+.lbl b{color:var(--cyan);font-weight:700;}
+.lbl.warn{border-left-color:var(--red);} .lbl.warn b{color:var(--red);}
+.lbl.good{border-left-color:var(--green);} .lbl.good b{color:var(--green);}
+.lbl.amber{border-left-color:var(--amber);} .lbl.amber b{color:var(--amber);}
+
+/* левая колонка шагов поверх сцены */
+.steps{position:relative;margin-top:-100vh;z-index:3;}
+.step{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:clamp(4rem,10vh,7rem) var(--gutter);}
+.step-card{position:relative;overflow:hidden;max-width:430px;
+  background:linear-gradient(180deg,rgba(9,13,22,0.88),rgba(9,13,22,0.70));
+  border:1px solid rgba(150,170,210,0.16);border-radius:18px;
+  padding:clamp(1.35rem,2.4vw,2.1rem);backdrop-filter:blur(18px) saturate(120%);-webkit-backdrop-filter:blur(18px) saturate(120%);
+  box-shadow:0 34px 90px -44px rgba(0,0,0,0.92),inset 0 1px 0 rgba(255,255,255,0.05);}
+.step-card::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;
+  background:linear-gradient(90deg,transparent,var(--cyan),transparent);opacity:0.7;}
+.step-card.warn::before{background:linear-gradient(90deg,transparent,var(--red),transparent);}
+.step-card.good::before{background:linear-gradient(90deg,transparent,var(--green),transparent);}
+.step .eyebrow{display:inline-flex;align-items:center;gap:0.55rem;font-family:var(--mono);font-size:var(--t-mono);letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:1rem;}
+.step .eyebrow .num{color:var(--cyan);font-weight:700;}
+.step .eyebrow .bar{width:30px;height:1px;background:var(--line);}
+.step h2{font-size:var(--t-h2);line-height:1.1;font-weight:600;letter-spacing:-0.02em;margin:0 0 0.9rem;}
+.step p{font-size:var(--t-body);color:var(--ink-2);margin:0;max-width:42ch;}
+.step p .accent{color:var(--cyan);font-weight:600;}
+.step p .warn{color:var(--amber);font-weight:600;}
+.step p .danger{color:var(--red);font-weight:600;}
+.step .kpi{display:flex;gap:1.6rem;margin-top:1.2rem;flex-wrap:wrap;}
+.step .kpi .k{display:flex;flex-direction:column;gap:0.15rem;}
+.step .kpi .kv{font-family:var(--display);font-size:clamp(1.5rem,1rem+1.6vw,2.2rem);font-weight:700;line-height:1;color:var(--cyan);letter-spacing:-0.02em;}
+.step .kpi .kv.green{color:var(--green);} .step .kpi .kv.red{color:var(--red);} .step .kpi .kv.ink{color:var(--ink);}
+.step .kpi .kl{font-family:var(--mono);font-size:0.62rem;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-dim);}
+.step .note{margin-top:1rem;font-size:var(--t-small);color:var(--ink);border-top:1px solid var(--line);padding-top:0.8rem;}
+.step .note .tag{font-family:var(--mono);font-size:0.6rem;letter-spacing:0.14em;text-transform:uppercase;color:var(--amber);display:block;margin-bottom:0.25rem;}
+.step .note.trap .tag{color:var(--red);}
+
+/* HERO-шаг */
+#s00 .step-card{max-width:680px;border-left-width:1px;background:linear-gradient(180deg,rgba(8,11,19,0.7),rgba(8,11,19,0.45));}
+#s00 .hero-eyebrow{font-family:var(--mono);font-size:var(--t-mono);letter-spacing:0.28em;text-transform:uppercase;color:var(--cyan);margin-bottom:1.3rem;}
+#s00 h1{font-size:var(--t-hero);line-height:0.95;font-weight:700;letter-spacing:-0.035em;margin:0;
+  background:linear-gradient(120deg,#fff 20%,var(--cyan) 62%,var(--violet));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+#s00 .hero-sub{font-size:var(--t-h3);color:var(--ink-2);max-width:48ch;margin:1.5rem 0 1.9rem;font-weight:400;}
+.hero-chips{display:flex;flex-wrap:wrap;gap:0.6rem;}
+.chip{font-family:var(--mono);font-size:0.72rem;padding:0.45rem 0.8rem;border:1px solid var(--line);border-radius:999px;color:var(--ink-2);background:rgba(8,11,19,0.5);}
+.chip b{color:var(--cyan);}
+.scrollhint{margin-top:1.8rem;font-family:var(--mono);font-size:0.68rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-dim);display:flex;align-items:center;gap:0.6rem;}
+.scrollhint .ln{width:40px;height:1px;background:var(--ink-dim);position:relative;overflow:hidden;}
+.scrollhint .ln::after{content:"";position:absolute;inset:0;width:40%;background:var(--cyan);animation:slide 2.2s var(--ease) infinite;}
+@keyframes slide{0%{transform:translateX(-100%)}60%,100%{transform:translateX(260%)}}
+
+/* HUD телеметрия */
+.hud{position:fixed;right:clamp(0.8rem,2vw,1.7rem);bottom:clamp(0.8rem,2vw,1.7rem);z-index:30;pointer-events:none;min-width:230px;
+  padding:0.7rem 0.95rem 0.78rem;border:1px solid var(--line);border-left:2px solid var(--cyan);border-radius:9px;
+  background:rgba(8,11,19,0.7);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);font-family:var(--mono);
+  opacity:0;transform:translateY(10px);transition:opacity 0.6s var(--ease),transform 0.6s var(--ease),border-color 0.5s ease;}
+.hud.show{opacity:1;transform:none;}
+.hud .hud-k{font-size:0.6rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-dim);display:flex;align-items:center;gap:0.45rem;}
+.hud .hud-k::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--cyan);box-shadow:0 0 9px var(--cyan);}
+.hud .hud-v{font-size:1rem;color:var(--ink);font-weight:700;margin-top:0.28rem;}
+.hud.warn{border-left-color:var(--red);} .hud.warn .hud-k::before{background:var(--red);box-shadow:0 0 9px var(--red);} .hud.warn .hud-v{color:#ffd2d6;}
+.hud.good{border-left-color:var(--green);} .hud.good .hud-k::before{background:var(--green);box-shadow:0 0 9px var(--green);} .hud.good .hud-v{color:#c8f7da;}
+
+/* ═══════════════ EVIDENCE: доказательная база (full-width) ═══════════════ */
+.evidence{position:relative;z-index:5;background:linear-gradient(180deg,transparent,var(--bg) 6%);}
+.evidence .ev-intro{text-align:center;padding:clamp(4rem,12vh,8rem) var(--gutter) 0;}
+.evidence .ev-intro .eyebrow{justify-content:center;}
+.evsec{padding:clamp(3.5rem,9vh,6rem) var(--gutter);}
+.wrap{width:100%;max-width:var(--maxw);margin:0 auto;}
+.eyebrow{display:inline-flex;align-items:center;gap:0.6rem;font-family:var(--mono);font-size:var(--t-mono);letter-spacing:0.2em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:1.3rem;}
+.eyebrow .num{color:var(--cyan);font-weight:700;} .eyebrow .bar{width:34px;height:1px;background:var(--line);}
+.evsec h2{font-size:var(--t-h2);line-height:1.1;font-weight:600;letter-spacing:-0.02em;margin:0 0 1.3rem;max-width:24ch;}
+.evsec .lede{font-size:var(--t-h3);line-height:1.5;color:var(--ink-2);font-weight:400;max-width:60ch;margin:0 0 1.6rem;}
+.evsec p{max-width:64ch;color:var(--ink-2);}
+p .accent{color:var(--cyan);font-weight:600;} p .warn{color:var(--amber);font-weight:600;} p .danger{color:var(--red);font-weight:600;}
+
+.reveal{opacity:0;transform:translateY(24px);transition:opacity 0.8s var(--ease),transform 0.8s var(--ease);}
+.reveal.in{opacity:1;transform:none;}
+.reveal.d1{transition-delay:0.07s;} .reveal.d2{transition-delay:0.14s;} .reveal.d3{transition-delay:0.21s;} .reveal.d4{transition-delay:0.28s;}
+
+.panel{background:var(--bg-panel);border:1px solid var(--line);border-radius:14px;padding:clamp(1.2rem,2.4vw,2rem);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:clamp(0.9rem,2vw,1.6rem);}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:clamp(0.9rem,2vw,1.6rem);}
+@media(max-width:820px){.grid2,.grid3{grid-template-columns:1fr;}}
+.callout{border-left:3px solid var(--amber);background:linear-gradient(90deg,rgba(255,176,46,0.10),transparent 70%);padding:0.9rem 1.2rem;border-radius:0 10px 10px 0;font-size:var(--t-small);color:var(--ink);margin-top:1.4rem;}
+.callout.trap{border-color:var(--red);background:linear-gradient(90deg,rgba(255,71,87,0.12),transparent 70%);}
+.callout .tag{font-family:var(--mono);font-size:0.66rem;letter-spacing:0.14em;text-transform:uppercase;color:var(--amber);display:block;margin-bottom:0.25rem;}
+.callout.trap .tag{color:var(--red);}
+
+.bars{display:flex;flex-direction:column;gap:0.9rem;}
+.bar{display:grid;grid-template-columns:clamp(7rem,14vw,11rem) 1fr;align-items:center;gap:1rem;}
+.bar .name{font-size:var(--t-small);color:var(--ink-2);} .bar .name b{color:var(--ink);}
+.bar .track{position:relative;height:30px;background:rgba(255,255,255,0.04);border:1px solid var(--line);border-radius:7px;overflow:hidden;}
+.bar .fill{position:absolute;inset:0 auto 0 0;width:0;border-radius:6px;background:linear-gradient(90deg,var(--cyan-deep),var(--cyan));transition:width 1.2s var(--ease);display:flex;align-items:center;justify-content:flex-end;padding-right:0.6rem;}
+.in .bar .fill{width:var(--w,0%);}
+.bar .fill .v{font-family:var(--mono);font-size:0.74rem;color:#04110f;font-weight:700;white-space:nowrap;}
+.bar .fill.red{background:linear-gradient(90deg,var(--red-deep),var(--red));} .bar .fill.red .v{color:#fff;}
+.bar .fill.amber{background:linear-gradient(90deg,#b87410,var(--amber));} .bar .fill.amber .v{color:#160d00;}
+.bar .fill.dim{background:linear-gradient(90deg,#3a4258,#59647e);} .bar .fill.dim .v{color:#fff;}
+.dual{display:flex;flex-direction:column;gap:1.3rem;}
+.dual-row .dual-label{font-size:var(--t-small);color:var(--ink-2);margin-bottom:0.5rem;display:flex;justify-content:space-between;} .dual-row .dual-label b{color:var(--ink);} .dual-row .dual-label .mult{color:var(--cyan);font-family:var(--mono);font-weight:700;}
+.minibar{height:14px;border-radius:5px;background:rgba(255,255,255,0.05);position:relative;overflow:hidden;margin-bottom:0.4rem;}
+.minibar .mf{position:absolute;inset:0 auto 0 0;width:0;border-radius:5px;transition:width 1.1s var(--ease);}
+.in .minibar .mf{width:var(--w,0%);}
+.minibar .mf.before{background:linear-gradient(90deg,var(--red-deep),var(--red));} .minibar .mf.after{background:linear-gradient(90deg,var(--cyan-deep),var(--cyan));}
+.dual-tag{font-family:var(--mono);font-size:0.66rem;color:var(--ink-dim);letter-spacing:0.08em;}
+.statrow{display:flex;flex-wrap:wrap;gap:clamp(1.4rem,4vw,3.4rem);margin:1.8rem 0 0;}
+.stat{display:flex;flex-direction:column;gap:0.2rem;}
+.stat-num{font-size:clamp(1.8rem,1rem+2.6vw,3rem);font-weight:700;line-height:1;letter-spacing:-0.03em;color:var(--ink);}
+.stat-num.cyan{color:var(--cyan);} .stat-num .unit{font-size:0.42em;color:var(--ink-dim);font-weight:500;margin-left:0.2em;}
+.stat-lbl{font-family:var(--mono);font-size:0.7rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-dim);}
+
+.qa{display:flex;flex-direction:column;gap:0.7rem;}
+.qa details{border:1px solid var(--line);border-radius:12px;background:var(--bg-panel);overflow:hidden;transition:border-color 0.3s ease;}
+.qa details[open]{border-color:rgba(56,224,212,0.35);}
+.qa summary{list-style:none;cursor:pointer;padding:1rem 1.2rem;display:flex;align-items:flex-start;gap:0.8rem;font-family:var(--display);font-weight:600;font-size:var(--t-body);color:var(--ink);}
+.qa summary::-webkit-details-marker{display:none;}
+.qa summary .q{color:var(--violet);font-family:var(--mono);font-size:0.8rem;flex-shrink:0;margin-top:0.15rem;}
+.qa summary::after{content:"+";margin-left:auto;color:var(--cyan);font-size:1.3rem;line-height:1;transition:transform 0.3s ease;}
+.qa details[open] summary::after{transform:rotate(45deg);}
+.qa .ans{padding:0 1.2rem 1.1rem 3.1rem;} .qa .ans p{font-size:var(--t-small);margin:0;color:var(--ink-2);}
+.qa .ans .a{color:var(--cyan);font-family:var(--mono);font-size:0.7rem;letter-spacing:0.1em;text-transform:uppercase;display:block;margin-bottom:0.4rem;}
+.caveats{display:flex;flex-direction:column;gap:0.6rem;}
+.caveat{display:grid;grid-template-columns:auto 1fr;gap:0.9rem;align-items:start;padding:0.9rem 1.1rem;border:1px solid var(--line);border-radius:10px;background:rgba(255,255,255,0.02);}
+.caveat .ix{font-family:var(--mono);color:var(--amber);font-weight:700;font-size:0.8rem;} .caveat p{margin:0;font-size:var(--t-small);} .caveat b{color:var(--ink);}
+.endmark{text-align:center;margin-top:3rem;padding-bottom:clamp(4rem,12vh,8rem);font-family:var(--mono);font-size:0.72rem;letter-spacing:0.14em;color:var(--ink-dim);text-transform:uppercase;}
+
+/* unit-таблица */
+.unit-bars{display:flex;flex-direction:column;gap:0.8rem;}
+
+@media(max-width:900px){.railnav{display:none;}}
+@media(max-width:560px){.evsec,.step{padding-left:1.1rem;padding-right:1.1rem;} .step-card{max-width:100%;} .bar{grid-template-columns:1fr;gap:0.3rem;}}
+@media(max-height:560px){.hud{display:none;}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto;}*,*::before,*::after{animation-duration:0.001ms!important;animation-iteration-count:1!important;}.reveal{opacity:1;transform:none;transition:none;}.in .bar .fill,.in .minibar .mf{transition:none;}}
+</style>
+</head>
+
+<body>
+<div class="backdrop" aria-hidden="true"></div>
+<div class="progress" id="progress"></div>
+
+<header class="topbar">
+  <div class="brand"><span class="dot"></span> WMS <span class="sep">×</span> БЛОКЧЕЙН <span class="sep">·</span> НАГРУЗОЧНОЕ ИССЛЕДОВАНИЕ</div>
+</header>
+
+<nav class="railnav" aria-label="Навигация">
+  <a href="#s00" data-i="00"><span class="tick"></span><span class="lbl">Старт</span></a>
+  <a href="#s01" data-i="01"><span class="tick"></span><span class="lbl">Требование</span></a>
+  <a href="#s02" data-i="02"><span class="tick"></span><span class="lbl">Единица</span></a>
+  <a href="#s03" data-i="03"><span class="tick"></span><span class="lbl">Архитектура</span></a>
+  <a href="#s04" data-i="04"><span class="tick"></span><span class="lbl">Результат</span></a>
+  <a href="#s05" data-i="05"><span class="tick"></span><span class="lbl">Узкое место</span></a>
+  <a href="#s06" data-i="06"><span class="tick"></span><span class="lbl">Тюнинги</span></a>
+  <a href="#s07" data-i="07"><span class="tick"></span><span class="lbl">Гео-сеть</span></a>
+  <a href="#s08" data-i="08"><span class="tick"></span><span class="lbl">Исключение</span></a>
+  <a href="#s09" data-i="09"><span class="tick"></span><span class="lbl">Разгадка</span></a>
+  <a href="#s10" data-i="10"><span class="tick"></span><span class="lbl">Фикс</span></a>
+  <a href="#s11" data-i="11"><span class="tick"></span><span class="lbl">Остаток</span></a>
+  <a href="#s12" data-i="12"><span class="tick"></span><span class="lbl">Вердикт</span></a>
+  <a href="#ev" data-i="★"><span class="tick"></span><span class="lbl">Доказательства</span></a>
+</nav>
+
+<main>
+
+  <!-- ══════════ JOURNEY ══════════ -->
+  <div class="journey">
+    <div class="stage" aria-hidden="true">
+      <canvas id="scene"></canvas>
+      <div class="labels" id="labels"></div>
+    </div>
+
+    <div class="steps">
+      <!-- 00 HERO -->
+      <section class="step" id="s00" data-act="0">
+        <div class="step-card">
+          <div class="hero-eyebrow">WMS → Avalanche Subnet-EVM</div>
+          <h1>Путь к<br>производительности</h1>
+          <p class="hero-sub">Сцена справа — это <strong>сама система</strong>: реестр, который строит сам себя. Прокручивай — и она проведёт тебя от требования <strong>1500&nbsp;транзакций/с</strong> до гео-сети из трёх стран.</p>
+          <div class="hero-chips">
+            <span class="chip"><b>1924</b> перехода/с</span>
+            <span class="chip"><b>3</b> страны · MD·RO·NL</span>
+            <span class="chip"><b>0</b> потерь</span>
+          </div>
+          <div class="scrollhint"><span class="ln"></span> Прокрутите, чтобы пройти путь</div>
+        </div>
+      </section>
+
+      <!-- 01 -->
+      <section class="step" id="s01" data-act="1">
+        <div class="step-card">
+          <div class="eyebrow"><span class="num">01</span><span class="bar"></span>Требование</div>
+          <h2>≥&nbsp;1500 транзакций/с — включая блокчейн</h2>
+          <p>Нефункциональное требование. «Включая блокчейн» интуитивно звучит как самая дорогая часть. Дальше увидим, что интуиция обманывает.</p>
+          <div class="kpi">
+            <div class="k"><span class="kv">1500</span><span class="kl">целевая планка</span></div>
+            <div class="k"><span class="kv ink">375</span><span class="kl">товаров/с (÷4)</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 02 -->
+      <section class="step" id="s02" data-act="2">
+        <div class="step-card warn">
+          <div class="eyebrow"><span class="num">02</span><span class="bar"></span>Единица</div>
+          <h2>Транзакция = подтверждённый переход состояния</h2>
+          <p>Не HTTP-запрос и не транзакция реестра. Один товар = <strong>4</strong> записи в блокчейн: приёмка → размещение → комплектация → отгрузка.</p>
+          <div class="note trap"><span class="tag">Ловушка защиты № 1</span>Комиссия спросит про единицу первой. Каждый переход — отдельное подтверждение в блокчейне.</div>
+        </div>
+      </section>
+
+      <!-- 03 -->
+      <section class="step" id="s03" data-act="3">
+        <div class="step-card">
+          <div class="eyebrow"><span class="num">03</span><span class="bar"></span>Архитектура</div>
+          <h2>Запись в реестр — асинхронная, по Transactional Outbox</h2>
+          <p>Событие копится в <span class="accent">outbox</span> → Debezium CDC → Kafka → адаптер → Subnet-EVM. Гарантия «не&nbsp;менее одного раза» + идемпотентность <strong>развязывают</strong> скорость БД и блокчейна.</p>
+        </div>
+      </section>
+
+      <!-- 04 -->
+      <section class="step" id="s04" data-act="4">
+        <div class="step-card good">
+          <div class="eyebrow"><span class="num">04</span><span class="bar"></span>Локальный стенд</div>
+          <h2>1924 перехода/с — ×1.28 к цели</h2>
+          <p>Устойчиво (sustained), на реалистичном объёме 150&nbsp;000 товаров. Скорость, с которой растёт реестр справа, — это и есть пропускная способность.</p>
+          <div class="kpi">
+            <div class="k"><span class="kv">1924</span><span class="kl">переходов/с</span></div>
+            <div class="k"><span class="kv green">0</span><span class="kl">потерь / 575 210</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 05 -->
+      <section class="step" id="s05" data-act="5">
+        <div class="step-card warn">
+          <div class="eyebrow"><span class="num">05</span><span class="bar"></span>Узкое место · контринтуитив</div>
+          <h2>Жмёт не блокчейн, а CPU базы данных</h2>
+          <p>Под нагрузкой <span class="danger">Postgres съедает 59&nbsp;%</span> ядер и захлёбывается, а блокчейн — всего <span class="accent">15&nbsp;%</span>, с кратным запасом. Самая «страшная» часть оказалась самой лёгкой.</p>
+          <div class="kpi">
+            <div class="k"><span class="kv red">59%</span><span class="kl">Postgres · узкое место</span></div>
+            <div class="k"><span class="kv">15%</span><span class="kl">блокчейн · запас</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 06 -->
+      <section class="step" id="s06" data-act="6">
+        <div class="step-card good">
+          <div class="eyebrow"><span class="num">06</span><span class="bar"></span>Тюнинги</div>
+          <h2>Конфигом и индексами — без переписывания</h2>
+          <p>Пул соединений <strong>10→30</strong> (главный рычаг, 1439→1924), <span class="accent">SKIP LOCKED</span>, конвейер отправки, OLTP-профиль Postgres. Затор рассасывается, поток ускоряется.</p>
+        </div>
+      </section>
+
+      <!-- 07 -->
+      <section class="step" id="s07" data-act="7">
+        <div class="step-card">
+          <div class="eyebrow"><span class="num">07</span><span class="bar"></span>Гео-распределение</div>
+          <h2>Три валидатора. Три страны. Реальный WAN.</h2>
+          <p>Реестр реплицируется на <strong>🇲🇩 dino · 🇷🇴 alex · 🇳🇱 itldc</strong> под настоящим BFT (порог 73.33&nbsp;%). Блок подтверждается, лишь когда его подпишут 3 узла через континенты.</p>
+          <div class="note"><span class="tag">Загадка</span>Тот&nbsp;же стек выдаёт уже не 1924, а <strong>десятки/с</strong>. Почему?</div>
+        </div>
+      </section>
+
+      <!-- 08 -->
+      <section class="step" id="s08" data-act="8">
+        <div class="step-card">
+          <div class="eyebrow"><span class="num">08</span><span class="bar"></span>Метод исключения</div>
+          <h2>Очевидные подозреваемые — невиновны</h2>
+          <p><span class="danger">Газ</span> — запас ~30×. <span class="danger">Сеть</span> — RTT 10–46&nbsp;мс. <span class="danger">Ядра</span> — EVM однопоточна, транзакции в блоке идут последовательно. Сборка же блока занимала <strong>9–24&nbsp;секунды</strong>. Откуда?</p>
+        </div>
+      </section>
+
+      <!-- 09 -->
+      <section class="step" id="s09" data-act="9">
+        <div class="step-card warn">
+          <div class="eyebrow"><span class="num">09</span><span class="bar"></span>Разгадка</div>
+          <h2>Кэши больше памяти → подкачка на вращающийся HDD</h2>
+          <p>Кэши subnet-evm (~1.8&nbsp;ГБ) не влезли в RAM (~1.4&nbsp;ГБ) → ~0.8&nbsp;ГБ <span class="danger">swap на вращающийся диск</span>. Блоки переполняются и падают на медленный HDD — вот они, секунды на блок.</p>
+          <div class="kpi"><div class="k"><span class="kv red" id="bbt-kpi">24.0&nbsp;с</span><span class="kl">build_block · своп</span></div></div>
+        </div>
+      </section>
+
+      <!-- 10 -->
+      <section class="step" id="s10" data-act="10">
+        <div class="step-card good">
+          <div class="eyebrow"><span class="num">10</span><span class="bar"></span>Исправление</div>
+          <h2>Ужать кэши под RAM. 6.1× / 4.8× — только конфиг.</h2>
+          <p><span class="accent">trie&nbsp;64/64&nbsp;·&nbsp;snapshot&nbsp;32</span>. Подкачка исчезла (swap 777→146 / 796→238&nbsp;МБ), блоки ужались, цепь снова несётся. Без замены железа.</p>
+          <div class="kpi">
+            <div class="k"><span class="kv green">1.5&nbsp;с</span><span class="kl">build_block после</span></div>
+            <div class="k"><span class="kv">6.1×</span><span class="kl">ускорение dino</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 11 -->
+      <section class="step" id="s11" data-act="11">
+        <div class="step-card">
+          <div class="eyebrow"><span class="num">11</span><span class="bar"></span>Остаточный пол</div>
+          <h2>Остаётся цена самого́ гео</h2>
+          <p>После фикса сборка блока — не узкое место. Остаются накладные WAN-консенсуса (физика расстояния) и железо бюджетных VPS. Это <strong>принципиально</strong>, но не баги. Цепь поглотила пик: <span class="accent">backlog 20&nbsp;860&nbsp;→&nbsp;0</span>, 0 потерь.</p>
+        </div>
+      </section>
+
+      <!-- 12 -->
+      <section class="step" id="s12" data-act="12">
+        <div class="step-card good">
+          <div class="eyebrow"><span class="num">12</span><span class="bar"></span>Вердикт</div>
+          <h2>Требование выполнено. Блокчейн — не узкое место.</h2>
+          <p>1924&nbsp;перехода/с (×1.28), нулевая потеря данных; реестр потребляет ~1.5 из&nbsp;10&nbsp;ядер; гео-потолок чинится настройкой и железом. Ёмкость <strong>кратно превышает</strong> потребность склада.</p>
+          <div class="scrollhint"><span class="ln"></span> Дальше — доказательная база</div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ══════════ EVIDENCE ══════════ -->
+  <div class="evidence" id="ev">
+    <div class="ev-intro">
+      <div class="eyebrow reveal"><span class="bar"></span>Доказательная база<span class="bar"></span></div>
+      <h2 class="reveal d1" style="font-family:var(--display);font-size:var(--t-h2);font-weight:600;margin:0 auto;max-width:20ch;">Цифры, графики и арсенал защиты</h2>
+    </div>
+
+    <!-- Единица -->
+    <section class="evsec" id="ev-unit">
+      <div class="wrap">
+        <span class="eyebrow reveal"><span class="num">A</span><span class="bar"></span>Единица измерения</span>
+        <h2 class="reveal d1">Почему «переход состояния», а не HTTP или tx реестра</h2>
+        <div class="panel reveal d2">
+          <div class="bars">
+            <div class="bar"><span class="name"><b>Переходы/с</b><br>наша единица</span><div class="track in"><div class="fill" style="--w:100%"><span class="v">базовая величина</span></div></div></div>
+            <div class="bar"><span class="name"><b>Товары/с</b><br>полный цикл</span><div class="track in"><div class="fill dim" style="--w:25%"><span class="v">÷ 4</span></div></div></div>
+            <div class="bar"><span class="name"><b>Tx реестра/с</b></span><div class="track in"><div class="fill dim" style="--w:6%"><span class="v">÷ размер батча (сотни)</span></div></div></div>
+          </div>
+        </div>
+        <div class="callout trap reveal d3"><span class="tag">Ловушка защиты</span>«Товары/с» занизили бы нагрузку вчетверо; «tx реестра/с» из-за батчинга дали бы единицы в секунду. Честнее всего — переход состояния.</div>
+      </div>
+    </section>
+
+    <!-- Профиль ресурсов -->
+    <section class="evsec" id="ev-res">
+      <div class="wrap">
+        <span class="eyebrow reveal"><span class="num">B</span><span class="bar"></span>Профиль ресурсов</span>
+        <h2 class="reveal d1">Кто потребляет 9.8 из 10 ядер при 1924/с</h2>
+        <div class="panel reveal d2">
+          <div class="bars">
+            <div class="bar"><span class="name"><b>СУБД</b> · PostgreSQL</span><div class="track"><div class="fill red" style="--w:100%"><span class="v">5.8 ядра · 59% — узкое место</span></div></div></div>
+            <div class="bar"><span class="name"><b>WMS</b> · учётная система</span><div class="track"><div class="fill amber" style="--w:33%"><span class="v">1.9 · 19%</span></div></div></div>
+            <div class="bar"><span class="name"><b>Блокчейн</b> · нода+адаптер</span><div class="track"><div class="fill" style="--w:26%"><span class="v">1.5 · 15% — запас кратный</span></div></div></div>
+            <div class="bar"><span class="name">Генератор · k6</span><div class="track"><div class="fill dim" style="--w:9%"><span class="v">0.5 · 5%</span></div></div></div>
+            <div class="bar"><span class="name">Брокер + CDC</span><div class="track"><div class="fill dim" style="--w:3%"><span class="v">0.1 · 1%</span></div></div></div>
+          </div>
+        </div>
+        <p class="reveal d3" style="margin-top:1.2rem"><span class="danger">Ключевой вывод:</span> «дорогой» блокчейн потребляет ~1.5 ядра из 10. Ограничивает систему процессорная нагрузка СУБД.</p>
+      </div>
+    </section>
+
+    <!-- Тюнинги -->
+    <section class="evsec" id="ev-tune">
+      <div class="wrap">
+        <span class="eyebrow reveal"><span class="num">C</span><span class="bar"></span>Снятые узкие места</span>
+        <h2 class="reveal d1">Результат — конфигом, индексами и точечными фиксами</h2>
+        <div class="grid2 reveal d2">
+          <div class="panel">
+            <h3 style="font-family:var(--display);font-size:var(--t-h3);margin:0 0 0.9rem;color:var(--cyan)">Доставка · адаптер</h3>
+            <div class="bars" style="gap:0.7rem">
+              <div class="bar"><span class="name">Конвейер «tx в полёте»</span><div class="track"><div class="fill" style="--w:100%"><span class="v">975 → 1960–2850</span></div></div></div>
+              <div class="bar"><span class="name">Запас газа ×1.5</span><div class="track"><div class="fill" style="--w:60%"><span class="v">нет отказов «мало газа»</span></div></div></div>
+              <div class="bar"><span class="name">Рекалибровка targetGas</span><div class="track"><div class="fill" style="--w:55%"><span class="v">снято «залипание»</span></div></div></div>
+            </div>
+          </div>
+          <div class="panel">
+            <h3 style="font-family:var(--display);font-size:var(--t-h3);margin:0 0 0.9rem;color:var(--amber)">Учётная система · СУБД</h3>
+            <div class="bars" style="gap:0.7rem">
+              <div class="bar"><span class="name">Пул 10→30</span><div class="track"><div class="fill amber" style="--w:100%"><span class="v">1439 → 1924 · главный рычаг</span></div></div></div>
+              <div class="bar"><span class="name">SKIP LOCKED</span><div class="track"><div class="fill amber" style="--w:62%"><span class="v">снята сериализация</span></div></div></div>
+              <div class="bar"><span class="name">+2 индекса · данные</span><div class="track"><div class="fill amber" style="--w:50%"><span class="v">70 SKU / 70 точек</span></div></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="callout reveal d3"><span class="tag">Доминирующий рычаг СУБД · урок воспроизводимости</span>OLTP-тюнинг <span class="mono">synchronous_commit=off</span> (~3–4×) + <span class="mono">shared_buffers 2GB</span>. Жил только в volume → <span class="mono">down -v</span> стирал, e2e падал до <strong>455/с</strong>. Вернули и закоммитили (<span class="mono">postgres-tune.sql</span>) → повторный замер <strong>2294/с</strong>. Осознанный компромисс durability при идемпотентной доставке.</div>
+      </div>
+    </section>
+
+    <!-- Фикс гео -->
+    <section class="evsec" id="ev-fix">
+      <div class="wrap">
+        <span class="eyebrow reveal"><span class="num">D</span><span class="bar"></span>Гео-фикс · до/после</span>
+        <h2 class="reveal d1">Ужатие кэшей: 6.1× и 4.8× без замены железа</h2>
+        <div class="panel reveal d2">
+          <div class="dual">
+            <div class="dual-row">
+              <div class="dual-label"><b>build_block · dino 🇲🇩</b><span class="mult">6.1×</span></div>
+              <div class="minibar"><div class="mf before" style="--w:100%"></div></div><span class="dual-tag">до: 8.95 с</span>
+              <div class="minibar" style="margin-top:0.35rem"><div class="mf after" style="--w:17%"></div></div><span class="dual-tag">после: ~1.5 с</span>
+            </div>
+            <div class="dual-row">
+              <div class="dual-label"><b>build_block · alex 🇷🇴</b><span class="mult">4.8×</span></div>
+              <div class="minibar"><div class="mf before" style="--w:100%"></div></div><span class="dual-tag">до: 24.0 с</span>
+              <div class="minibar" style="margin-top:0.35rem"><div class="mf after" style="--w:21%"></div></div><span class="dual-tag">после: ~5.0 с</span>
+            </div>
+          </div>
+        </div>
+        <div class="statrow reveal d3">
+          <div class="stat"><span class="stat-num cyan">777→146</span><span class="stat-lbl">swap dino, МБ</span></div>
+          <div class="stat"><span class="stat-num cyan">796→238</span><span class="stat-lbl">swap alex, МБ</span></div>
+          <div class="stat"><span class="stat-num">0₽</span><span class="stat-lbl">только конфиг</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Q&A -->
+    <section class="evsec" id="ev-qa">
+      <div class="wrap">
+        <span class="eyebrow reveal"><span class="num">E</span><span class="bar"></span>Арсенал защиты</span>
+        <h2 class="reveal d1">Каверзные вопросы комиссии — и готовые ответы</h2>
+        <div class="qa reveal d2">
+          <details><summary><span class="q">В1</span>1924 — это HTTP-запросы или нагрузка на сервер?</summary><div class="ans"><span class="a">Ответ</span><p>Нет. Это подтверждённые (COMMITTED) переходы состояния, записанные в блокчейн. Каждый переход — отдельное onchain-подтверждение.</p></div></details>
+          <details><summary><span class="q">В2</span>Блокчейн же медленный — как он не узкое место?</summary><div class="ans"><span class="a">Ответ</span><p>Батчинг (адаптер агрегирует сотни переходов в одну tx реестра) + конвейер. Нода+адаптер = 1.5 ядра из 10, СУБД — 5.8. Блокчейн наименее нагружен.</p></div></details>
+          <details><summary><span class="q">В3</span>Вы тестировали на одной машине — это не распределённая сеть.</summary><div class="ans"><span class="a">Ответ</span><p>Это два разных замера. Локальный стенд (1924/с) консервативен — все компоненты на одних ядрах. Отдельно развёрнута настоящая гео-сеть MD/RO/NL под реальным WAN+BFT.</p></div></details>
+          <details><summary><span class="q">В4</span>В гео десятки/с — значит блокчейн не масштабируется?</summary><div class="ans"><span class="a">Ответ</span><p>Нет. Потолок был ошибкой конфигурации (кэши > RAM → swap на HDD); фикс конфигом дал 4.8–6.1×. Остаток — цена WAN + слабое железо VPS. На норм железе = 1924/с. Складу нужны единицы/с.</p></div></details>
+          <details><summary><span class="q">В5</span>synchronous_commit=off — теряете данные при сбое?</summary><div class="ans"><span class="a">Ответ</span><p>Компромисс только для стресс-стенда. Допустим: доставка идемпотентна (at-least-once), блокчейн — источник истины, outbox переживёт перезапуск. В продакшене не применяется.</p></div></details>
+          <details><summary><span class="q">В6</span>Почему больше ядер не помогли в гео?</summary><div class="ans"><span class="a">Ответ</span><p>EVM однопоточна: транзакции в блоке исполняются последовательно (каждая видит state предыдущей). Ни сборку, ни верификацию блока ядра не ускоряют.</p></div></details>
+          <details><summary><span class="q">В7</span>Может, это удачный пик, а не реальная скорость?</summary><div class="ans"><span class="a">Ответ</span><p>Итог — устойчивое значение стационарного окна (минус 20 с разгона). Пики (2276/3233) приводятся отдельно. 0 FAILED и ограниченная очередь подтверждают устойчивость.</p></div></details>
+          <details><summary><span class="q">В8</span>Почему не подняли газ-лимит или число отправителей?</summary><div class="ans"><span class="a">Ответ</span><p>Не упирается ни в то, ни в другое. Газ: 80% при baseFee на полу 25 Гвей. Отправители: 8→24 не подняло устойчивый темп. Узкое место было в swap — его и устранили.</p></div></details>
+        </div>
+      </div>
+    </section>
+
+    <!-- Границы -->
+    <section class="evsec" id="ev-cav">
+      <div class="wrap">
+        <span class="eyebrow reveal"><span class="num">F</span><span class="bar"></span>Границы интерпретации</span>
+        <h2 class="reveal d1">Что мы НЕ утверждаем</h2>
+        <div class="caveats reveal d2">
+          <div class="caveat"><span class="ix">01</span><p><b>Единица — переход состояния</b>, не товар и не tx реестра. Каждый — отдельное подтверждение.</p></div>
+          <div class="caveat"><span class="ix">02</span><p><b>Co-location консервативен.</b> Все компоненты на одном узле — тяжелее промышленного разнесения.</p></div>
+          <div class="caveat"><span class="ix">03</span><p><b>1924 ≠ 2294 ≠ 455 — разные замеры.</b> 1924 — итог; 2294 — повторно с закоммиченным тюнингом; 455 — без него.</p></div>
+          <div class="caveat"><span class="ix">04</span><p><b>Итог — sustained, не пик.</b> Пики приводятся отдельно и не выносятся в заголовок.</p></div>
+          <div class="caveat"><span class="ix">05</span><p><b>ev/s в гео в заголовок не выносим.</b> Итерация ≠ событие, поток бёрстами. Бесспорно: 0 потерь + полный дренаж.</p></div>
+          <div class="caveat"><span class="ix">06</span><p><b>975/с — потолок последовательного флашера</b>, не платформы. После конвейеризации ёмкость выросла кратно.</p></div>
+        </div>
+        <div class="endmark">Источники: <span class="mono">stress-load-tests-report-chapter.md</span> · <span class="mono">geo-throughput-rootcause-chapter.md</span> · <span class="mono">run-geo-bench.sh</span></div>
+      </div>
+    </section>
+  </div>
+
+</main>
+
+<script>
+/* ═══════════ КОНТРОЛЛЕР: прогресс, навигация, акт, reveal ═══════════ */
+(function () {
+  'use strict';
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const progress = document.getElementById('progress');
+  function onScroll() {
+    const h = document.documentElement;
+    const max = h.scrollHeight - h.clientHeight;
+    progress.style.width = ((max > 0 ? h.scrollTop / max : 0) * 100).toFixed(2) + '%';
+  }
+  addEventListener('scroll', onScroll, { passive: true }); onScroll();
+
+  // reveal (только evidence)
+  if (!reduce && 'IntersectionObserver' in window) {
+    const ro = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add('in'); ro.unobserve(e.target); } }), { threshold: 0.16, rootMargin: '0px 0px -8% 0px' });
+    document.querySelectorAll('.reveal,.evsec .bars,.evsec .dual').forEach((el) => ro.observe(el));
+  } else {
+    document.querySelectorAll('.reveal,.evsec .bars,.evsec .dual').forEach((el) => el.classList.add('in'));
+  }
+
+  // активный шаг → __ACT + навигация (centerline, не зависит от высоты)
+  const navLinks = Array.from(document.querySelectorAll('.railnav a'));
+  window.__ACT = 0;
+  if ('IntersectionObserver' in window) {
+    const stepRO = new IntersectionObserver((es) => {
+      es.forEach((e) => {
+        if (!e.isIntersecting) return;
+        const idx = parseInt(e.target.dataset.act, 10);
+        window.__ACT = idx;
+        window.dispatchEvent(new CustomEvent('act', { detail: { act: idx } }));
+        navLinks.forEach((a) => a.classList.toggle('active', a.getAttribute('href') === '#' + e.target.id));
+      });
+    }, { rootMargin: '-45% 0px -45% 0px', threshold: 0 });
+    document.querySelectorAll('.step').forEach((s) => stepRO.observe(s));
+    // подсветка «Доказательства» в навигации
+    const evRO = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) navLinks.forEach((a) => a.classList.toggle('active', a.getAttribute('href') === '#ev')); }), { rootMargin: '-45% 0px -45% 0px', threshold: 0 });
+    const ev = document.getElementById('ev'); if (ev) evRO.observe(ev);
+  }
+})();
+</script>
+
+<!-- ───────────────────────────────────────────────────────────
+     3D-СЛОЙ — СЦЕНА ОЛИЦЕТВОРЯЕТ САМУ СИСТЕМУ.
+     Растущий РЕЕСТР (цепь блоков), который кормит POSTGRES; в гео —
+     репликация на 3 узла-страны; в свопе — блоки падают на вращающийся
+     HDD, таймер build_block лезет к 24с. Камера ЛЕТИТ к компоненту,
+     о котором текущий шаг; CSS2D-подписи = реальные имена компонентов.
+     При сбое CDN/WebGL/reduced-motion — тихий CSS-fallback.
+     ─────────────────────────────────────────────────────────── -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+(async () => {
+  'use strict';
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  let THREE, EffectComposer, RenderPass, UnrealBloomPass, OutputPass, RoundedBoxGeometry, CSS2DRenderer, CSS2DObject, RoomEnvironment;
+  try {
+    THREE = await import('three');
+    ({ EffectComposer }     = await import('three/addons/postprocessing/EffectComposer.js'));
+    ({ RenderPass }         = await import('three/addons/postprocessing/RenderPass.js'));
+    ({ UnrealBloomPass }    = await import('three/addons/postprocessing/UnrealBloomPass.js'));
+    ({ OutputPass }         = await import('three/addons/postprocessing/OutputPass.js'));
+    ({ RoundedBoxGeometry } = await import('three/addons/geometries/RoundedBoxGeometry.js'));
+    ({ CSS2DRenderer, CSS2DObject } = await import('three/addons/renderers/CSS2DRenderer.js'));
+    ({ RoomEnvironment } = await import('three/addons/environments/RoomEnvironment.js'));
+  } catch (err) { console.warn('[3D] Three.js не загрузился — CSS-fallback.', err); return; }
+
+  const canvas = document.getElementById('scene');
+  const stage = canvas.parentElement;
+  const labelLayer = document.getElementById('labels');
+  let renderer;
+  try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true }); }
+  catch (err) { console.warn('[3D] WebGL недоступен — CSS-fallback.', err); return; }
+  const W = () => stage.clientWidth, H = () => stage.clientHeight;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(W(), H(), false);
+  renderer.setClearColor(0x05070d, 1);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.12;
+
+  const labelRenderer = new CSS2DRenderer();
+  labelRenderer.setSize(W(), H());
+  labelRenderer.domElement.style.position = 'absolute';
+  labelRenderer.domElement.style.top = '0';
+  labelRenderer.domElement.style.left = '0';
+  labelRenderer.domElement.style.pointerEvents = 'none';
+  labelLayer.appendChild(labelRenderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x05070d, 0.04);
+  const camera = new THREE.PerspectiveCamera(48, W() / H(), 0.1, 200);
+  camera.position.set(1, 3, 13);
+
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  const bloom = new UnrealBloomPass(new THREE.Vector2(W(), H()), 0.55, 0.72, 0.5);
+  composer.addPass(bloom);
+  composer.addPass(new OutputPass());
+
+  scene.add(new THREE.AmbientLight(0x2a3a55, 0.45));
+  const key = new THREE.DirectionalLight(0x9fc4ff, 1.1); key.position.set(5, 9, 6); scene.add(key);
+  const rim = new THREE.PointLight(0x38e0d4, 1.8, 34); rim.position.set(-2, 1, 6); scene.add(rim);
+  // среда отражений (процедурная, без внешних файлов) — даёт PBR-блеск «смоделированных» объектов
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+  const COL = { cyan:0x38e0d4, cyanH:0x9bfff5, violet:0x8b7bff, red:0xff4757, amber:0xffb02e, green:0x3ddc84 };
+  const C = (h) => new THREE.Color(h);
+  const lerp = (a, b, k) => a + (b - a) * k;
+  const easeBack = (p) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2); };
+  const v3 = (x, y, z) => new THREE.Vector3(x, y, z);
+
+  // сетка-пол
+  const grid = new THREE.GridHelper(140, 70, 0x1d365a, 0x122740);
+  grid.position.y = -2.8; grid.material.transparent = true; grid.material.opacity = 0.26; scene.add(grid);
+  { const n = 300, a = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { a[i*3]=(Math.random()-0.5)*70; a[i*3+1]=Math.random()*28-5; a[i*3+2]=-10-Math.random()*45; }
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(a, 3));
+    scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color:0x33507a, size:0.06, transparent:true, opacity:0.5 }))); }
+
+  // helper подписи
+  function makeLabel(text, cls) {
+    const el = document.createElement('div');
+    el.className = 'lbl' + (cls ? ' ' + cls : '');
+    el.innerHTML = text;
+    const obj = new CSS2DObject(el);
+    obj.userData.el = el; obj.userData.target = 0;
+    return obj;
+  }
+  function setLabel(obj, vis) { obj.userData.target = vis ? 1 : 0; }
+
+  // ═══ РЕЕСТР: растущая цепь ═══
+  const M = 11, SP = 1.08, CHAIN_X0 = -1.4, BASE_Y = 0.4;
+  const blockGeo = new RoundedBoxGeometry(0.72, 0.72, 0.72, 6, 0.13);
+  const coreGeo = new THREE.IcosahedronGeometry(0.22, 0);
+  const RIGHT = CHAIN_X0 + M * SP, LEFT = CHAIN_X0;
+  const yAt = (x, t) => BASE_Y + Math.sin(x * 0.4 + t * 0.35) * 0.1;
+  const zAt = (x) => Math.sin(x * 0.25) * 0.32;
+  const blocks = [];
+  for (let i = 0; i < M; i++) {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(blockGeo, new THREE.MeshPhysicalMaterial({
+      color:0x0e3052, metalness:0, roughness:0.05, transmission:0.9, thickness:0.5, ior:1.42,
+      clearcoat:1, clearcoatRoughness:0.12, envMapIntensity:1.7, transparent:true }));
+    const core = new THREE.Mesh(coreGeo, new THREE.MeshStandardMaterial({ color:0x0a1626, emissive:COL.cyanH, emissiveIntensity:2.2 }));
+    g.add(body); g.add(core);
+    g.userData = { body, core, pop:1, x: LEFT + i * SP, seed: i * 1.7 };
+    scene.add(g); blocks.push(g);
+  }
+  const threadGeo = new THREE.BufferGeometry();
+  threadGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(M * 3), 3));
+  const thread = new THREE.Line(threadGeo, new THREE.LineBasicMaterial({ color:COL.cyan, transparent:true, opacity:0.55 }));
+  thread.frustumCulled = false; scene.add(thread);
+  const ledgerLabel = makeLabel('<b>РЕЕСТР</b> · LEDGER', '');
+  ledgerLabel.position.set(CHAIN_X0 + M * SP * 0.5, BASE_Y + 1.4, 0); scene.add(ledgerLabel);
+  let blockCount = 0;
+
+  // ═══ POSTGRES (кормит реестр, слева-вверху) ═══
+  const pg = new THREE.Mesh(new RoundedBoxGeometry(1.3, 1.3, 1.3, 4, 0.16),
+    new THREE.MeshStandardMaterial({ color:0x0c1626, emissive:COL.cyan, emissiveIntensity:0.4, metalness:0.6, roughness:0.3 }));
+  pg.position.set(LEFT - 2.6, BASE_Y + 0.2, 0); scene.add(pg);
+  const pgLabel = makeLabel('<b>POSTGRES</b> · 19%', '');
+  pgLabel.position.set(LEFT - 2.6, BASE_Y + 1.5, 0); scene.add(pgLabel);
+  const pipeLabel = makeLabel('OUTBOX → KAFKA → <b>АДАПТЕР</b>', '');
+  pipeLabel.position.set(-0.6, BASE_Y + 1.15, 0); scene.add(pipeLabel);
+  // поток событий PG → реестр
+  const flowN = 60, flowArr = new Float32Array(flowN * 3), flowSeed = [];
+  for (let i = 0; i < flowN; i++) flowSeed.push({ p: Math.random(), off:(Math.random()-0.5)*0.5, sp:0.4+Math.random()*0.6 });
+  const flowGeo = new THREE.BufferGeometry(); flowGeo.setAttribute('position', new THREE.BufferAttribute(flowArr, 3));
+  const flow = new THREE.Points(flowGeo, new THREE.PointsMaterial({ color:COL.cyanH, size:0.08, transparent:true, opacity:0.8 }));
+  scene.add(flow);
+
+  // ═══ ГЕО: 3 узла-страны + лучи ═══
+  const geoGroup = new THREE.Group(); scene.add(geoGroup);
+  const nodeDefs = [
+    { p: v3(-3.5, 3.4, -2.5), name: '🇲🇩 dino' },
+    { p: v3(3.8, 3.7, -2.5),  name: '🇷🇴 alex' },
+    { p: v3(0.6, 4.7, -3.8),  name: '🇳🇱 itldc' },
+  ];
+  const anchor = v3(CHAIN_X0 + M * SP * 0.6, BASE_Y + 0.4, 0);
+  const geoNodes = nodeDefs.map((d, i) => {
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.18, 22, 22),
+      new THREE.MeshStandardMaterial({ color:0x06140f, emissive:COL.cyan, emissiveIntensity:0.95, metalness:0.4, roughness:0.3, transparent:true, opacity:0 }));
+    core.position.copy(d.p);
+    const halo = new THREE.Mesh(new THREE.SphereGeometry(0.32, 16, 16), new THREE.MeshBasicMaterial({ color:COL.cyan, transparent:true, opacity:0 }));
+    core.add(halo);
+    const curve = new THREE.QuadraticBezierCurve3(anchor.clone(), anchor.clone().lerp(d.p, 0.5).add(v3(0,1.3,0)), d.p.clone());
+    const beam = new THREE.Mesh(new THREE.TubeGeometry(curve, 30, 0.02, 6, false), new THREE.MeshBasicMaterial({ color:COL.violet, transparent:true, opacity:0 }));
+    const packet = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), new THREE.MeshBasicMaterial({ color:0xffffff, transparent:true, opacity:0 }));
+    geoGroup.add(core, beam, packet);
+    const label = makeLabel('<b>' + d.name + '</b>', '');
+    label.position.copy(d.p).add(v3(0, 0.5, 0)); geoGroup.add(label);
+    return { core, halo, curve, beamMat: beam.material, packet, label };
+  });
+
+  // ═══ СВОП: вращающийся HDD ═══
+  const hdd = new THREE.Group(); hdd.position.set(anchor.x, -13, 0); scene.add(hdd);
+  const platter = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.4, 0.1, 64),
+    new THREE.MeshStandardMaterial({ color:0x10151f, emissive:0x1a0a0c, emissiveIntensity:0.3, metalness:0.95, roughness:0.16 }));
+  hdd.add(platter);
+  for (let r = 0.7; r <= 2.2; r += 0.5) { const ring = new THREE.Mesh(new THREE.TorusGeometry(r, 0.006, 6, 80), new THREE.MeshBasicMaterial({ color:0x2a3550, transparent:true, opacity:0.6 })); ring.rotation.x = Math.PI/2; ring.position.y = 0.06; hdd.add(ring); }
+  const arm = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.06, 0.12), new THREE.MeshStandardMaterial({ color:0x20283a, emissive:COL.amber, emissiveIntensity:0.4, metalness:0.8, roughness:0.3 }));
+  arm.position.set(0.6, 0.12, 0.9); arm.rotation.y = 0.5; hdd.add(arm);
+  const overflow = [];
+  for (let i = 0; i < 6; i++) { const b = new THREE.Mesh(blockGeo, new THREE.MeshStandardMaterial({ color:0x1a0608, emissive:COL.red, emissiveIntensity:0.75, metalness:0.6, roughness:0.3, transparent:true, opacity:0 })); b.scale.setScalar(0.65); hdd.add(b); overflow.push(b); }
+  const hddLabel = makeLabel('<b>SWAP → HDD</b>', 'warn'); hddLabel.position.set(anchor.x, -1.0, 0); scene.add(hddLabel);
+  const timerLabel = makeLabel('build_block <b>9.0 с</b>', 'warn'); timerLabel.position.set(anchor.x, BASE_Y + 1.0, 0); scene.add(timerLabel);
+
+  // ═══ HUD ═══
+  const hud = document.createElement('div'); hud.className = 'hud';
+  hud.innerHTML = '<div class="hud-k"></div><div class="hud-v"></div>'; document.body.appendChild(hud);
+  const hudK = hud.querySelector('.hud-k'), hudV = hud.querySelector('.hud-v');
+  const HUD = {
+    0:['Реестр строит сам себя',{count:1924,suf:' переходов/с'},''],1:['Требование','≥ 1500 переходов/с',''],
+    2:['Единица','1 переход = 1 запись в реестр',''],3:['Outbox → реестр','async · at-least-once',''],
+    4:['Локальный стенд',{count:1924,suf:' переходов/с'},'good'],5:['Узкое место','Postgres 59% · блокчейн 15%','warn'],
+    6:['После тюнинга',{count:1924,suf:' переходов/с'},'good'],7:['Гео · 3 страны','MD · RO · NL',''],
+    8:['Подозреваемые','газ / сеть / ядра — невиновны',''],9:['build_block','24.0 с — swap → HDD','warn'],
+    10:['Фикс · только конфиг','1.5 с ✓ 6.1×','good'],11:['Остаточный пол','WAN-консенсус · цена гео',''],
+    12:['Вердикт','блокчейн ≠ узкое место','good'],
+  };
+  let hudNum = 0, hudNumT = 0, hudNumOn = false, hudSuf = '';
+  function updateHUD(act) {
+    const d = HUD[act] || HUD[0]; hudK.textContent = d[0];
+    hud.classList.remove('warn','good'); if (d[2]) hud.classList.add(d[2]);
+    if (typeof d[1] === 'object') { hudNumOn = true; hudNumT = d[1].count; hudSuf = d[1].suf; }
+    else { hudNumOn = false; hudV.textContent = d[1]; }
+  }
+
+  // ═══ СОСТОЯНИЕ ПО АКТУ ═══
+  const P = { speed:1, bottleneck:0, geo:0, swap:0, heat:0, cpx:1, cpy:3, cpz:13, lx:1, ly:0.6, lz:0, bbt:9 };
+  const T = { ...P };
+  function setAct(act) {
+    let s=1, b=0, g=0, sw=0, h=0, bbt=9, cp=[1,3,13], la=[1,0.6,0];
+    if (act===0){ s=0.8; cp=[3,4.6,16]; la=[3.4,0.9,-1]; }            // широкий установочный
+    else if (act===1){ s=1.0; cp=[4.4,1.4,8.5]; la=[3,0.55,0]; }      // низкий проход вдоль цепи
+    else if (act===2){ s=0.3; cp=[3.3,1.0,4.6]; la=[3,0.5,0]; }       // крупный план блока
+    else if (act===3){ s=0.85; cp=[-3.4,2.3,8.5]; la=[-0.6,0.6,0]; }  // конвейер PG→реестр
+    else if (act===4){ s=1.4; cp=[2.2,3.3,12]; la=[2,0.6,0]; }        // динамичный 3/4
+    else if (act===5){ s=0.55; b=1; cp=[-2.6,1.8,6.5]; la=[LEFT-2.6,0.6,0]; } // к POSTGRES
+    else if (act===6){ s=1.5; cp=[1,2.6,11]; la=[1,0.6,0]; }
+    else if (act===7){ s=0.7; g=1; cp=[1,4.2,13]; la=[0.6,2.2,-1.5]; }       // отъезд к узлам
+    else if (act===8){ s=0.7; g=1; cp=[1,3.6,12]; la=[0.6,1.6,-1]; }
+    else if (act===9){ s=0.05; sw=1; h=1; bbt=24; cp=[1.5,0.6,8]; la=[anchor.x,-1,0]; } // вниз к HDD
+    else if (act===10){ s=1.5; sw=0; h=0; bbt=1.5; cp=[1.5,2.4,11]; la=[1.2,0.6,0]; }
+    else if (act===11){ s=0.9; g=1; cp=[1,4,13]; la=[0.6,2,-1.4]; }
+    else if (act>=12){ s=0.95; g=1; cp=[1,3.4,13.5]; la=[0.8,1.6,-1]; }
+    T.speed=s; T.bottleneck=b; T.geo=g; T.swap=sw; T.heat=h; T.bbt=bbt;
+    T.cpx=cp[0]; T.cpy=cp[1]; T.cpz=cp[2]; T.lx=la[0]; T.ly=la[1]; T.lz=la[2];
+    // подписи
+    setLabel(ledgerLabel, (act>=0 && act<=12) && act!==2);
+    setLabel(pgLabel, act>=3 && act<=6);
+    setLabel(pipeLabel, act===3);
+    geoNodes.forEach((n)=> setLabel(n.label, g>0));
+    setLabel(hddLabel, act>=9 && act<=10);
+    setLabel(timerLabel, act>=8 && act<=10);
+    updateHUD(act);
+  }
+  setAct(window.__ACT || 0);
+  window.addEventListener('act', (e) => setAct(e.detail.act));
+
+  // ═══ ЦИКЛ ═══
+  const look = v3(1, 0.6, 0), tmpC = new THREE.Color();
+  const cCyan = C(COL.cyan), cAmber = C(COL.amber), cRed = C(COL.red), cGreen = C(COL.green);
+  const order = blocks.map((_, i) => i);
+  let t = 0;
+  function frame() {
+    t += 0.016;
+    for (const k of ['speed','bottleneck','geo','swap','heat','cpx','cpy','cpz','lx','ly','lz','bbt']) P[k] = lerp(P[k], T[k], 0.05);
+
+    camera.position.set(P.cpx, P.cpy, P.cpz);
+    look.lerp(v3(P.lx, P.ly, P.lz), 0.06); camera.lookAt(look);
+    grid.material.opacity = 0.26 - P.swap * 0.12;
+
+    // цепь
+    const heatTint = Math.min(P.heat, P.swap);
+    for (const g of blocks) {
+      const u = g.userData;
+      u.x += P.speed * 0.05;
+      if (u.x > RIGHT) { u.x -= M * SP; u.pop = 0; blockCount++; }
+      u.pop = Math.min(1, u.pop + 0.04);
+      g.position.set(u.x, yAt(u.x, t), zAt(u.x));
+      g.scale.setScalar(0.18 + 0.82 * easeBack(u.pop));
+      g.rotation.y = Math.sin(t * 0.3 + u.seed) * 0.1;
+      g.rotation.x = Math.sin(t * 0.22 + u.seed) * 0.05;
+      tmpC.copy(cCyan).lerp(cAmber, heatTint * 0.85);
+      u.core.material.emissive.copy(tmpC).lerp(C(COL.cyanH), 0.5);
+      u.core.material.emissiveIntensity = (2.6 + Math.sin(t * 1.5 + u.seed) * 0.6) * (1 - P.swap * 0.55);
+      u.core.rotation.y += 0.012; u.core.rotation.x += 0.007;
+      u.body.material.color.copy(C(0x0c2840)).lerp(cRed, heatTint * 0.6);
+    }
+    order.sort((a, b) => blocks[a].userData.x - blocks[b].userData.x);
+    const tp = thread.geometry.attributes.position.array;
+    order.forEach((bi, i) => { const p = blocks[bi].position; tp[i*3]=p.x; tp[i*3+1]=p.y; tp[i*3+2]=p.z; });
+    thread.geometry.attributes.position.needsUpdate = true;
+    thread.material.opacity = 0.5 - P.swap * 0.3;
+
+    // POSTGRES — нагрев в узком месте
+    tmpC.copy(cCyan).lerp(cRed, P.bottleneck);
+    pg.material.emissive.copy(tmpC);
+    pg.material.emissiveIntensity = 0.4 + P.bottleneck * (0.5 + Math.sin(t*5)*0.2);
+    pg.scale.setScalar(1 + P.bottleneck * (0.18 + Math.sin(t*5)*0.05));
+    pgLabel.userData.el.innerHTML = P.bottleneck > 0.5 ? '<b>POSTGRES</b> · 59% — узкое место' : '<b>POSTGRES</b> · 19%';
+    pgLabel.userData.el.classList.toggle('warn', P.bottleneck > 0.5);
+
+    // поток событий PG→реестр (в заторе — копится у PG)
+    const jam = P.bottleneck;
+    for (let i = 0; i < flowN; i++) {
+      const s = flowSeed[i];
+      s.p += s.sp * 0.004 * (0.3 + (1 - jam) * P.speed);
+      if (s.p > 1) s.p -= 1;
+      const pp = jam > 0.5 ? Math.pow(s.p, 3) : s.p; // в заторе частицы вязнут у начала
+      const x = lerp(pg.position.x + 0.6, anchor.x, pp);
+      flowArr[i*3]   = x;
+      flowArr[i*3+1] = BASE_Y + s.off + Math.sin(t*2 + i) * 0.1;
+      flowArr[i*3+2] = s.off;
+    }
+    flowGeo.attributes.position.needsUpdate = true;
+    flow.material.color.copy(cCyan).lerp(cRed, jam);
+
+    // гео
+    const calm = (window.__ACT >= 11) ? P.geo : 0;
+    geoNodes.forEach((n, i) => {
+      const op = P.geo;
+      n.core.material.opacity = op; n.beamMat.opacity = op * 0.5; n.halo.material.opacity = op * (0.25 + Math.sin(t*2.5+i)*0.12);
+      tmpC.copy(cCyan).lerp(cGreen, calm); n.core.material.emissive.copy(tmpC); n.halo.material.color.copy(tmpC);
+      const tt = (t * 0.4 + i * 0.33) % 1; n.packet.position.copy(n.curve.getPoint(tt)); n.packet.material.opacity = op;
+      n.core.scale.setScalar(1 + Math.sin(t*3+i)*0.1);
+      n.label.userData.el.classList.toggle('good', calm > 0.5);
+    });
+
+    // своп
+    hdd.position.y = lerp(hdd.position.y, -13 + P.swap * 11, 0.06);
+    hdd.rotation.y += 0.012 * (0.4 + P.swap);
+    platter.material.emissive.copy(C(0x1a0a0c)).lerp(cRed, P.heat * 0.5);
+    platter.material.emissiveIntensity = 0.3 + P.heat * 0.4;
+    overflow.forEach((b, i) => { const a = (i/6)*Math.PI*2 + t*0.25; b.position.set(Math.cos(a)*1.4, 0.2, Math.sin(a)*1.4); b.material.opacity = P.swap; });
+
+    // таймер build_block
+    timerLabel.userData.el.innerHTML = 'build_block <b>' + P.bbt.toFixed(1) + ' с</b>';
+    timerLabel.userData.el.classList.toggle('good', P.bbt < 3);
+    timerLabel.userData.el.classList.toggle('warn', P.bbt >= 3);
+
+    // подписи: плавная прозрачность
+    scene.traverse((o) => { if (o.isCSS2DObject) { const e = o.userData.el; e.style.opacity = (parseFloat(e.style.opacity || 0) + (o.userData.target - (parseFloat(e.style.opacity || 0))) * 0.12).toFixed(3); } });
+
+    // HUD-счётчик
+    if (hudNumOn) { hudNum = lerp(hudNum, hudNumT, 0.06); hudV.textContent = Math.round(hudNum).toLocaleString('ru-RU') + hudSuf; }
+
+    rim.position.x = Math.sin(t * 0.25) * 2;
+    composer.render();
+    labelRenderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', () => {
+    camera.aspect = W() / H(); camera.updateProjectionMatrix();
+    renderer.setSize(W(), H(), false); composer.setSize(W(), H()); bloom.setSize(W(), H()); labelRenderer.setSize(W(), H());
+  });
+
+  canvas.classList.add('live'); hud.classList.add('show'); frame();
+})();
+</script>
+
+</body>
+</html>

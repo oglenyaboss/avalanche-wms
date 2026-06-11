@@ -1,0 +1,20 @@
+[Unit]
+Description=AvalancheGo (geo subnet validator - evolvica, MD; SHARES box with user's proxy/default-route)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/opt/avalanchego/avalanchego --config-file=/etc/avalanchego/node-config.json
+Restart=on-failure
+RestartSec=5
+# Conservative caps: this box carries the user's active proxy + default route. avalanchego must
+# never starve the proxy core (CPUQuota 50%) and must be the first to die under memory pressure
+# (OOMScoreAdjust 900). Swap (2G) is the backstop.
+MemoryHigh=600M
+MemoryMax=700M
+CPUQuota=50%
+OOMScoreAdjust=900
+Environment=GOMEMLIMIT=500MiB
+LimitNOFILE=32768
+[Install]
+WantedBy=multi-user.target

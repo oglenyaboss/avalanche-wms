@@ -3,7 +3,10 @@ staking/
 genesis/network-genesis.geo.json
 genesis/hosts.env
 genesis/chain-ids.env
+genesis/contract.env
 *.gen.json
 *.key
 *.crt
 *.log
+geo/metrics/__pycache__/
+addprimary/subnet-init
