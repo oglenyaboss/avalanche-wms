@@ -268,3 +268,9 @@ internal/receiving/
 | `RPC_URL` | RPC EVM-чейна (Avalanche Subnet-EVM или любой EVM-совместимый) | `http://localhost:8545` |
 | `PRIVATE_KEY` | Приватный ключ для подписи транзакций адаптером | — |
 | `CONTRACT_ADDR` | Адрес развёрнутого `BatchMappingWMS` | — |
+
+## Лицензия
+
+Проект распространяется под лицензией **GNU General Public License v3.0** — полный текст в [`LICENSE`](LICENSE).
+
+Copyright (C) 2026 Леонид Ложкин и контрибьюторы (полный список — в истории git и разделе Contributors на GitHub).
