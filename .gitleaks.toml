@@ -1,0 +1,24 @@
+# gitleaks configuration — https://github.com/gitleaks/gitleaks
+#
+# Extends the default ruleset and allowlists a small set of KNOWN-PUBLIC,
+# non-secret values so `gitleaks detect` runs clean and every exception is
+# explicitly documented (rather than silently scrubbed).
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Avalanche 'ewoq' key — the well-known PUBLIC test private key
+(address 0x8db97C7cEcE249c2b98bDC0226Cc4C2A57BF52FC). Ships inside Avalanche's
+own tooling and only funds throwaway local / geo test chains. Not a real secret.
+"""
+regexes = [
+  '''0x56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027''',
+]
+
+[[allowlists]]
+description = "Sample JWTs in the OpenAPI spec — illustrative response payloads, not live credentials."
+paths = [
+  '''docs/api/openapi\.yaml''',
+]
