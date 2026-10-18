@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5/pgxpool"
 	kafkago "github.com/segmentio/kafka-go"
@@ -19,6 +20,7 @@ import (
 	"wms/internal/dispatches"
 	"wms/internal/ledger"
 	"wms/internal/onchain"
+	"wms/internal/passkeys"
 	"wms/internal/platform/kafka"
 	"wms/internal/platform/postgres"
 	"wms/internal/products"
@@ -109,6 +111,23 @@ func main() {
 	}
 	onchainHandler := onchain.NewHandler(receiptGetter)
 
+	waAuth, err := webauthn.New(&webauthn.Config{
+		RPID:          cfg.WebAuthnRPID,
+		RPDisplayName: cfg.WebAuthnRPName,
+		RPOrigins:     cfg.WebAuthnRPOrigins,
+	})
+	if err != nil {
+		log.Fatalf("WebAuthn config invalid: %v", err)
+	}
+	passkeysRepo := passkeys.NewRepository(dbPool)
+	// Assigned through the interface var for the same typed-nil reason as receiptGetter.
+	var keyStatus passkeys.KeyStatusGetter
+	if ledgerClient != nil {
+		keyStatus = ledgerClient
+	}
+	passkeysSvc := passkeys.NewService(passkeysRepo, waAuth, keyStatus)
+	passkeysHandler := passkeys.NewHandler(passkeysSvc)
+
 	// Router
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
@@ -149,6 +168,10 @@ func main() {
 	shippingRouter := r.PathPrefix("/shipping").Subrouter()
 	shippingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	shippingHandler.RegisterRoutes(shippingRouter)
+
+	passkeysRouter := r.PathPrefix("/passkeys").Subrouter()
+	passkeysRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	passkeysHandler.RegisterRoutes(passkeysRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
