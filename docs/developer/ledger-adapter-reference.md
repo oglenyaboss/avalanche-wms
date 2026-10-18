@@ -16,7 +16,7 @@
 
 Полный путь события: WMS пишет доменное событие в `public.outbox_events` → Debezium (CDC) публикует его в один Kafka-топик `wms.events.v1` → `ledger-adapter` потребляет топик, накапливает события в окно (по времени/размеру), группирует по стадии и отправляет **одну транзакцию на под-батч** в FSM-порядке (`receiving → putaway → picking → shipping`). Прогресс каждого события фиксируется в `public.onchain_events`, а фоновый reconcile-loop устраняет расхождения БД ↔ chain после таймаутов receipt-поллинга или падения процесса.
 
-> **У адаптера нет бизнес-REST-интерфейса.** Единственный HTTP-эндпоинт — `GET /health` (liveness-проба для оркестратора). WMS не вызывает адаптер по HTTP для бизнес-логики: chain-status gate (`ledger.CheckChainStatus` на стороне WMS) читает `public.onchain_events` напрямую через общий PostgreSQL, а не через адаптер. Не ищите у адаптера API подтверждения статуса — его нет.
+> **У адаптера нет бизнес-REST-интерфейса на запись.** HTTP-эндпоинты только читают: `GET /health` (liveness), `GET /onchain/tx/{hash}` (receipt транзакции для доказательства on-chain) и `GET /registry/keys/{keyId}` (статус ключа в `ConsortiumRegistry`), см. §9. Chain-status gate (`ledger.CheckChainStatus` на стороне WMS) читает `public.onchain_events` напрямую через общий PostgreSQL, а не через адаптер.
 
 ```
 WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter → BatchMappingWMS
@@ -46,7 +46,7 @@ WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter 
 | `internal/store/pool.go` | `NewPool` — `pgxpool` (`MaxConns=10`, `MinConns=1`, `MaxConnIdleTime=30s`, startup-ping 10s) |
 | `internal/store/onchain_events.go` | `Repository` — весь SQL по `public.onchain_events`; тип `ReconcileRow` |
 | `internal/dlq/producer.go` | `Producer` — `kafka.Writer` (acks `RequireAll`) в DLQ-топик; `PublishAll` сохраняет исходный payload и добавляет метаданные |
-| `internal/handler/handler.go` | `Handler` — только `/health`, отдаёт `{"status":"ok","time":"..."}` 200 |
+| `internal/handler/handler.go` | `Handler`: `/health`, `/onchain/tx/{hash}`, `/registry/keys/{keyId}` (§9) |
 
 Принцип «многих маленьких файлов»: каждый пакет имеет узкую ответственность, интерфейсы определены на стороне потребителя (`consumer`), а конкретные реализации (`chain.Client`, `store.Repository`, `dlq.Producer`) их удовлетворяют.
 
@@ -268,7 +268,7 @@ PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  
 
 ## 9. REST-эндпоинты адаптера
 
-Единственный эндпоинт. Бизнес-REST-поверхности нет.
+Три эндпоинта, все только на чтение и без аутентификации: они отдают данные, которые и так публичны в цепи. Бизнес-REST-поверхности на запись нет.
 
 ### `GET /health`
 
@@ -293,6 +293,50 @@ PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  
 
 > **Это liveness-проба, не readiness.** Возвращает 200, пока жив Go-процесс, независимо от доступности Kafka, PostgreSQL или RPC. Добавление readiness-пробы (проверка pool/Kafka/RPC) отслеживается в `TODO(#50)`. E2E-набор компенсирует это отдельным probe'ом готовности consumer'а.
 
+### `GET /onchain/tx/{hash}`
+
+| Свойство | Значение |
+|---|---|
+| Путь | `/onchain/tx/{hash}`, `hash` — `0x` и 64 hex-символа |
+| Аутентификация | нет |
+| Тело запроса | нет |
+| Обработчик | `handler.Handler.TxProof` |
+
+Один живой запрос receipt к RPC, без поллинга, таймаут 4 с.
+
+| Ситуация | Ответ |
+|---|---|
+| `hash` не по формату | `400` `{"error":"INVALID_TX_HASH"}` |
+| нет RPC-клиента или ошибка RPC | `502` `{"error":"CHAIN_UNREACHABLE"}` |
+| receipt ещё нет | `200` `{"found":false,"status":"pending"}` |
+| receipt есть | `200` `{"found":true,"status":"success","block_number":123,"confirmations":4,"gas_used":21000}` |
+
+`status` — `success` или `failed` по статусу receipt. `block_number`, `confirmations` и `gas_used` не попадают в ответ, когда равны нулю; `confirmations` — голова цепи минус блок receipt.
+
+**Вызывающая сторона:** `wms/internal/ledger/client.go` — `Client.GetTxReceipt()`; наружу его отдаёт аутентифицированный `GET /onchain/tx/{hash}` WMS.
+
+### `GET /registry/keys/{keyId}`
+
+| Свойство | Значение |
+|---|---|
+| Путь | `/registry/keys/{keyId}`, `keyId` — `0x` и 64 hex-символа (`keccak256(qx ‖ qy)`) |
+| Аутентификация | нет |
+| Тело запроса | нет |
+| Обработчик | `handler.Handler.RegistryKey` |
+
+Читает `getKey(bytes32)` у `ConsortiumRegistry` (адрес из `REGISTRY_ADDR`) через `chain.Registry`, таймаут 4 с.
+
+| Ситуация | Ответ |
+|---|---|
+| `keyId` не по формату | `400` `{"error":"INVALID_KEY_ID"}` |
+| `REGISTRY_ADDR` не задан или ошибка RPC | `502` `{"error":"CHAIN_UNREACHABLE"}` |
+| ключа нет в реестре | `200` `{"found":false}` |
+| ключ есть | `200` `{"found":true,"org_id":"<uuid>","role":"admin","active":true}` |
+
+`role` — `admin` или `operator`; `active` становится `false` после отзыва ключа.
+
+**Вызывающая сторона:** сервис passkey WMS: при чтении синхронизирует статус ключа (`PENDING` → `ACTIVE` или `REVOKED`).
+
 ---
 
 ## 10. Конфигурация (env-переменные)
@@ -310,7 +354,7 @@ PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  
 | `SIGNER_MODE` | нет | `static` | `string` | `static` \| `kms`: источник подписи — локальные ключи (только локальная разработка: приватник в env открытым текстом) или внешний Web3Signer |
 | `KMS_URL` | да (kms) | — | `string` | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
 | `KMS_PUBLIC_KEYS` | да (kms) | — | `string` | CSV identifier'ов (uncompressed X\|\|Y pubkey, 0x+128 hex) из `GET /api/v1/eth1/publicKeys`; определяет и multi-signer шардирование. Override: `KMS_PUBLIC_KEYS_FILE` |
-| `PORT` | нет | `8085` | `string` | HTTP-порт `/health` |
+| `PORT` | нет | `8085` | `string` | HTTP-порт эндпоинтов адаптера (§9) |
 | `KAFKA_GROUP_ID` | нет | `ledger-adapter` | `string` | Kafka consumer group |
 | `DLQ_TOPIC` | нет | `wms.dlq.v1` | `string` | Kafka DLQ-топик |
 | `BATCH_SIZE` | нет | `10` | `int` | макс. событий на транзакцию; невалидный int → default + warning |
