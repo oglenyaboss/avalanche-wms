@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,7 +25,8 @@ import (
 
 type stubChain struct {
 	mu                sync.Mutex
-	calls             []string // aggregate_type записи (BatchCall)
+	calls             []string // aggregate_type записи (BatchCall) + "signed_action" (SendCalldata)
+	calldataLens      []int    // размер data каждого SendCalldata (по порядку)
 	receiptCalls      int      // сколько раз дёрнули TransactionReceipt
 	callErr           error
 	callErrFor        map[string]error // per-aggregate error
@@ -47,6 +49,22 @@ func (s *stubChain) BatchCall(_ context.Context, aggregateType string, _, _ []*b
 		return common.Hash{}, s.callErr
 	}
 	return common.HexToHash("0xdeadbeef"), nil
+}
+
+func (s *stubChain) SendCalldata(_ context.Context, _ common.Address, data []byte) (common.Hash, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, aggregateSignedAction)
+	s.calldataLens = append(s.calldataLens, len(data))
+	if s.callErrFor != nil {
+		if err, ok := s.callErrFor[aggregateSignedAction]; ok {
+			return common.Hash{}, err
+		}
+	}
+	if s.callErr != nil {
+		return common.Hash{}, s.callErr
+	}
+	return common.HexToHash("0xca11da7a"), nil
 }
 
 func (s *stubChain) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
@@ -76,6 +94,7 @@ type stubStore struct {
 	sent      map[uuid.UUID]string
 	committed map[uuid.UUID]bool
 	failed    map[uuid.UUID]string
+	rejected  map[uuid.UUID]uint8
 	existsErr error
 	statusErr error
 	insertErr error
@@ -92,6 +111,7 @@ func newStubStore() *stubStore {
 		sent:      map[uuid.UUID]string{},
 		committed: map[uuid.UUID]bool{},
 		failed:    map[uuid.UUID]string{},
+		rejected:  map[uuid.UUID]uint8{},
 	}
 }
 
@@ -184,6 +204,34 @@ func (s *stubStore) MarkFailed(_ context.Context, ids []uuid.UUID, _, reason str
 	return nil
 }
 
+func (s *stubStore) MarkRejected(_ context.Context, ids []uuid.UUID, _ string, reason uint8) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		s.rejected[id] = reason
+		s.failed[id] = fmt.Sprintf("action rejected: reason %d", reason)
+		s.statuses[id] = "FAILED"
+	}
+	return nil
+}
+
+// stubResolver — программируемые исходы подписанных действий для Confirm/reconcile.
+type stubResolver struct {
+	outcomes map[uuid.UUID]chain.ActionOutcome
+	err      error
+}
+
+func (r *stubResolver) ActionOutcomes(_ context.Context, _ *types.Receipt, ids []uuid.UUID) (map[uuid.UUID]chain.ActionOutcome, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.outcomes, nil
+}
+
+func (r *stubResolver) Address() common.Address {
+	return common.HexToAddress("0x00000000000000000000000000000000000000aa")
+}
+
 type stubDLQ struct {
 	mu         sync.Mutex
 	messages   [][]*Message
@@ -224,6 +272,36 @@ func makeMessages(n int, aggType string) []*Message {
 		}
 	}
 	return msgs
+}
+
+// makeActionMessage — Message подписанного действия. clientDataJSON задаёт размер
+// calldata (единственное поле заметной длины) — им управляем чанкингом в тестах.
+func makeActionMessage(clientDataJSON string) *Message {
+	id := uuid.New()
+	return &Message{
+		EventID:       id,
+		AggregateType: aggregateSignedAction,
+		Action: &chain.KeyAction{
+			ActionId:   [16]byte(id),
+			ActionType: 5,
+			Auth: chain.WebAuthnAuth{
+				ChallengeIndex:    big.NewInt(23),
+				TypeIndex:         big.NewInt(1),
+				AuthenticatorData: []byte("authdata"),
+				ClientDataJSON:    clientDataJSON,
+			},
+		},
+		Topic:    "wms.events.v1",
+		KafkaMsg: kafka.Message{Topic: "wms.events.v1"},
+	}
+}
+
+// setMaxActionCalldata подменяет package-лимит на время теста.
+func setMaxActionCalldata(t *testing.T, limit int) {
+	t.Helper()
+	orig := maxActionCalldata
+	maxActionCalldata = limit
+	t.Cleanup(func() { maxActionCalldata = orig })
 }
 
 // --- tests ---------------------------------------------------------------
@@ -844,5 +922,142 @@ func TestFlusher_AggregateTypes_ConsistentWithChain(t *testing.T) {
 		if !validAggregates[a] {
 			t.Errorf("chain.AggregateTypes() contains %q but validAggregates does not", a)
 		}
+	}
+}
+
+// --- signed actions -------------------------------------------------------
+
+// TestFlusher_MixedWindow_LegacyAndActionsOrdered: окно [legacy receiving A,
+// action X, legacy receiving B] уходит тремя tx строго в порядке окна —
+// действия не перепрыгивают legacy-стадии между ними.
+func TestFlusher_MixedWindow_LegacyAndActionsOrdered(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	legacy := makeMessages(2, "receiving")
+	x := makeActionMessage(`{"type":"webauthn.get"}`)
+	f.WithRegistry(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		x.EventID: {Applied: true},
+	}})
+	msgs := []*Message{legacy[0], x, legacy[1]}
+
+	if err := f.Flush(context.Background(), msgs); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	want := []string{"receiving", aggregateSignedAction, "receiving"}
+	if len(ch.calls) != 3 {
+		t.Fatalf("expected 3 chain calls, got %v", ch.calls)
+	}
+	for i, w := range want {
+		if ch.calls[i] != w {
+			t.Errorf("call %d: got %q, want %q (full: %v)", i, ch.calls[i], w, ch.calls)
+		}
+	}
+	if len(st.committed) != 3 {
+		t.Errorf("all 3 events committed, got %d", len(st.committed))
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("no DLQ expected, got %d", len(dq.messages))
+	}
+}
+
+// TestFlusher_ActionsChunkedByCalldataLimit: два действия, лимит_calldata ниже
+// размера пары → две SendCalldata в порядке действий, обе потом COMMITTED.
+func TestFlusher_ActionsChunkedByCalldataLimit(t *testing.T) {
+	f, ch, st, _ := newFlusherT()
+	a1 := makeActionMessage(strings.Repeat("a", 10))
+	a2 := makeActionMessage(strings.Repeat("b", 400))
+
+	single1, err := chain.PackApplyKeyActions([]chain.KeyAction{*a1.Action})
+	if err != nil {
+		t.Fatalf("pack a1: %v", err)
+	}
+	single2, err := chain.PackApplyKeyActions([]chain.KeyAction{*a2.Action})
+	if err != nil {
+		t.Fatalf("pack a2: %v", err)
+	}
+	pair, err := chain.PackApplyKeyActions([]chain.KeyAction{*a1.Action, *a2.Action})
+	if err != nil {
+		t.Fatalf("pack pair: %v", err)
+	}
+	limit := len(pair) - 1
+	if len(single1) >= limit || len(single2) >= limit {
+		t.Fatalf("test setup broken: single1=%d single2=%d limit=%d", len(single1), len(single2), limit)
+	}
+	setMaxActionCalldata(t, limit)
+
+	res := &stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		a1.EventID: {Applied: true},
+		a2.EventID: {Applied: true},
+	}}
+	f.WithRegistry(res)
+
+	if err := f.Flush(context.Background(), []*Message{a1, a2}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 2 || ch.calls[0] != aggregateSignedAction || ch.calls[1] != aggregateSignedAction {
+		t.Fatalf("expected 2 SendCalldata calls in order, got %v", ch.calls)
+	}
+	if ch.calldataLens[0] != len(single1) || ch.calldataLens[1] != len(single2) {
+		t.Errorf("chunk sizes: got %v, want [%d %d] (по одному действию)", ch.calldataLens, len(single1), len(single2))
+	}
+	if !st.committed[a1.EventID] || !st.committed[a2.EventID] {
+		t.Errorf("both actions committed, got %v", st.committed)
+	}
+}
+
+// TestFlusher_ConfirmSignedAction_Outcomes: receipt успешной applyKeyActions-tx
+// разбирается резолвером: Applied → COMMITTED, reject reason 6 → FAILED +
+// reject_reason (MarkRejected), DLQ нет.
+func TestFlusher_ConfirmSignedAction_Outcomes(t *testing.T) {
+	f, _, st, dq := newFlusherT()
+	x := makeActionMessage(`{"type":"webauthn.get","x":1}`)
+	y := makeActionMessage(`{"type":"webauthn.get","y":2}`)
+	f.WithRegistry(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		x.EventID: {Applied: true},
+		y.EventID: {Reason: 6},
+	}})
+
+	inflight, err := f.Send(context.Background(), []*Message{x, y})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(inflight) != 1 || inflight[0].Aggregate != aggregateSignedAction {
+		t.Fatalf("expected 1 signed_action inflight tx, got %+v", inflight)
+	}
+	if err := f.Confirm(context.Background(), &inflight[0]); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	if !st.committed[x.EventID] {
+		t.Errorf("applied action must be COMMITTED")
+	}
+	if st.rejected[y.EventID] != 6 {
+		t.Errorf("rejected action must record reason 6, got %d", st.rejected[y.EventID])
+	}
+	if st.statuses[y.EventID] != "FAILED" {
+		t.Errorf("rejected action must be FAILED, got %q", st.statuses[y.EventID])
+	}
+	if st.committed[y.EventID] || len(dq.messages) != 0 {
+		t.Errorf("rejected action must NOT be committed or DLQ'd")
+	}
+}
+
+// TestFlusher_ActionsWithoutRegistry_FailedAndDLQ: без реестра действия
+// терминально фейлятся («registry not configured») и уходят в DLQ, tx не строится.
+func TestFlusher_ActionsWithoutRegistry_FailedAndDLQ(t *testing.T) {
+	f, ch, st, dq := newFlusherT() // registry не подключён
+	msgs := []*Message{makeActionMessage(`{}`), makeActionMessage(`{}`)}
+
+	if err := f.Flush(context.Background(), msgs); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("no chain calls without registry, got %v", ch.calls)
+	}
+	for _, m := range msgs {
+		if st.failed[m.EventID] != "registry not configured" {
+			t.Errorf("event %s: want failed with 'registry not configured', got %q", m.EventID, st.failed[m.EventID])
+		}
+	}
+	if len(dq.messages) != 1 || len(dq.messages[0]) != 2 {
+		t.Errorf("expected 1 DLQ batch of 2, got %v", dq.messages)
 	}
 }

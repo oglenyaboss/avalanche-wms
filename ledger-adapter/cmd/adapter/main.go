@@ -66,11 +66,11 @@ func run(log *slog.Logger) error {
 	defer pool.Close()
 	repo := store.NewRepository(pool)
 
-	// Multi-signer: один Client на signer. Flusher шардит in-flight tx по
-	// ProductID между ними (N× in-flight ёмкость). clients[0] обслуживает receipt-
-	// чтения (Confirm/reconcile/health) — receipt'ы node-global.
-	// Источник signer'ов — режим: static (локальные hex-ключи) или kms
-	// (Web3Signer: адаптеру нужен только public key каждого ключа).
+	// Signer ровно один (multi-signer запрещён: подписанные действия держат
+	// Kafka-порядок одной nonce-цепочкой). clients[0] обслуживает receipt-чтения
+	// (Confirm/reconcile/health) — receipt'ы node-global.
+	// Источник signer'а — режим: static (локальный hex-ключ) или kms
+	// (Web3Signer: адаптеру нужен только public key ключа).
 	signers, err := buildSigners(cfg)
 	if err != nil {
 		return err
@@ -99,12 +99,32 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	// Интерфейсная переменная: при незаданном REGISTRY_ADDR реестр остаётся nil-интерфейсом
+	// (typed-nil указатель внутри интерфейса не равен nil и обошёл бы проверку в handler).
+	// Строится ДО flusher/reconciler: подписанные действия уходят через
+	// applyKeyActions на этот адрес, исходы разбираются из его receipt'ов.
+	var registry handler.RegistryReader
+	var actionResolver consumer.ActionResolver
+	if cfg.RegistryAddr != "" {
+		ec, err := ethclient.Dial(cfg.RpcURL)
+		if err != nil {
+			return fmt.Errorf("registry dial: %w", err)
+		}
+		defer ec.Close()
+		reg, err := chain.NewRegistry(ec, common.HexToAddress(cfg.RegistryAddr))
+		if err != nil {
+			return fmt.Errorf("registry: %w", err)
+		}
+		registry = reg
+		actionResolver = reg
+	}
+
 	brokers := strings.Split(cfg.KafkaBrokers, ",")
 	prod := dlq.NewProducer(brokers, cfg.DLQTopic)
 	defer func() { _ = prod.Close() }()
 
-	flusher := consumer.NewFlusher(callers, repo, prod, cfg.ReceiptPollTimeout, log)
-	reconciler := consumer.NewReconciler(clients[0], repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log)
+	flusher := consumer.NewFlusher(callers, repo, prod, cfg.ReceiptPollTimeout, log).WithRegistry(actionResolver)
+	reconciler := consumer.NewReconciler(clients[0], repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log).WithRegistry(actionResolver)
 
 	g, gCtx := errgroup.WithContext(rootCtx)
 	g.Go(func() error {
@@ -121,22 +141,6 @@ func run(log *slog.Logger) error {
 	g.Go(func() error {
 		return reconciler.Run(gCtx)
 	})
-
-	// Интерфейсная переменная: при незаданном REGISTRY_ADDR реестр остаётся nil-интерфейсом
-	// (typed-nil указатель внутри интерфейса не равен nil и обошёл бы проверку в handler).
-	var registry handler.RegistryReader
-	if cfg.RegistryAddr != "" {
-		ec, err := ethclient.Dial(cfg.RpcURL)
-		if err != nil {
-			return fmt.Errorf("registry dial: %w", err)
-		}
-		defer ec.Close()
-		reg, err := chain.NewRegistry(ec, common.HexToAddress(cfg.RegistryAddr))
-		if err != nil {
-			return fmt.Errorf("registry: %w", err)
-		}
-		registry = reg
-	}
 
 	srv := startHealthServer(log, cfg.Port, clients[0], registry)
 
@@ -156,10 +160,10 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-// buildSigners собирает TxSigner'ы по режиму: static — локальные ecdsa-ключи
+// buildSigners собирает TxSigner по режиму: static — локальный ecdsa-ключ
 // из PRIVATE_KEY/PRIVATE_KEYS; kms — удалённая подпись в Web3Signer по
-// KMS_PUBLIC_KEYS (адрес каждого выводится из public key, приватник адаптеру
-// не нужен вообще).
+// KMS_PUBLIC_KEYS (адрес выводится из public key, приватник адаптеру
+// не нужен вообще). Signer ровно один — это валидирует config.Load.
 func buildSigners(cfg *config.Config) ([]chain.TxSigner, error) {
 	if cfg.SignerMode != "kms" {
 		signers := make([]chain.TxSigner, 0, len(cfg.PrivateKeys))

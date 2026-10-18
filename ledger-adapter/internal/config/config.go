@@ -28,19 +28,19 @@ type Config struct {
 	ReconcileMinAge    time.Duration
 	PipelineWindow     int
 	LogLevel           string
-	// PrivateKeys — набор signer-аккаунтов (multi-signer). Всегда ≥1. Если задан
-	// PRIVATE_KEYS (comma-separated) — используется он; иначе [PrivateKey]. Flusher
-	// шардит in-flight tx по ProductID между этими аккаунтами: каждый аккаунт
-	// ограничен TxPoolAccountSlots узла, поэтому N аккаунтов = N× in-flight, что
-	// насыщает WAN-цепь (single signer голодит её — ~16 слотов < block-ёмкость).
+	// PrivateKeys — signer-аккаунт, ровно один: подписанные action'ы
+	// (ConsortiumRegistry.applyKeyActions) держат Kafka-порядок действий одной
+	// nonce-последовательностью, поэтому multi-signer шардирование запрещено
+	// (Load возвращает ошибку при >1). Если задан PRIVATE_KEYS (comma-separated)
+	// — используется он; иначе [PrivateKey].
 	PrivateKeys []string
 
 	// SignerMode: "static" (дефолт, ТОЛЬКО локальная разработка — приватник в env
 	// открытым текстом) | "kms"
 	// (подпись через внешний Web3Signer — ключевой материал адаптеру не нужен).
 	SignerMode string
-	// KMSURL / KMSPublicKeys — параметры kms-режима. KMSPublicKeys —
-	// identifier'ы (uncompressed X||Y public keys) ключей, загруженных в
+	// KMSURL / KMSPublicKeys — параметры kms-режима. KMSPublicKeys — identifier
+	// (uncompressed X||Y public key) единственного ключа, загруженного в
 	// Web3Signer; поддерживает KMS_PUBLIC_KEYS_FILE (comma-separated в файле).
 	KMSURL        string
 	KMSPublicKeys []string
@@ -49,12 +49,11 @@ type Config struct {
 // perSignerWindow — сколько batch-tx in-flight держим на ОДИН signer-аккаунт. Узел
 // держит TxPoolAccountSlots=16 исполняемых слотов на аккаунт; 8 — это 50% запас (НЕ
 // сам лимит, см. obs 10635) против "account slots" реджекта sequential-nonce tx'ов
-// одного signer'а. Эффективный потолок окна = perSignerWindow × N_signers: каждый
-// batch шардится по N аккаунтам (один tx на signer), per-signer in-flight остаётся
-// ≤ окно, но суммарная slot-ёмкость = N×16 и N независимых nonce-цепей убирают
-// cross-product head-of-line stall. На WAN-цепи глубина окна = throughput (Little:
-// in-flight ÷ latency), потолок НЕ в газе — гео-чейн при 200M gasLimit жжёт
-// ~0.04%/блок (запас ~30×); лимитирует feeding-cadence и WAN receipt-latency.
+// одного signer'а. Signer ровно один (multi-signer запрещён: signed actions держат
+// Kafka-порядок одной nonce-цепочкой), поэтому потолок окна = perSignerWindow.
+// На WAN-цепи глубина окна = throughput (Little: in-flight ÷ latency), потолок НЕ
+// в газе — гео-чейн при 200M gasLimit жжёт ~0.04%/блок (запас ~30×); лимитирует
+// feeding-cadence и WAN receipt-latency.
 const perSignerWindow = 8
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -150,10 +149,10 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("SIGNER_MODE must be \"static\" or \"kms\", got %q", c.SignerMode)
 	}
 
-	// Multi-signer: PRIVATE_KEYS (comma-separated) шардит in-flight нагрузку по N
-	// аккаунтам. Падаем на единственный PRIVATE_KEY, если не задан. PRIVATE_KEY
-	// остаётся required (back-compat + дефолтный signer[0]). В kms-режиме не
-	// применяется — signer'ы определяются KMS_PUBLIC_KEYS.
+	// PRIVATE_KEYS (comma-separated) исторически задавал несколько signer'ов;
+	// теперь ключ ровно один (см. проверку ниже). Падаем на единственный
+	// PRIVATE_KEY, если не задан. PRIVATE_KEY остаётся required (back-compat).
+	// В kms-режиме не применяется — signer определяется KMS_PUBLIC_KEYS.
 	if c.SignerMode == "static" {
 		if raw := os.Getenv("PRIVATE_KEYS"); raw != "" {
 			for _, k := range strings.Split(raw, ",") {
@@ -167,13 +166,21 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// Потолок in-flight окна масштабируется с числом signer'ов: каждый держит
-	// perSignerWindow слотов, multi-signer спред даёт суммарно perSignerWindow×N.
-	// В kms-режиме signer'ы — KMS-ключи, лимит TxPoolAccountSlots тот же.
+	// Подписанные action'ы (ConsortiumRegistry.applyKeyActions) отправляются
+	// ровно одним signer'ом: порядок действий держится одной nonce-
+	// последовательностью, шардирование по нескольким аккаунтам нарушило бы
+	// Kafka-порядок (ADR-0001 §9). Отклоняем конфиг с более чем одним ключом —
+	// и в static, и в kms.
 	signerCount := len(c.PrivateKeys)
 	if c.SignerMode == "kms" {
 		signerCount = len(c.KMSPublicKeys)
 	}
+	if signerCount > 1 {
+		return nil, fmt.Errorf("only one signer is supported (signed actions keep Kafka order by one nonce sequence), got %d", signerCount)
+	}
+
+	// Потолок in-flight окна = perSignerWindow × signerCount; signer ровно один,
+	// в kms-режиме это единственный KMS-ключ (лимит TxPoolAccountSlots тот же).
 	pipelineWindowMax := perSignerWindow * signerCount
 	if c.PipelineWindow < 1 {
 		c.PipelineWindow = 1
