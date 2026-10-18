@@ -84,7 +84,7 @@ ledger-adapter/
 | `RPC_URL` | ✓ | — | RPC EVM-узла (локально — Avalanche Subnet-EVM; подойдёт любой EVM-совместимый) |
 | `CONTRACT_ADDR` | ✓ | — | Адрес `BatchMappingWMS` |
 | `PRIVATE_KEY` | ✓ (static) | — | Hex signer key (0x-prefixed ok); не нужен в kms-режиме |
-| `SIGNER_MODE` | | `static` | `static` — локальные ключи из env; `kms` — подпись во внешнем Web3Signer (ключ адаптеру не нужен) |
+| `SIGNER_MODE` | | `static` | `static` — **только локальная разработка**: приватник в env открытым текстом; `kms` — подпись во внешнем Web3Signer (ключ адаптеру не нужен) |
 | `KMS_URL` | ✓ (kms) | — | Базовый URL Web3Signer (eth1 mode), напр. `http://web3signer:9000` |
 | `KMS_PUBLIC_KEYS` | ✓ (kms) | — | CSV identifier'ов ключей (uncompressed X\|\|Y public key из `GET /api/v1/eth1/publicKeys`); multi-signer — просто перечислить несколько. Override: `KMS_PUBLIC_KEYS_FILE` |
 | `BATCH_SIZE` | | `10` | Events per tx |
@@ -109,7 +109,8 @@ docker compose --profile test up -d
 ```bash
 make kms-up   # = docker compose -f docker-compose.yaml -f docker-compose.kms.yaml --profile test up -d
 # kms-init: генерит ключи в Web3Signer (file-raw, том kms_keys — адреса стабильны),
-#           фондирует их с ewoq, публикует identifier'ы в /shared/kms_public_keys.txt
+#           фондирует их с ewoq, выдаёт роль Enabled в tx-allow-list (если он включён в genesis),
+#           публикует identifier'ы в /shared/kms_public_keys.txt
 # ledger-adapter: SIGNER_MODE=kms — приватник в процесс адаптера не попадает вообще
 make kms-down # том kms_keys выживает — рефанд не нужен при следующем старте
 ```

@@ -306,7 +306,7 @@ PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  
 | `RPC_URL` | да | — | `string` | RPC Avalanche Subnet-EVM. Override: `RPC_URL_FILE` |
 | `CONTRACT_ADDR` | да | — | `string` | hex-адрес `BatchMappingWMS`. Override: `CONTRACT_ADDR_FILE` |
 | `PRIVATE_KEY` | да (static) | — | `string` | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE`. В kms-режиме не читается |
-| `SIGNER_MODE` | нет | `static` | `string` | `static` \| `kms`: источник подписи — локальные ключи или внешний Web3Signer |
+| `SIGNER_MODE` | нет | `static` | `string` | `static` \| `kms`: источник подписи — локальные ключи (только локальная разработка: приватник в env открытым текстом) или внешний Web3Signer |
 | `KMS_URL` | да (kms) | — | `string` | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
 | `KMS_PUBLIC_KEYS` | да (kms) | — | `string` | CSV identifier'ов (uncompressed X\|\|Y pubkey, 0x+128 hex) из `GET /api/v1/eth1/publicKeys`; определяет и multi-signer шардирование. Override: `KMS_PUBLIC_KEYS_FILE` |
 | `PORT` | нет | `8085` | `string` | HTTP-порт `/health` |

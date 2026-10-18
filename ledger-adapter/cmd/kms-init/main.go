@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -116,6 +117,11 @@ func run(log *slog.Logger) error {
 	}
 
 	if err := fundSigners(ctx, rpcURL, fundKey, addrs, fundAmount, log); err != nil {
+		return err
+	}
+	// FUND_KEY в genesis — ещё и админ tx-allow-list (ewoq): без роли Enabled
+	// адаптер не отправит ни одной tx.
+	if err := allowSigners(ctx, rpcURL, fundKey, addrs, log); err != nil {
 		return err
 	}
 
@@ -291,6 +297,77 @@ func fundSigners(ctx context.Context, rpcURL, fundKeyHex string, addrs []common.
 		log.Info("signer funded", "index", i, "addr", addr.Hex(), "amount_wei", fundAmount.String(), "tx", signed.Hash().Hex())
 	}
 	return nil
+}
+
+// txAllowList — прекомпайл allow-list отправителей subnet-evm (txAllowListConfig в genesis).
+var txAllowList = common.HexToAddress("0x0200000000000000000000000000000000000002")
+
+// allowSigners выдаёт каждому signer-адресу роль Enabled в tx-allow-list от
+// имени adminKey. Если прекомпайл в genesis не включён, по его адресу нет кода,
+// eth_call возвращает пустой ответ — шаг пропускается целиком.
+func allowSigners(ctx context.Context, rpcURL, adminKeyHex string, addrs []common.Address, log *slog.Logger) error {
+	ec, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		return fmt.Errorf("allow-list dial %s: %w", rpcURL, err)
+	}
+	defer ec.Close()
+
+	pk, err := crypto.HexToECDSA(strings.TrimPrefix(adminKeyHex, "0x"))
+	if err != nil {
+		return fmt.Errorf("parse allow-list admin key: %w", err)
+	}
+	from := crypto.PubkeyToAddress(*pk.Public().(*ecdsa.PublicKey))
+
+	chainID, err := ec.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("allow-list chain id: %w", err)
+	}
+	signer := types.NewEIP155Signer(chainID)
+
+	for i, addr := range addrs {
+		role, err := ec.CallContract(ctx, ethereum.CallMsg{To: &txAllowList, Data: allowListCall("readAllowList(address)", addr)}, nil)
+		if err != nil {
+			return fmt.Errorf("readAllowList %s: %w", addr.Hex(), err)
+		}
+		if len(role) == 0 {
+			log.Info("tx allow-list disabled in genesis, skip")
+			return nil
+		}
+		if new(big.Int).SetBytes(role).Sign() > 0 {
+			log.Info("signer already allowed", "index", i, "addr", addr.Hex())
+			continue
+		}
+
+		data := allowListCall("setEnabled(address)", addr)
+		nonce, err := ec.PendingNonceAt(ctx, from)
+		if err != nil {
+			return fmt.Errorf("allow-list admin nonce: %w", err)
+		}
+		gasPrice, err := ec.SuggestGasPrice(ctx)
+		if err != nil {
+			return fmt.Errorf("allow-list gas price: %w", err)
+		}
+		gas, err := ec.EstimateGas(ctx, ethereum.CallMsg{From: from, To: &txAllowList, Data: data})
+		if err != nil {
+			return fmt.Errorf("setEnabled %s estimate (FUND_KEY not allow-list admin?): %w", addr.Hex(), err)
+		}
+		signed, err := types.SignTx(types.NewTransaction(nonce, txAllowList, big.NewInt(0), gas, gasPrice, data), signer, pk)
+		if err != nil {
+			return fmt.Errorf("allow-list sign: %w", err)
+		}
+		if err := ec.SendTransaction(ctx, signed); err != nil {
+			return fmt.Errorf("setEnabled %s send: %w", addr.Hex(), err)
+		}
+		if err := waitReceipt(ctx, ec, signed.Hash()); err != nil {
+			return fmt.Errorf("setEnabled %s receipt: %w", addr.Hex(), err)
+		}
+		log.Info("signer allowed in tx allow-list", "index", i, "addr", addr.Hex(), "tx", signed.Hash().Hex())
+	}
+	return nil
+}
+
+func allowListCall(sig string, addr common.Address) []byte {
+	return append(crypto.Keccak256([]byte(sig))[:4], common.LeftPadBytes(addr.Bytes(), 32)...)
 }
 
 func waitReceipt(ctx context.Context, ec *ethclient.Client, hash common.Hash) error {

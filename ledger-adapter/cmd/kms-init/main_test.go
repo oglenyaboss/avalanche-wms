@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -90,6 +91,19 @@ func TestAddressOfIdentifier(t *testing.T) {
 	}
 	if _, err := addressOfIdentifier("0x" + strings.Repeat("zz", 64)); err == nil {
 		t.Fatal("non-hex identifier accepted")
+	}
+}
+
+func TestAllowListCall(t *testing.T) {
+	addr := common.HexToAddress("0x8db97C7cEcE249c2b98bDC0226Cc4C2A57BF52FC")
+	pad := "0000000000000000000000008db97c7cece249c2b98bdc0226cc4c2a57bf52fc"
+	for sig, selector := range map[string]string{
+		"readAllowList(address)": "eb54dae1",
+		"setEnabled(address)":    "0aaf7043",
+	} {
+		if got := hex.EncodeToString(allowListCall(sig, addr)); got != selector+pad {
+			t.Errorf("%s: got %s, want %s", sig, got, selector+pad)
+		}
 	}
 }
 

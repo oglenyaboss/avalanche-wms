@@ -32,7 +32,8 @@ type Config struct {
 	// насыщает WAN-цепь (single signer голодит её — ~16 слотов < block-ёмкость).
 	PrivateKeys []string
 
-	// SignerMode: "static" (дефолт — локальные hex-ключи из env) | "kms"
+	// SignerMode: "static" (дефолт, ТОЛЬКО локальная разработка — приватник в env
+	// открытым текстом) | "kms"
 	// (подпись через внешний Web3Signer — ключевой материал адаптеру не нужен).
 	SignerMode string
 	// KMSURL / KMSPublicKeys — параметры kms-режима. KMSPublicKeys —
