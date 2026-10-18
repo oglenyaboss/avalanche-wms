@@ -3,12 +3,14 @@ import { isAxiosError } from 'axios'
 
 import {
   beginRegistration,
+  draftKeyConfirmation,
   finishRegistration,
   getAdminKeyExport,
   getMyPasskey,
   getOrganizationKeys,
+  submitKeyConfirmation,
 } from '../api/passkeyApi'
-import { createPasskeyCredential, toCreationOptions } from './webauthn'
+import { createPasskeyCredential, getAssertion, toCreationOptions, toRequestOptions } from './webauthn'
 import { downloadAdminKey } from './exportFile'
 import { passkeyErrorText } from './errors'
 
@@ -38,6 +40,8 @@ export function useOrganizationKeys() {
     queryFn: getOrganizationKeys,
     retry: retryColdLoadRace,
     retryDelay: 400,
+    refetchInterval: (query) =>
+      query.state.data?.members.some((m) => m.confirmation?.state === 'SENT') ? 2000 : false,
   })
 }
 
@@ -49,6 +53,20 @@ export function useRegisterPasskey() {
       const options = await beginRegistration()
       const credential = await createPasskeyCredential(toCreationOptions(options))
       return finishRegistration(credential)
+    },
+    retry: false,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['passkey'] }),
+  })
+}
+
+export function useConfirmKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: ['passkey', 'confirmKey'],
+    mutationFn: async (keyId: string) => {
+      const draft = await draftKeyConfirmation(keyId)
+      const assertion = await getAssertion(toRequestOptions(draft))
+      return submitKeyConfirmation(draft.actionId, assertion)
     },
     retry: false,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['passkey'] }),

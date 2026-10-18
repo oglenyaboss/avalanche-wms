@@ -1,9 +1,19 @@
+import { Button } from '@/shared/ui'
+
 import type { OrgMember } from '../model/types'
-import { shortKeyId } from '../model/status'
+import { confirmationText, shortKeyId } from '../model/status'
 import { PasskeyStatusBadge } from './PasskeyStatusBadge'
 
 interface OrgKeysTableProps {
   members: OrgMember[]
+  onConfirm: (keyId: string) => void
+  confirmingKeyId: string | null
+}
+
+interface ConfirmationCellProps {
+  member: OrgMember
+  onConfirm: (keyId: string) => void
+  confirmingKeyId: string | null
 }
 
 const ROLE_LABELS: Record<OrgMember['role'], string> = {
@@ -11,7 +21,41 @@ const ROLE_LABELS: Record<OrgMember['role'], string> = {
   OPERATOR: 'Оператор',
 }
 
-export function OrgKeysTable({ members }: OrgKeysTableProps) {
+function ConfirmationCell({ member, onConfirm, confirmingKeyId }: ConfirmationCellProps) {
+  const passkey = member.passkey
+  if (member.role !== 'OPERATOR' || passkey?.status !== 'PENDING') {
+    return <span>—</span>
+  }
+  if (member.confirmation?.state === 'SENT' || member.confirmation?.state === 'APPLIED') {
+    return (
+      <span className="text-muted-foreground">{confirmationText(member.confirmation)}</span>
+    )
+  }
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <Button
+        className="self-start"
+        disabled={confirmingKeyId === passkey.keyId}
+        onClick={() => onConfirm(passkey.keyId)}
+      >
+        Подтвердить ключ
+      </Button>
+      {member.confirmation && (
+        <span
+          className={
+            member.confirmation.state === 'REJECTED' || member.confirmation.state === 'FAILED'
+              ? 'text-xs text-destructive'
+              : 'text-xs text-muted-foreground'
+          }
+        >
+          {confirmationText(member.confirmation)}
+        </span>
+      )}
+    </div>
+  )
+}
+
+export function OrgKeysTable({ members, onConfirm, confirmingKeyId }: OrgKeysTableProps) {
   if (members.length === 0) {
     return <p className="text-sm text-muted-foreground">В организации нет сотрудников.</p>
   }
@@ -25,6 +69,7 @@ export function OrgKeysTable({ members }: OrgKeysTableProps) {
             <th className="px-4 py-3 font-medium">Роль</th>
             <th className="px-4 py-3 font-medium">Статус ключа</th>
             <th className="px-4 py-3 font-medium">Key ID</th>
+            <th className="px-4 py-3 font-medium">Подтверждение</th>
           </tr>
         </thead>
         <tbody>
@@ -41,6 +86,9 @@ export function OrgKeysTable({ members }: OrgKeysTableProps) {
               </td>
               <td className="px-4 py-3 font-mono" title={m.passkey?.keyId}>
                 {m.passkey ? shortKeyId(m.passkey.keyId) : '—'}
+              </td>
+              <td className="px-4 py-3">
+                <ConfirmationCell member={m} onConfirm={onConfirm} confirmingKeyId={confirmingKeyId} />
               </td>
             </tr>
           ))}

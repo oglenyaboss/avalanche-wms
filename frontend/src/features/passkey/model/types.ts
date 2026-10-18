@@ -12,11 +12,20 @@ export interface Passkey {
   createdAt: string
 }
 
+export type ConfirmationState = 'SENT' | 'APPLIED' | 'REJECTED' | 'FAILED'
+
+export interface KeyConfirmation {
+  actionId: string
+  state: ConfirmationState
+  rejectReason: number | null
+}
+
 export interface OrgMember {
   userId: string
   username: string
   role: PasskeyRole
   passkey: Passkey | null
+  confirmation: KeyConfirmation | null
 }
 
 export interface OrgKeys {
@@ -29,4 +38,21 @@ export interface AdminKeyExport {
   name: string
   qx: string
   qy: string
+}
+
+export interface KeyActionDraft {
+  actionId: string
+  actionType: number
+  challenge: string
+  rpId: string
+  allowCredentials: { type: 'public-key'; id: string }[]
+  userVerification: 'required'
+  timeout: number
+}
+
+export interface AssertionJSON {
+  credentialId: string
+  authenticatorData: string
+  clientDataJson: string
+  signature: string
 }
