@@ -22,7 +22,7 @@ host-side `avalanche-cli` и без proxy-хаков.
 | `subnet-init` | one-shot | Bootstrap через Go wallet SDK (`subnet-init/main.go`): `CreateSubnet → AddSubnetValidator → CreateChain` ключом ewoq (локальная подпись), идемпотентно. Пишет динамический RPC URL в `/shared/rpc_url.txt`. |
 | `contract-deploy` | one-shot | `forge create` ключом ewoq на RPC сабнета (берёт его из `/shared/rpc_url.txt`): сначала `ConsortiumRegistry`, затем `BatchMappingWMS`. Сохраняет RPC URL, адреса (`registry_addr.txt`, `contract_addr.txt`) и deployer-key в том `shared_state`. Идемпотентно по каждому контракту (пропускает, если живой контракт уже записан). |
 
-`ledger-adapter` читает `RPC_URL_FILE` / `CONTRACT_ADDR_FILE` / `PRIVATE_KEY_FILE` из
+`ledger-adapter` читает `RPC_URL_FILE` / `CONTRACT_ADDR_FILE` / `REGISTRY_ADDR_FILE` / `PRIVATE_KEY_FILE` из
 `shared_state` — миграция его **не меняет**.
 
 ## Запуск
