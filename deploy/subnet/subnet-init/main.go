@@ -3,11 +3,16 @@
 // contract-deploy и ledger-adapter.
 //
 // Механизм (проверен 2026-06-03): узел стартует, уже трекая детерминированный subnetID
-// (2W9boA…, преднабит через --track-subnets), поэтому создание блокчейна здесь
+// (2KDqup…, преднабит через --track-subnets), поэтому создание блокчейна здесь
 // подхватывается узлом НА ЛЕТУ — рестарт не нужен. Поднятие — это legacy non-sovereign
 // flow через Go wallet SDK ключом ewoq (локальная подпись):
 // CreateSubnet -> AddSubnetValidator -> CreateChain. Etna fee-state НЕ упирается в
 // deadlock на avalanchego v1.14.0 (поэтому это и заменяет старый C-Chain-костыль).
+//
+// subnetID = txID CreateSubnetTx, а он зависит от того, какой UTXO ewoq кошелёк
+// потратит на комиссию. До 2026-06-09 UTXO из unlockSchedule network-genesis был
+// заблокирован, и ID был 2W9boA…; после разблокировки кошелёк тратит его, ID стал
+// 2KDqup…. Будущих locktime в genesis нет — ID стабилен, пока genesis не меняют.
 package main
 
 import (
@@ -43,7 +48,7 @@ func main() {
 		vmIDStr:        getenv("VM_ID", "srEXiWaHuhNyGwPUi444Tu47ZEDwxTWrbQiuD7FmgSAQ6X7Dy"),
 		genesisPath:    getenv("CHAIN_GENESIS", "/genesis/chain-genesis.json"),
 		chainName:      getenv("CHAIN_NAME", "WMSSubnetEVM"),
-		expectedSubnet: getenv("EXPECTED_SUBNET_ID", "2W9boARgCWL25z6pMFNtkCfNA5v28VGg9PmBgUJfuKndEdhrvw"),
+		expectedSubnet: getenv("EXPECTED_SUBNET_ID", "2KDqupa9sn3XwASxi5xU6y4EiAVytb3ovUBkGuKWNm2zrgjCiL"),
 		sharedRPCFile:  getenv("SHARED_RPC_FILE", "/shared/rpc_url.txt"),
 	}
 	if err := run(context.Background(), cfg); err != nil {
