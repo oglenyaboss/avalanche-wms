@@ -135,10 +135,11 @@ go run ./cmd/adapter/
 
 ## CLI владельца консорциума
 
-`registry-cli` (бинарь в образе адаптера) регистрирует организации в `ConsortiumRegistry` и показывает реестр. Транзакцию `registerOrganization` подписывает `OWNER_KEY` (ключ деплоера, в стенде — `/shared/deployer_key.txt`).
+`registry-cli` (бинарь в образе адаптера) регистрирует организации в `ConsortiumRegistry`, добавляет ключи админа и показывает реестр. Транзакции `registerOrganization` и `registerAdminKey` подписывает `OWNER_KEY` (ключ деплоера, в стенде — `/shared/deployer_key.txt`).
 
 ```bash
 make registry-cli ARGS="register-org --file org.json"   # путь — относительно корня репо
+make registry-cli ARGS="add-admin-key --file org.json"
 make registry-cli ARGS="list"
 ```
 
@@ -149,6 +150,8 @@ make registry-cli ARGS="list"
 ```
 
 `qx`/`qy` — координаты публичного P-256 ключа админа организации. Перед отправкой CLI проверяет, что организация и ключ ещё не зарегистрированы.
+
+`add-admin-key` берёт файл того же формата и добавляет ключ админа в уже зарегистрированную организацию, например взамен отозванного. Перед отправкой CLI проверяет, что организация есть, а ключа ещё нет.
 
 После изменения Go-кода нужен `docker compose build ledger-adapter`.
 

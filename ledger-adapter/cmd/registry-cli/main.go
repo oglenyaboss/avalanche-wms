@@ -30,9 +30,10 @@ import (
 
 const usage = `usage:
   registry-cli register-org --file <org.json>
+  registry-cli add-admin-key --file <org.json>
   registry-cli list
 
-окружение: RPC_URL, REGISTRY_ADDR (или <NAME>_FILE); OWNER_KEY (или OWNER_KEY_FILE) — для register-org
+окружение: RPC_URL, REGISTRY_ADDR (или <NAME>_FILE); OWNER_KEY (или OWNER_KEY_FILE) — для register-org и add-admin-key
 `
 
 var errUsage = errors.New("usage")
@@ -58,6 +59,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "register-org":
 		return registerOrg(ctx, args[1:])
+	case "add-admin-key":
+		return addAdminKey(ctx, args[1:])
 	case "list":
 		return list(ctx)
 	default:
@@ -181,6 +184,63 @@ func registerOrg(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("организация %s «%s» зарегистрирована, ключ админа %s, tx %s\n",
 		uuid.UUID(org.orgID), org.name, org.keyID.Hex(), hash.Hex())
+	return nil
+}
+
+func addAdminKey(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("add-admin-key", flag.ExitOnError)
+	file := fs.String("file", "", "путь к org.json")
+	_ = fs.Parse(args)
+	if *file == "" {
+		return errors.New("add-admin-key: нужен --file")
+	}
+	data, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	org, err := parseOrgFile(data)
+	if err != nil {
+		return err
+	}
+
+	ec, addr, err := dialRegistry()
+	if err != nil {
+		return err
+	}
+	defer ec.Close()
+	reg, err := chain.NewRegistry(ec, addr)
+	if err != nil {
+		return err
+	}
+
+	exists, err := reg.OrganizationExists(ctx, org.orgID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("организация %s не зарегистрирована", uuid.UUID(org.orgID))
+	}
+	key, err := reg.GetKey(ctx, [32]byte(org.keyID))
+	if err != nil {
+		return err
+	}
+	if key.Role != 0 {
+		return fmt.Errorf("ключ %s уже зарегистрирован", org.keyID.Hex())
+	}
+
+	owner, err := ownerKey()
+	if err != nil {
+		return err
+	}
+	calldata, err := reg.ABI().Pack("registerAdminKey", org.orgID, org.qx, org.qy)
+	if err != nil {
+		return err
+	}
+	hash, err := sendOwnerTx(ctx, ec, owner, addr, calldata)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("ключ админа %s добавлен в организацию %s, tx %s\n", org.keyID.Hex(), uuid.UUID(org.orgID), hash.Hex())
 	return nil
 }
 
