@@ -3,16 +3,18 @@
 // contract-deploy и ledger-adapter.
 //
 // Механизм (проверен 2026-06-03): узел стартует, уже трекая детерминированный subnetID
-// (2KDqup…, преднабит через --track-subnets), поэтому создание блокчейна здесь
+// (2W9boA…, преднабит через --track-subnets), поэтому создание блокчейна здесь
 // подхватывается узлом НА ЛЕТУ — рестарт не нужен. Поднятие — это legacy non-sovereign
 // flow через Go wallet SDK ключом ewoq (локальная подпись):
 // CreateSubnet -> AddSubnetValidator -> CreateChain. Etna fee-state НЕ упирается в
 // deadlock на avalanchego v1.14.0 (поэтому это и заменяет старый C-Chain-костыль).
 //
 // subnetID = txID CreateSubnetTx, а он зависит от того, какой UTXO ewoq кошелёк
-// потратит на комиссию. До 2026-06-09 UTXO из unlockSchedule network-genesis был
-// заблокирован, и ID был 2W9boA…; после разблокировки кошелёк тратит его, ID стал
-// 2KDqup…. Будущих locktime в genesis нет — ID стабилен, пока genesis не меняют.
+// потратит на комиссию. С 2026-06-09 у ewoq два разблокированных UTXO, и кошелёк
+// перебирает их в случайном порядке (maps.Values): ID выходил то 2KDqup…, то 2W9boA….
+// Поэтому CreateSubnetTx собирается с MinIssuanceTime = startTime genesis: UTXO с
+// locktime 2026-06-09 кошелёк считает заблокированным, тратит единственный оставшийся,
+// и ID всегда 2W9boA….
 package main
 
 import (
@@ -30,12 +32,15 @@ import (
 	"github.com/ava-labs/avalanchego/vms/platformvm/txs"
 	"github.com/ava-labs/avalanchego/vms/secp256k1fx"
 	"github.com/ava-labs/avalanchego/wallet/subnet/primary"
+	"github.com/ava-labs/avalanchego/wallet/subnet/primary/common"
 )
 
 const (
 	wantChainIDHex = "0x1869f" // 99999, из chain-genesis.json
 	healthTimeout  = 180 * time.Second
 	chainTimeout   = 120 * time.Second
+	// startTime в network-genesis.json (2026-06-02).
+	genesisStartTime = uint64(1780422568)
 	// End валидатора сабнета должен быть <= End валидатора primary-сети: startTime +
 	// initialStakeDuration в network-genesis.json = 2036-05-30. Буфер 1 час ниже него.
 	// Срок стейка больше года требует max-stake-duration в node-config.json.
@@ -49,7 +54,7 @@ func main() {
 		vmIDStr:        getenv("VM_ID", "srEXiWaHuhNyGwPUi444Tu47ZEDwxTWrbQiuD7FmgSAQ6X7Dy"),
 		genesisPath:    getenv("CHAIN_GENESIS", "/genesis/chain-genesis.json"),
 		chainName:      getenv("CHAIN_NAME", "WMSSubnetEVM"),
-		expectedSubnet: getenv("EXPECTED_SUBNET_ID", "2KDqupa9sn3XwASxi5xU6y4EiAVytb3ovUBkGuKWNm2zrgjCiL"),
+		expectedSubnet: getenv("EXPECTED_SUBNET_ID", "2W9boARgCWL25z6pMFNtkCfNA5v28VGg9PmBgUJfuKndEdhrvw"),
 		sharedRPCFile:  getenv("SHARED_RPC_FILE", "/shared/rpc_url.txt"),
 	}
 	if err := run(context.Background(), cfg); err != nil {
@@ -125,7 +130,7 @@ func createChain(ctx context.Context, cfg config) (string, error) {
 	createSubnetTx, err := pWallet.IssueCreateSubnetTx(&secp256k1fx.OutputOwners{
 		Threshold: 1,
 		Addrs:     []ids.ShortID{key.Address()},
-	})
+	}, common.WithMinIssuanceTime(genesisStartTime))
 	if err != nil {
 		return "", fmt.Errorf("create subnet: %w", err)
 	}
