@@ -54,7 +54,7 @@ Delivery guarantees:
 
 ```
 ledger-adapter/
-├── cmd/adapter/main.go        # slog + config → pool → chain → dlq → Flusher → N consumer goroutines + /health
+├── cmd/adapter/main.go        # slog + config → pool → chain → dlq → Flusher → N consumer goroutines + HTTP
 │
 ├── internal/
 │   ├── config/                # Load() (*Config, error) с _FILE override для secrets
@@ -66,7 +66,7 @@ ledger-adapter/
 │   ├── store/                 # pgx pool + onchain_events Repository
 │   ├── consumer/              # Message/Parse + Batcher + Flusher + Consumer
 │   ├── dlq/                   # kafka.Writer для wms.dlq.v1
-│   └── handler/               # /health only
+│   └── handler/               # /health, /onchain/tx/{hash}, /registry/keys/{keyId}
 │
 └── contracts/
     └── BatchMappingWMS.sol    # Solidity контракт (компилируется в contract-deploy)
@@ -92,7 +92,7 @@ ledger-adapter/
 | `BATCH_TIMEOUT` | | `100ms` | Flush by time если batch не набрался |
 | `DLQ_TOPIC` | | `wms.dlq.v1` | |
 | `RECEIPT_POLL_TIMEOUT` | | `30s` | Макс время ожидания receipt |
-| `PORT` | | `8085` | HTTP /health |
+| `PORT` | | `8085` | HTTP: /health, /onchain/tx, /registry/keys |
 | `LOG_LEVEL` | | `info` | (reserved, slog default) |
 
 ## Запуск
