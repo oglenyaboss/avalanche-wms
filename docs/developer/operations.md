@@ -77,7 +77,7 @@ make up                 # = docker compose up -d
 docker compose --profile test up -d
 ```
 
-Дополнительно поднимает узел `subnet-node1` (Avalanche Subnet-EVM), one-shot `subnet-init` (создаёт сабнет + цепочку через Go wallet SDK и пишет динамический `rpc_url.txt`) и one-shot `contract-deploy`, который деплоит `BatchMappingWMS` и пишет `rpc_url.txt` / `contract_addr.txt` / `deployer_key.txt` в том `shared_state`. Подробности — [deploy/subnet/README.md](../../deploy/subnet/README.md).
+Дополнительно поднимает узел `subnet-node1` (Avalanche Subnet-EVM), one-shot `subnet-init` (создаёт сабнет + цепочку через Go wallet SDK и пишет динамический `rpc_url.txt`) и one-shot `contract-deploy`, который деплоит `ConsortiumRegistry` (первым), затем `BatchMappingWMS` и пишет `rpc_url.txt` / `registry_addr.txt` / `contract_addr.txt` / `deployer_key.txt` в том `shared_state`. Подробности — [deploy/subnet/README.md](../../deploy/subnet/README.md).
 
 **Обязательный шаг после старта — регистрация Debezium-коннектора.** Коннектор **не регистрируется автоматически** (нет init-скрипта/`depends_on`, у Debezium нет healthcheck). Без него CDC-конвейер мёртв:
 
@@ -161,8 +161,8 @@ curl -s localhost:8085/health  # health ledger-adapter
 - **`postgres`** запускается командой `postgres -c wal_level=logical` — логическая репликация обязательна для Debezium. Монтирует `seed.sql` read-only.
 - **`db-init`** (скрипт `deploy/db-init.sh`) делает 5 шагов: миграции (`wms/migrations/migrate.sh`) → создание роли репликации `debezium` → grant `SELECT` на `public.outbox_events` → создание publication `outbox_publication FOR TABLE public.outbox_events` → seed admin-пользователя; опционально `seed.sql` если `SEED_DATA != false`. Слот репликации `debezium_outbox` создаётся самим Debezium при первом старте коннектора, а не `db-init`.
 - **`postgres-exporter`** обращается к БД по имени контейнера `postgres_db`, а не по имени сервиса `postgres`.
-- **`ledger-adapter`** монтирует `shared_state:/shared:ro` и читает `rpc_url.txt`/`contract_addr.txt`/`deployer_key.txt`, записанные `contract-deploy`. Healthcheck отсутствует — downstream используют `condition: service_started`.
-- **`contract-deploy`** идемпотентен: если `/shared/contract_addr.txt` содержит адрес с ненулевым байткодом (`cast code` длиннее 4 символов) — выходит `0` без передеплоя; если файл есть, но байткод пустой — передеплоивает; если `cast code` падает с RPC-ошибкой — завершается с exit `1` (не передеплоивает «вслепую»). Полный сброс блокчейн-состояния: `docker compose --profile test down -v`.
+- **`ledger-adapter`** монтирует `shared_state:/shared:ro` и читает `rpc_url.txt`/`contract_addr.txt`/`registry_addr.txt`/`deployer_key.txt`, записанные `contract-deploy`. Healthcheck отсутствует — downstream используют `condition: service_started`.
+- **`contract-deploy`** деплоит сначала `ConsortiumRegistry` (`/shared/registry_addr.txt`, ewoq nonce 0), затем `BatchMappingWMS` (`/shared/contract_addr.txt`, nonce 1). Идемпотентен по каждому файлу: если `/shared/contract_addr.txt` содержит адрес с ненулевым байткодом (`cast code` длиннее 4 символов) — выходит `0` без передеплоя; если файл есть, но байткод пустой — передеплоивает; если `cast code` падает с RPC-ошибкой — завершается с exit `1` (не передеплоивает «вслепую»). Полный сброс блокчейн-состояния: `docker compose --profile test down -v`.
 
 ---
 
@@ -379,7 +379,7 @@ docker compose --profile test up -d
 docker compose --profile test down -v
 ```
 
-`contract-deploy` идемпотентен: проверяет `/shared/contract_addr.txt`, при живом контракте — не передеплоит. Деплой: `forge create BatchMappingWMS` ключом ewoq, проверка `itemStatus(0)==0`, запись `rpc_url.txt` / `contract_addr.txt` / `deployer_key.txt` в `shared_state`.
+`contract-deploy` идемпотентен: проверяет `/shared/registry_addr.txt` и `/shared/contract_addr.txt`, при живом контракте — не передеплоит. Деплой: сначала `forge create ConsortiumRegistry` ключом ewoq (проверка `owner()==ewoq`, запись `registry_addr.txt`), затем `forge create BatchMappingWMS` (проверка `itemStatus(0)==0`), запись `rpc_url.txt` / `contract_addr.txt` / `deployer_key.txt` в `shared_state`.
 
 ### 7.1. Allow-list отправителей транзакций и деплоеров
 

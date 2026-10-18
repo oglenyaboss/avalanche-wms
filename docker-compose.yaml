@@ -316,6 +316,7 @@ services:
       # test-profile overrides via shared volume (silently ignored if files absent)
       RPC_URL_FILE: /shared/rpc_url.txt
       CONTRACT_ADDR_FILE: /shared/contract_addr.txt
+      REGISTRY_ADDR_FILE: /shared/registry_addr.txt
       PRIVATE_KEY_FILE: /shared/deployer_key.txt
     volumes:
       - shared_state:/shared:ro

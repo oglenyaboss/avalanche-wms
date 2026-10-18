@@ -54,7 +54,7 @@ Delivery guarantees:
 
 ```
 ledger-adapter/
-├── cmd/adapter/main.go        # slog + config → pool → chain → dlq → Flusher → N consumer goroutines + /health
+├── cmd/adapter/main.go        # slog + config → pool → chain → dlq → Flusher → N consumer goroutines + HTTP
 │
 ├── internal/
 │   ├── config/                # Load() (*Config, error) с _FILE override для secrets
@@ -66,7 +66,7 @@ ledger-adapter/
 │   ├── store/                 # pgx pool + onchain_events Repository
 │   ├── consumer/              # Message/Parse + Batcher + Flusher + Consumer
 │   ├── dlq/                   # kafka.Writer для wms.dlq.v1
-│   └── handler/               # /health only
+│   └── handler/               # /health, /onchain/tx/{hash}, /registry/keys/{keyId}
 │
 └── contracts/
     └── BatchMappingWMS.sol    # Solidity контракт (компилируется в contract-deploy)
@@ -83,6 +83,7 @@ ledger-adapter/
 | `DB_URL` | ✓ | — | pgx DSN `postgres://user:pw@host/db` |
 | `RPC_URL` | ✓ | — | RPC EVM-узла (локально — Avalanche Subnet-EVM; подойдёт любой EVM-совместимый) |
 | `CONTRACT_ADDR` | ✓ | — | Адрес `BatchMappingWMS` |
+| `REGISTRY_ADDR` | | — | Адрес `ConsortiumRegistry`; без него `GET /registry/keys/{keyId}` отвечает 502. Override: `REGISTRY_ADDR_FILE` |
 | `PRIVATE_KEY` | ✓ (static) | — | Hex signer key (0x-prefixed ok); не нужен в kms-режиме |
 | `SIGNER_MODE` | | `static` | `static` — **только локальная разработка**: приватник в env открытым текстом; `kms` — подпись во внешнем Web3Signer (ключ адаптеру не нужен) |
 | `KMS_URL` | ✓ (kms) | — | Базовый URL Web3Signer (eth1 mode), напр. `http://web3signer:9000` |
@@ -91,7 +92,7 @@ ledger-adapter/
 | `BATCH_TIMEOUT` | | `100ms` | Flush by time если batch не набрался |
 | `DLQ_TOPIC` | | `wms.dlq.v1` | |
 | `RECEIPT_POLL_TIMEOUT` | | `30s` | Макс время ожидания receipt |
-| `PORT` | | `8085` | HTTP /health |
+| `PORT` | | `8085` | HTTP: /health, /onchain/tx, /registry/keys |
 | `LOG_LEVEL` | | `info` | (reserved, slog default) |
 
 ## Запуск
@@ -131,6 +132,30 @@ export PRIVATE_KEY=0x...
 cd ledger-adapter
 go run ./cmd/adapter/
 ```
+
+## CLI владельца консорциума
+
+`registry-cli` (бинарь в образе адаптера) регистрирует организации в `ConsortiumRegistry`, добавляет ключи админа и показывает реестр. Транзакции `registerOrganization` и `registerAdminKey` подписывает `OWNER_KEY` (ключ деплоера, в стенде — `/shared/deployer_key.txt`).
+
+```bash
+make registry-cli ARGS="register-org --file org.json"   # путь — относительно корня репо
+make registry-cli ARGS="add-admin-key --file org.json"
+make registry-cli ARGS="list"
+```
+
+Формат `org.json` (общий с WMS, менять нельзя):
+
+```json
+{"orgId":"0190f2a0-0000-7000-8000-000000000a0a","name":"Org A","qx":"0x<64 hex>","qy":"0x<64 hex>"}
+```
+
+`qx`/`qy` — координаты публичного P-256 ключа админа организации. Перед отправкой CLI проверяет, что организация и ключ ещё не зарегистрированы.
+
+`add-admin-key` берёт файл того же формата и добавляет ключ админа в уже зарегистрированную организацию, например взамен отозванного. Перед отправкой CLI проверяет, что организация есть, а ключа ещё нет.
+
+После изменения Go-кода нужен `docker compose build ledger-adapter`.
+
+Статус ключа читается эндпоинтом адаптера `GET /registry/keys/{keyId}` (внутренняя сеть, без аутентификации, как `/onchain/tx`): `{"found":false}` или `{"found":true,"org_id":"…","role":"admin|operator","active":true|false}`.
 
 ## Тестирование
 
