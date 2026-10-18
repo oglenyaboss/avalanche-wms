@@ -616,4 +616,11 @@ JOIN wms_inventory.destinations d
  AND d.warehouse_id = w.warehouse_id
 ON CONFLICT (dispatch_code) DO NOTHING;
 
+-- 14) Организация демо-склада и привязка демо-админа/оператора к ней
+INSERT INTO public.organizations (org_id, name)
+VALUES ('01929c5e-0000-7000-8000-00000000a001', 'Демо-склад')
+ON CONFLICT DO NOTHING;
+
+UPDATE public.users SET org_id = '01929c5e-0000-7000-8000-00000000a001' WHERE username IN ('admin', 'operator') AND org_id IS NULL;
+
 COMMIT;
