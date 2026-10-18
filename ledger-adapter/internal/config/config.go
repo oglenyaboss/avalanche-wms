@@ -31,6 +31,16 @@ type Config struct {
 	// ограничен TxPoolAccountSlots узла, поэтому N аккаунтов = N× in-flight, что
 	// насыщает WAN-цепь (single signer голодит её — ~16 слотов < block-ёмкость).
 	PrivateKeys []string
+
+	// SignerMode: "static" (дефолт, ТОЛЬКО локальная разработка — приватник в env
+	// открытым текстом) | "kms"
+	// (подпись через внешний Web3Signer — ключевой материал адаптеру не нужен).
+	SignerMode string
+	// KMSURL / KMSPublicKeys — параметры kms-режима. KMSPublicKeys —
+	// identifier'ы (uncompressed X||Y public keys) ключей, загруженных в
+	// Web3Signer; поддерживает KMS_PUBLIC_KEYS_FILE (comma-separated в файле).
+	KMSURL        string
+	KMSPublicKeys []string
 }
 
 // perSignerWindow — сколько batch-tx in-flight держим на ОДИН signer-аккаунт. Узел
@@ -51,14 +61,16 @@ const perSignerWindow = 8
 // и файл читается — его содержимое (trim'нутое) используется вместо прямого env.
 // Нужно для test-профиля, где contract-deploy пишет артефакты в shared volume.
 //
-// Обязательные поля: KAFKA_BROKERS, DB_URL, RPC_URL, CONTRACT_ADDR, PRIVATE_KEY.
-// Если хоть одно отсутствует — возвращает ошибку.
+// Обязательные поля (static): KAFKA_BROKERS, DB_URL, RPC_URL, CONTRACT_ADDR,
+// PRIVATE_KEY. В kms-режиме (SIGNER_MODE=kms) вместо PRIVATE_KEY требуются
+// KMS_URL и KMS_PUBLIC_KEYS.
 func Load() (*Config, error) {
 	c := &Config{
 		Port:               getDefault("PORT", "8085"),
 		KafkaGroupID:       getDefault("KAFKA_GROUP_ID", "ledger-adapter"),
 		DLQTopic:           getDefault("DLQ_TOPIC", "wms.dlq.v1"),
 		LogLevel:           getDefault("LOG_LEVEL", "info"),
+		SignerMode:         getDefault("SIGNER_MODE", "static"),
 		BatchSize:          getIntDefault("BATCH_SIZE", 10),
 		BatchTimeout:       getDurationDefault("BATCH_TIMEOUT", 100*time.Millisecond),
 		ReceiptPollTimeout: getDurationDefault("RECEIPT_POLL_TIMEOUT", 30*time.Second),
@@ -71,7 +83,9 @@ func Load() (*Config, error) {
 		PipelineWindow: getIntDefault("PIPELINE_WINDOW", 3),
 	}
 
-	required := []struct {
+	// Общие обязательные переменные — для любого signer-режима. PRIVATE_KEY
+	// требуется только в static; в kms вместо него KMS_URL + KMS_PUBLIC_KEYS.
+	common := []struct {
 		name  string
 		field *string
 	}{
@@ -79,9 +93,8 @@ func Load() (*Config, error) {
 		{"DB_URL", &c.DbURL},
 		{"RPC_URL", &c.RpcURL},
 		{"CONTRACT_ADDR", &c.ContractAddr},
-		{"PRIVATE_KEY", &c.PrivateKey},
 	}
-	for _, r := range required {
+	for _, r := range common {
 		v, err := getRequired(r.name)
 		if err != nil {
 			return nil, err
@@ -89,29 +102,72 @@ func Load() (*Config, error) {
 		*r.field = v
 	}
 
-	// Multi-signer: PRIVATE_KEYS (comma-separated) шардит in-flight нагрузку по N
-	// аккаунтам. Падаем на единственный PRIVATE_KEY, если не задан. PRIVATE_KEY
-	// остаётся required (back-compat + дефолтный signer[0]).
-	if raw := os.Getenv("PRIVATE_KEYS"); raw != "" {
-		for _, k := range strings.Split(raw, ",") {
-			if k = strings.TrimSpace(k); k != "" {
-				c.PrivateKeys = append(c.PrivateKeys, k)
+	switch c.SignerMode {
+	case "kms":
+		var err error
+		if c.KMSURL, err = getRequired("KMS_URL"); err != nil {
+			return nil, err
+		}
+		rawKeys, err := getRequired("KMS_PUBLIC_KEYS")
+		if err != nil {
+			return nil, err
+		}
+		seen := make(map[string]bool)
+		for _, id := range strings.Split(rawKeys, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				// Дубль identifier'а = два Client'а с одним адресом и независимыми
+				// локальными nonce → replacement-коллизии под нагрузкой.
+				if seen[id] {
+					return nil, fmt.Errorf("KMS_PUBLIC_KEYS: duplicate %s", id)
+				}
+				seen[id] = true
+				c.KMSPublicKeys = append(c.KMSPublicKeys, id)
 			}
 		}
+		if len(c.KMSPublicKeys) == 0 {
+			return nil, fmt.Errorf("KMS_PUBLIC_KEYS is empty")
+		}
+	case "static":
+		v, err := getRequired("PRIVATE_KEY")
+		if err != nil {
+			return nil, err
+		}
+		c.PrivateKey = v
+	default:
+		return nil, fmt.Errorf("SIGNER_MODE must be \"static\" or \"kms\", got %q", c.SignerMode)
 	}
-	if len(c.PrivateKeys) == 0 {
-		c.PrivateKeys = []string{c.PrivateKey}
+
+	// Multi-signer: PRIVATE_KEYS (comma-separated) шардит in-flight нагрузку по N
+	// аккаунтам. Падаем на единственный PRIVATE_KEY, если не задан. PRIVATE_KEY
+	// остаётся required (back-compat + дефолтный signer[0]). В kms-режиме не
+	// применяется — signer'ы определяются KMS_PUBLIC_KEYS.
+	if c.SignerMode == "static" {
+		if raw := os.Getenv("PRIVATE_KEYS"); raw != "" {
+			for _, k := range strings.Split(raw, ",") {
+				if k = strings.TrimSpace(k); k != "" {
+					c.PrivateKeys = append(c.PrivateKeys, k)
+				}
+			}
+		}
+		if len(c.PrivateKeys) == 0 {
+			c.PrivateKeys = []string{c.PrivateKey}
+		}
 	}
 
 	// Потолок in-flight окна масштабируется с числом signer'ов: каждый держит
 	// perSignerWindow слотов, multi-signer спред даёт суммарно perSignerWindow×N.
-	pipelineWindowMax := perSignerWindow * len(c.PrivateKeys)
+	// В kms-режиме signer'ы — KMS-ключи, лимит TxPoolAccountSlots тот же.
+	signerCount := len(c.PrivateKeys)
+	if c.SignerMode == "kms" {
+		signerCount = len(c.KMSPublicKeys)
+	}
+	pipelineWindowMax := perSignerWindow * signerCount
 	if c.PipelineWindow < 1 {
 		c.PipelineWindow = 1
 	}
 	if c.PipelineWindow > pipelineWindowMax {
 		fmt.Fprintf(os.Stderr, "config: PIPELINE_WINDOW=%d clamped to %d (perSignerWindow=%d × %d signers)\n",
-			c.PipelineWindow, pipelineWindowMax, perSignerWindow, len(c.PrivateKeys))
+			c.PipelineWindow, pipelineWindowMax, perSignerWindow, signerCount)
 		c.PipelineWindow = pipelineWindowMax
 	}
 

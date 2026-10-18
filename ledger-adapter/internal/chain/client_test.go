@@ -3,6 +3,7 @@ package chain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -92,8 +93,7 @@ func newTestClient(t *testing.T, eth ethBackend) *Client {
 	}
 	return &Client{
 		eth:          eth,
-		privateKey:   pk,
-		fromAddress:  crypto.PubkeyToAddress(pk.PublicKey),
+		signer:       &staticSigner{pk: pk, addr: crypto.PubkeyToAddress(pk.PublicKey)},
 		contractAddr: common.HexToAddress("0x0000000000000000000000000000000000000001"),
 		parsedABI:    parsed,
 	}
@@ -298,5 +298,49 @@ func TestClient_SendMu_SerializesConcurrentCalls(t *testing.T) {
 
 	if elapsed < 40*time.Millisecond {
 		t.Errorf("sendMu should have blocked ~50ms; blocked for %s", elapsed)
+	}
+}
+
+// failingSigner имитирует удалённый KMS-signer с заданной ошибкой подписи.
+type failingSigner struct{ err error }
+
+func (f failingSigner) Address() common.Address { return common.Address{1} }
+
+func (f failingSigner) SignTx(context.Context, *types.Transaction, *big.Int) (*types.Transaction, error) {
+	return nil, f.err
+}
+
+func TestSendMethod_SignerTransientIsChainTransient(t *testing.T) {
+	// KMS недоступен → ErrSignerTransient должен выйти как ErrChainTransient
+	// (flusher ретраит, DLQ не уходит) и НЕ сжечь nonce (invariant 3).
+	eth := &fakeEthBackend{nonce: 5}
+	parsed, err := abi.JSON(strings.NewReader(ContractABI))
+	if err != nil {
+		t.Fatalf("parse abi: %v", err)
+	}
+	c := &Client{
+		eth:       eth,
+		signer:    failingSigner{fmt.Errorf("%w: kms down", ErrSignerTransient)},
+		parsedABI: parsed,
+	}
+	args := []*big.Int{big.NewInt(1)}
+
+	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err == nil {
+		t.Fatal("expected error from failing signer")
+	} else if !errors.Is(err, ErrChainTransient) {
+		t.Fatalf("signer transient must classify as ErrChainTransient, got %v", err)
+	}
+	if eth.pendingNonceN != 1 {
+		t.Fatalf("PendingNonceAt called %d times, want 1 (seed only)", eth.pendingNonceN)
+	}
+
+	// Локальная (terminal) ошибка подписи не должна становиться transient.
+	c2 := &Client{
+		eth:       &fakeEthBackend{nonce: 5},
+		signer:    failingSigner{errors.New("local crypto broke")},
+		parsedABI: parsed,
+	}
+	if _, err := c2.sendMethod(context.Background(), "batchAccept", args, args); errors.Is(err, ErrChainTransient) {
+		t.Fatalf("local sign error must stay terminal, got %v", err)
 	}
 }

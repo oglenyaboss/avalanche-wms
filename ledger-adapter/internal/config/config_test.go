@@ -265,3 +265,125 @@ func TestLoad_InvalidDurationFallsBackToDefault(t *testing.T) {
 		t.Errorf("invalid duration should fall back: got %s", cfg.BatchTimeout)
 	}
 }
+
+func TestLoad_KMSMode(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SIGNER_MODE", "kms")
+	t.Setenv("KMS_URL", "http://web3signer:9000")
+	t.Setenv("KMS_PUBLIC_KEYS", "0xaaa, 0xbbb")
+	for _, k := range []string{"KMS_URL", "KMS_PUBLIC_KEYS"} {
+		t.Setenv(k+"_FILE", "")
+	}
+	// В kms-режиме PRIVATE_KEY не нужен.
+	t.Setenv("PRIVATE_KEY", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SignerMode != "kms" {
+		t.Errorf("SignerMode: got %q", cfg.SignerMode)
+	}
+	if cfg.KMSURL != "http://web3signer:9000" {
+		t.Errorf("KMSURL: got %q", cfg.KMSURL)
+	}
+	if len(cfg.KMSPublicKeys) != 2 || cfg.KMSPublicKeys[0] != "0xaaa" || cfg.KMSPublicKeys[1] != "0xbbb" {
+		t.Errorf("KMSPublicKeys: got %v", cfg.KMSPublicKeys)
+	}
+	if len(cfg.PrivateKeys) != 0 {
+		t.Errorf("PrivateKeys must stay empty in kms mode, got %v", cfg.PrivateKeys)
+	}
+	// Окно пайплайна масштабируется от числа KMS-ключей: 2 ключа → потолок 16.
+	if cfg.PipelineWindow != 3 {
+		t.Errorf("PipelineWindow default: got %d", cfg.PipelineWindow)
+	}
+}
+
+func TestLoad_KMSModeWindowScalesWithSigners(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SIGNER_MODE", "kms")
+	t.Setenv("KMS_URL", "http://web3signer:9000")
+	t.Setenv("KMS_PUBLIC_KEYS", "0xaaa,0xbbb,0xccc,0xddd,0xeee")
+	t.Setenv("PIPELINE_WINDOW", "99")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PipelineWindow != perSignerWindow*5 {
+		t.Errorf("PipelineWindow must clamp to perSignerWindow×5=%d, got %d", perSignerWindow*5, cfg.PipelineWindow)
+	}
+}
+
+func TestLoad_KMSModeMissingRequired(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SIGNER_MODE", "kms")
+	t.Setenv("KMS_URL", "http://web3signer:9000")
+	t.Setenv("KMS_PUBLIC_KEYS", "")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "KMS_PUBLIC_KEYS") {
+		t.Fatalf("want KMS_PUBLIC_KEYS required error, got %v", err)
+	}
+}
+
+func TestLoad_KMSModeWithoutPrivateKey(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("PRIVATE_KEY", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("static mode without PRIVATE_KEY must fail")
+	}
+}
+
+func TestLoad_BadSignerMode(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SIGNER_MODE", "hsm")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SIGNER_MODE") {
+		t.Fatalf("want SIGNER_MODE validation error, got %v", err)
+	}
+}
+
+func TestLoad_KMSPublicKeysFileOverride(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SIGNER_MODE", "kms")
+	t.Setenv("KMS_URL", "http://web3signer:9000")
+	t.Setenv("KMS_PUBLIC_KEYS", "")
+	dir := t.TempDir()
+	f := filepath.Join(dir, "kms_keys.txt")
+	if err := os.WriteFile(f, []byte("0xaaa,0xbbb\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KMS_PUBLIC_KEYS_FILE", f)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.KMSPublicKeys) != 2 {
+		t.Errorf("KMSPublicKeys from file: got %v", cfg.KMSPublicKeys)
+	}
+}
+
+func TestLoad_KMSModeRequiresCommonEnv(t *testing.T) {
+	// Регрессия P1: kms-режим не должен выкидывать общие обязательные
+	// переменные. Пустой CONTRACT_ADDR → tx в 0x0 → молчаливые no-op коммиты.
+	for _, missing := range []string{"KAFKA_BROKERS", "DB_URL", "RPC_URL", "CONTRACT_ADDR"} {
+		setRequiredEnv(t)
+		t.Setenv("SIGNER_MODE", "kms")
+		t.Setenv("KMS_URL", "http://web3signer:9000")
+		t.Setenv("KMS_PUBLIC_KEYS", "0xaaa")
+		t.Setenv(missing, "")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), missing) {
+			t.Errorf("%s: want required error, got %v", missing, err)
+		}
+	}
+}
+
+func TestLoad_KMSModeDuplicateKeys(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SIGNER_MODE", "kms")
+	t.Setenv("KMS_URL", "http://web3signer:9000")
+	t.Setenv("KMS_PUBLIC_KEYS", "0xaaa,0xaaa")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("want duplicate error, got %v", err)
+	}
+}

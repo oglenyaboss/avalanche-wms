@@ -52,10 +52,12 @@ openssl rand -hex 32
 | `JWT_SECRET` | секрет подписи JWT (HS256) | **жёстко обязателен**, ≥32 симв., не из блок-листа |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | доступ к PostgreSQL | по умолчанию `root` / `root` / `wms_blockchain_db` |
 | `RPC_URL` | RPC EVM-узла для ledger-adapter | в профиле `test` перетирается файлом из shared-тома |
-| `PRIVATE_KEY` | приватный ключ для подписи он-чейн транзакций | в профиле `test` перетирается файлом из shared-тома |
+| `PRIVATE_KEY` | приватный ключ для подписи он-чейн транзакций | в профиле `test` перетирается файлом из shared-тома; в kms-режиме (`docker-compose.kms.yaml`, `make kms-up`) не используется вовсе — подпись в Web3Signer |
 | `CONTRACT_ADDR` | адрес задеплоенного `BatchMappingWMS` | в профиле `test` перетирается файлом из shared-тома |
 
 > В профиле `test` значения `RPC_URL`/`PRIVATE_KEY`/`CONTRACT_ADDR` подставляются автоматически из shared-тома `shared_state` (`*_FILE`-переменные ledger-adapter имеют приоритет над прямыми env). Их ручная установка нужна только для запуска против внешнего узла.
+>
+> KMS-режим (issue #7): `make kms-up` поднимает стек с Web3Signer — приватник адаптера живёт только в KMS (`docker-compose.kms.yaml`), адаптер получает public key + подпись. Подробнее — `ledger-adapter/README.md` → «KMS profile».
 
 ### 1.3. Поднятие стенда
 

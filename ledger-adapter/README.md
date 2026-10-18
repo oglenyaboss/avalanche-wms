@@ -83,7 +83,10 @@ ledger-adapter/
 | `DB_URL` | ✓ | — | pgx DSN `postgres://user:pw@host/db` |
 | `RPC_URL` | ✓ | — | RPC EVM-узла (локально — Avalanche Subnet-EVM; подойдёт любой EVM-совместимый) |
 | `CONTRACT_ADDR` | ✓ | — | Адрес `BatchMappingWMS` |
-| `PRIVATE_KEY` | ✓ | — | Hex signer key (0x-prefixed ok) |
+| `PRIVATE_KEY` | ✓ (static) | — | Hex signer key (0x-prefixed ok); не нужен в kms-режиме |
+| `SIGNER_MODE` | | `static` | `static` — **только локальная разработка**: приватник в env открытым текстом; `kms` — подпись во внешнем Web3Signer (ключ адаптеру не нужен) |
+| `KMS_URL` | ✓ (kms) | — | Базовый URL Web3Signer (eth1 mode), напр. `http://web3signer:9000` |
+| `KMS_PUBLIC_KEYS` | ✓ (kms) | — | CSV identifier'ов ключей (uncompressed X\|\|Y public key из `GET /api/v1/eth1/publicKeys`); multi-signer — просто перечислить несколько. Override: `KMS_PUBLIC_KEYS_FILE` |
 | `BATCH_SIZE` | | `10` | Events per tx |
 | `BATCH_TIMEOUT` | | `100ms` | Flush by time если batch не набрался |
 | `DLQ_TOPIC` | | `wms.dlq.v1` | |
@@ -100,6 +103,21 @@ docker compose --profile test up -d
 # contract-deploy one-shot → пишет RPC_URL / CONTRACT_ADDR / PRIVATE_KEY в shared volume
 # ledger-adapter читает их через *_FILE env vars
 ```
+
+### KMS profile (ключ адаптера во внешнем Web3Signer)
+
+```bash
+make kms-up   # = docker compose -f docker-compose.yaml -f docker-compose.kms.yaml --profile test up -d
+# kms-init: генерит ключи в Web3Signer (file-raw, том kms_keys — адреса стабильны),
+#           фондирует их с ewoq, выдаёт роль Enabled в tx-allow-list (если он включён в genesis),
+#           публикует identifier'ы в /shared/kms_public_keys.txt
+# ledger-adapter: SIGNER_MODE=kms — приватник в процесс адаптера не попадает вообще
+make kms-down # том kms_keys выживает — рефанд не нужен при следующем старте
+```
+
+Prod-путь без изменения адаптера — конфиги Web3Signer `type: "hashicorp"`
+(ключ в Vault KV v2) или `type: "aws-kms"`; `PIPELINE_WINDOW` масштабируется
+от числа KMS-ключей так же, как от `PRIVATE_KEYS`.
 
 ### Локально без docker (unit-dev)
 
