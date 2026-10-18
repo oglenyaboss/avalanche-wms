@@ -1,18 +1,21 @@
 import { HugeiconsIcon } from '@hugeicons/react'
 import { NavLink } from 'react-router'
 
+import { useSessionStore } from '@/entities/session'
 import { cn } from '@/shared/lib'
 
-import { navigationItems } from '../config/navigationItems'
+import { navigationItems, visibleNavigationItems } from '../config/navigationItems'
 
 type SidebarNavProps = {
   onNavigate?: () => void
 }
 
 export function SidebarNav({ onNavigate }: SidebarNavProps) {
+  const role = useSessionStore((s) => s.user?.role)
+
   return (
     <nav className="flex flex-col gap-0.5">
-      {navigationItems.map((item) => (
+      {visibleNavigationItems(navigationItems, role).map((item) => (
         <NavLink
           key={item.to}
           to={item.to}

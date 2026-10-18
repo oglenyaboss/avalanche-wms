@@ -116,6 +116,9 @@ handler → service → repository
 | `JWT_SECRET` | Секрет подписи JWT (обязателен, минимум 32 символа) | — |
 | `JWT_ACCESS_TTL` | TTL access token | `15m` |
 | `JWT_REFRESH_TTL` | TTL refresh token | `168h` |
+| `WEBAUTHN_RP_ID` | RP ID для passkey (хост фронта) | `localhost` |
+| `WEBAUTHN_RP_NAME` | Отображаемое имя RP в диалоге браузера | `Avalanche WMS` |
+| `WEBAUTHN_RP_ORIGINS` | Разрешённые origin через запятую | `http://localhost:5173` |
 
 ## Локальная разработка
 

@@ -110,3 +110,12 @@ func TestRequireAdminOrOperator(t *testing.T) {
 		{"unauthenticated", noIdentity, false, http.StatusUnauthorized, "UNAUTHORIZED"},
 	})
 }
+
+func TestRequireAdmin(t *testing.T) {
+	runGateTable(t, httputil.RequireAdmin, []gateCase{
+		{"admin allowed", asIdentity(domain.UserRoleAdmin), true, http.StatusOK, ""},
+		{"operator forbidden", asIdentity(domain.UserRoleOperator), false, http.StatusForbidden, "FORBIDDEN"},
+		{"customer forbidden", asIdentity(domain.UserRoleCustomer), false, http.StatusForbidden, "FORBIDDEN"},
+		{"unauthenticated", noIdentity, false, http.StatusUnauthorized, "UNAUTHORIZED"},
+	})
+}

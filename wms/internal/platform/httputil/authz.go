@@ -13,6 +13,7 @@ import (
 const (
 	msgUnauthenticated = "Требуется авторизация"
 	msgOperatorOnly    = "Только оператор может выполнять это действие"
+	msgAdminOnly       = "Только администратор может выполнять это действие"
 	msgAdminOrOperator = "Требуется роль администратора или оператора"
 )
 
@@ -22,6 +23,11 @@ const (
 // otherwise — and returns ok=false. On success it returns the operator's user ID.
 func RequireOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	return requireRole(w, r, msgOperatorOnly, domain.UserRoleOperator)
+}
+
+// RequireAdmin authorizes the request for the ADMIN role only.
+func RequireAdmin(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	return requireRole(w, r, msgAdminOnly, domain.UserRoleAdmin)
 }
 
 // RequireAdminOrOperator authorizes the request for the ADMIN or OPERATOR roles.

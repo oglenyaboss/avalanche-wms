@@ -259,6 +259,9 @@ EventRouter:
 | `JWT_SECRET` | `JWTSecret` | string | — | **да** (`Load()` вернёт ошибку) | непустой после trim; не из блок-листа; ≥32 симв. |
 | `JWT_ACCESS_TTL` | `JWTAccessTTL` | duration | `15m` | нет | `time.ParseDuration`; при ошибке — warning + default (без падения) |
 | `JWT_REFRESH_TTL` | `JWTRefreshTTL` | duration | `168h` | нет | то же |
+| `WEBAUTHN_RP_ID` | `WebAuthnRPID` | string | `localhost` | нет | RP ID для passkey; должен совпадать с хостом origin фронта |
+| `WEBAUTHN_RP_NAME` | `WebAuthnRPName` | string | `Avalanche WMS` | нет | отображаемое имя RP в диалоге браузера |
+| `WEBAUTHN_RP_ORIGINS` | `WebAuthnRPOrigins` | []string | `http://localhost:5173` | нет | список origin через запятую (пробелы и пустые элементы отбрасываются) |
 
 Блок-лист `JWT_SECRET` (отвергаются с ошибкой): `change-me`, `dev-secret`, `replace-me`, `replace-with-a-random-32-byte-secret`, `replace-with-a-random-64-character-secret`.
 
