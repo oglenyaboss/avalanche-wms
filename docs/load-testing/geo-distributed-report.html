@@ -71,7 +71,7 @@ footer{padding:2.5rem 0 4rem;color:var(--ink-faint);font-size:.82rem;font-family
   <p>Сеть networkID <span class="mono">1338</span>, субсеть-EVM chainId
   <span class="mono">0x1869f</span>. Все узлы — нативный avalanchego под systemd на
   VPS с 1 ядром, пирятся по WAN, финализируют под snow-консенсусом (sample 3 / quorum 2).</p>
-  <div class="nodes"><div class="node"><span class="ok"></span><div class="flag">🇲🇩</div><div class="nm">dino · MD 🇲🇩</div><div class="id">высота 471 · peers 4 · RSS 123 МБ · CPU 6.6 %</div></div><div class="node"><span class="ok"></span><div class="flag">🇷🇴</div><div class="nm">alex · RO 🇷🇴</div><div class="id">высота 471 · peers 4 · RSS 120 МБ · CPU -73.4 %</div></div><div class="node"><span class="ok"></span><div class="flag">🇳🇱</div><div class="nm">itldc · NL 🇳🇱</div><div class="id">высота 471 · peers 4 · RSS 124 МБ · CPU 13.3 %</div></div><div class="node"><span class="ok"></span><div class="flag">🇲🇩</div><div class="nm">evolvica · MD 🇲🇩</div><div class="id">высота 471 · peers 4 · RSS 130 МБ · CPU 7.1 %</div></div></div>
+  <div class="nodes"><div class="node"><span class="ok"></span><div class="flag">🇲🇩</div><div class="nm">dino · MD 🇲🇩</div><div class="id">высота 471 · peers 4 · RSS 123 МБ · CPU 6.6 %</div></div><div class="node"><span class="ok"></span><div class="flag">🇷🇴</div><div class="nm">alex · RO 🇷🇴</div><div class="id">высота 471 · peers 4 · RSS 120 МБ · CPU -73.4 % *</div></div><div class="node"><span class="ok"></span><div class="flag">🇳🇱</div><div class="nm">itldc · NL 🇳🇱</div><div class="id">высота 471 · peers 4 · RSS 124 МБ · CPU 13.3 %</div></div><div class="node"><span class="ok"></span><div class="flag">🇲🇩</div><div class="nm">evolvica · MD 🇲🇩</div><div class="id">высота 471 · peers 4 · RSS 130 МБ · CPU 7.1 %</div></div></div>
 </section>
 
 <section>
@@ -122,7 +122,7 @@ footer{padding:2.5rem 0 4rem;color:var(--ink-faint);font-size:.82rem;font-family
 </section>
 
 <section>
-  <div class="eyebrow">Отказоустойчивость · kill-1-of-3</div>
+  <div class="eyebrow">Отказоустойчивость · kill-1-of-4</div>
   <h2>Отказ узла под живой нагрузкой</h2>
   <p><strong>Консенсус.</strong> Пока alex был выключен, валидаторы финализировали (высота субсети +18 блок(ов)).<br><br><strong>Пайплайн — выстоял.</strong> С 4 валидаторами потеря одного оставляет <strong>75 % &gt; порога 73.33 %</strong>, поэтому observer-нода node-home осталась healthy и <strong>не замёрзла</strong> (продвинулась на 19 блок(ов) — против ~0 в 3-нодовой конфигурации); под отказом закоммичено 1356 событий, <strong>0 потеряно</strong> — никаких receipt-таймаутов, double-submit и реверзов.<br><br><strong>Деградация изящная.</strong> WAN-финализация при выключенном узле замедлилась (p99 задержки подрос, backlog временно вырос), но полностью слился за 191 с; отгрузки сошлись (2478 = 2478). Closed-loop подтверждение, что 4-й валидатор устраняет лимит 3-нодовой конфигурации.</p>
   <div class="callout "><p><strong>Вывод.</strong> С 4 валидаторами потеря 1 узла оставляет 75 % &gt; 73.33 %: observer не замерзает, пайплайн коммитит под отказом, <strong>0 потерь</strong>. Лимит 3-нодовой конфигурации (отдельный отчёт <span class='mono'>geo-3node-before</span>) закрыт добавлением валидатора — closed-loop before→after. Запас тонкий (75 % vs 73.33 % ≈ 1.7 п.п.): сильное многонодовое WAN-разделение могло бы снова просадить observer ниже порога — но это уже отказ 2+ узлов, а не одного.</p></div>
@@ -133,7 +133,8 @@ footer{padding:2.5rem 0 4rem;color:var(--ink-faint);font-size:.82rem;font-family
   <h2>Стоимость узла под нагрузкой</h2>
   <table><thead><tr><th>Узел</th><th>Гео</th><th class="num">Высота</th><th class="num">Пиры</th>
   <th class="num">RSS пик</th><th class="num">CPU сред.</th></tr></thead>
-  <tbody><tr><td>dino</td><td>MD</td><td class='num'>471</td><td class='num'>4</td><td class='num'>123 МБ</td><td class='num'>6.6 %</td></tr><tr><td>alex</td><td>RO</td><td class='num'>471</td><td class='num'>4</td><td class='num'>120 МБ</td><td class='num'>-73.4 %</td></tr><tr><td>itldc</td><td>NL</td><td class='num'>471</td><td class='num'>4</td><td class='num'>124 МБ</td><td class='num'>13.3 %</td></tr><tr><td>evolvica</td><td>MD</td><td class='num'>471</td><td class='num'>4</td><td class='num'>130 МБ</td><td class='num'>7.1 %</td></tr><tr><td>node-home</td><td>local</td><td class='num'>471</td><td class='num'>4</td><td class='num'>148 МБ</td><td class='num'>3.4 %</td></tr></tbody></table>
+  <tbody><tr><td>dino</td><td>MD</td><td class='num'>471</td><td class='num'>4</td><td class='num'>123 МБ</td><td class='num'>6.6 %</td></tr><tr><td>alex</td><td>RO</td><td class='num'>471</td><td class='num'>4</td><td class='num'>120 МБ</td><td class='num'>-73.4 % *</td></tr><tr><td>itldc</td><td>NL</td><td class='num'>471</td><td class='num'>4</td><td class='num'>124 МБ</td><td class='num'>13.3 %</td></tr><tr><td>evolvica</td><td>MD</td><td class='num'>471</td><td class='num'>4</td><td class='num'>130 МБ</td><td class='num'>7.1 %</td></tr><tr><td>node-home</td><td>local</td><td class='num'>471</td><td class='num'>4</td><td class='num'>148 МБ</td><td class='num'>3.4 %</td></tr></tbody></table>
+  <p>* CPU узла alex — артефакт сборщика метрик: счётчик cpu_seconds_total сброшен рестартом узла в окне отказа, поэтому среднее за окно отрицательно; физически загрузка CPU отрицательной быть не может.</p>
   <p>Каждый валидатор — 1 ядро, ~1 ГБ RAM. Под устойчивой нагрузкой потребление остаётся скромным,
   что подтверждает практичность гео-развёртывания на дешёвых VPS.</p>
 </section>
