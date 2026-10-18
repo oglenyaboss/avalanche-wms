@@ -14,16 +14,18 @@ import (
 // ReconcileRow — non-terminal/stuck onchain_events row that already has a broadcast
 // tx_hash. The reconcile loop re-checks its receipt to recover a true on-chain result
 // (e.g. a mined tx that the flusher wrongly marked FAILED on a receipt-poll timeout — N1).
+// AggregateType отделяет FSM-батчи от signed_action'ов: у них разные пути разбора исхода.
 type ReconcileRow struct {
-	EventID uuid.UUID
-	TxHash  string
+	EventID       uuid.UUID
+	AggregateType string
+	TxHash        string
 }
 
 // Repository — persistence слой для onchain_events.
 //
 // Таблица: public.onchain_events (event_id UUID unique, aggregate_type text,
 // tx_hash text, status onchain_event_status ENUM('PENDING','SENT','COMMITTED',
-// 'FAILED'), error_message text, created_at/updated_at).
+// 'FAILED'), reject_reason smallint, error_message text, created_at/updated_at).
 //
 // Lifecycle: InsertPending → MarkSent(txHash) → MarkCommitted | MarkFailed.
 type Repository struct {
@@ -123,6 +125,30 @@ func (r *Repository) MarkFailed(ctx context.Context, ids []uuid.UUID, txHash, re
 	return nil
 }
 
+// MarkRejected — контракт отклонил подписанное действие (ActionRejected в
+// receipt'е, ADR §6): status=FAILED + reject_reason (код RejectReason) +
+// error_message. Guard `status <> 'COMMITTED'` и tx_hash COALESCE — как в
+// MarkFailed: строку, которую reconcile уже дотянул до COMMITTED, не
+// откатываем; пустой txHash не затирает существующий.
+func (r *Repository) MarkRejected(ctx context.Context, ids []uuid.UUID, txHash string, reason uint8) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE public.onchain_events
+		 SET status='FAILED',
+		     tx_hash = COALESCE(NULLIF($2,''), tx_hash),
+		     reject_reason=$4,
+		     error_message=$3,
+		     updated_at=now()
+		 WHERE event_id = ANY($1) AND status <> 'COMMITTED'`,
+		ids, txHash, fmt.Sprintf("action rejected: reason %d", reason), reason)
+	if err != nil {
+		return fmt.Errorf("mark rejected: %w", err)
+	}
+	return nil
+}
+
 // Status возвращает текущий статус по event_id (для тестов / debugging).
 func (r *Repository) Status(ctx context.Context, eventID uuid.UUID) (string, error) {
 	var s string
@@ -161,12 +187,15 @@ const reconcileBatchLimit = 1000
 
 // ListReconcilable возвращает stuck rows (SENT/FAILED с tx_hash), не обновлявшиеся
 // дольше minAge. minAge отсекает in-flight события, которые flusher ещё дожимает
-// своим WaitReceipt — их трогать рано. Используется фоновым reconcile-loop'ом (N1).
+// своим WaitReceipt — их трогать рано. Строки с reject_reason исключены: контракт
+// отклонил действие терминально, и без фильтра reconcile-loop перечитывал бы их
+// каждый интервал. Используется фоновым reconcile-loop'ом (N1).
 func (r *Repository) ListReconcilable(ctx context.Context, minAge time.Duration) ([]ReconcileRow, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT event_id, tx_hash FROM public.onchain_events
+		`SELECT event_id, aggregate_type, tx_hash FROM public.onchain_events
 		 WHERE status IN ('SENT','FAILED')
 		   AND tx_hash IS NOT NULL AND tx_hash <> ''
+		   AND reject_reason IS NULL
 		   AND updated_at < now() - make_interval(secs => $1)
 		 ORDER BY updated_at ASC
 		 LIMIT $2`,
@@ -179,7 +208,7 @@ func (r *Repository) ListReconcilable(ctx context.Context, minAge time.Duration)
 	var out []ReconcileRow
 	for rows.Next() {
 		var row ReconcileRow
-		if err := rows.Scan(&row.EventID, &row.TxHash); err != nil {
+		if err := rows.Scan(&row.EventID, &row.AggregateType, &row.TxHash); err != nil {
 			return nil, fmt.Errorf("scan reconcilable row: %w", err)
 		}
 		out = append(out, row)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 )
 
 type fakeCaller struct {
@@ -19,6 +20,10 @@ type fakeCaller struct {
 func (f *fakeCaller) CallContract(_ context.Context, msg ethereum.CallMsg, _ *big.Int) ([]byte, error) {
 	f.call = msg
 	return f.out, f.err
+}
+
+func (f *fakeCaller) FilterLogs(_ context.Context, _ ethereum.FilterQuery) ([]types.Log, error) {
+	return nil, nil
 }
 
 func newTestRegistry(t *testing.T, eth contractCaller) *Registry {
