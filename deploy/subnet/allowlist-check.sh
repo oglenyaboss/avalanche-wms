@@ -21,14 +21,14 @@
 # Переменные окружения:
 #   RPC_URL   — RPC цепи; если задан, используется как есть (детект пропускается)
 #   NODE_URI  — API узла для детекта (default http://127.0.0.1:9650)
-#   SUBNET_ID — сабнет, чью цепь искать при детекте
+#   SUBNET_ID — сабнет, чью цепь искать при детекте (default — track-subnets из node-config.json)
 #   EWOQ_KEY  — приватник админа allow-list (default ewoq, он же админ в genesis)
 set -euo pipefail
 
 RPC_URL="${RPC_URL:-}"
 NODE_URI="${NODE_URI:-http://127.0.0.1:9650}"
 NODE_URI="${NODE_URI%/}"
-SUBNET_ID="${SUBNET_ID:-2W9boARgCWL25z6pMFNtkCfNA5v28VGg9PmBgUJfuKndEdhrvw}"
+SUBNET_ID="${SUBNET_ID:-$(jq -r '."track-subnets"' "$(dirname "$0")/node-config.json")}"
 EWOQ="${EWOQ_KEY:-0x56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027}" # ewoq, genesis alloc
 TX_ALLOW_LIST=0x0200000000000000000000000000000000000002
 DEPLOYER_ALLOW_LIST=0x0200000000000000000000000000000000000000
