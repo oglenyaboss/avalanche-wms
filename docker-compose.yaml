@@ -18,6 +18,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env or environment}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      WEBAUTHN_RP_ORIGINS: ${WEBAUTHN_RP_ORIGINS:-http://localhost:5173}
     ports:
       - "8081:8080"
     depends_on:
