@@ -29,10 +29,13 @@ services:
     user: "0:0"
     # chain-id обязателен для eth1-режима; на sign-API не влияет (digest
     # подписывается как есть), нужен только встроенному JSON-RPC proxy.
+    # host-allowlist по умолчанию localhost,127.0.0.1: запрос с Host: web3signer
+    # из сети compose получает 403.
     command:
       [
         "--key-store-path=/data/keys",
         "--http-listen-host=0.0.0.0",
+        "--http-host-allowlist=web3signer,localhost,127.0.0.1",
         "--http-listen-port=9000",
         "eth1",
         "--chain-id=99999",
