@@ -20,7 +20,7 @@ host-side `avalanche-cli` и без proxy-хаков.
 |---|---|---|
 | `subnet-node1` | long-running | «Сырой» `avalanchego:v1.14.0` (build `subnet-node/Dockerfile` = базовый образ + запиненный плагин subnet-evm v0.8.0 под нужную архитектуру — **нативно arm64 / amd64, без QEMU**). Отдаёт цепочку на `/ext/bc/<blockchainID>/rpc`. Стартует, уже трекая детерминированный subnetID (`--track-subnets`), поэтому новая цепочка подхватывается **на лету, без рестарта**. |
 | `subnet-init` | one-shot | Bootstrap через Go wallet SDK (`subnet-init/main.go`): `CreateSubnet → AddSubnetValidator → CreateChain` ключом ewoq (локальная подпись), идемпотентно. Пишет динамический RPC URL в `/shared/rpc_url.txt`. |
-| `contract-deploy` | one-shot | `forge create BatchMappingWMS` ключом ewoq на RPC сабнета (берёт его из `/shared/rpc_url.txt`). Сохраняет RPC URL + адрес + deployer-key в том `shared_state`. Идемпотентно (пропускает, если живой контракт уже записан). |
+| `contract-deploy` | one-shot | `forge create` ключом ewoq на RPC сабнета (берёт его из `/shared/rpc_url.txt`): сначала `ConsortiumRegistry`, затем `BatchMappingWMS`. Сохраняет RPC URL, адреса (`registry_addr.txt`, `contract_addr.txt`) и deployer-key в том `shared_state`. Идемпотентно по каждому контракту (пропускает, если живой контракт уже записан). |
 
 `ledger-adapter` читает `RPC_URL_FILE` / `CONTRACT_ADDR_FILE` / `PRIVATE_KEY_FILE` из
 `shared_state` — миграция его **не меняет**.
@@ -46,8 +46,10 @@ docker compose --profile test down -v
 Канонический ключ локальной сети, префандженый на P/X и на EVM-цепочке сабнета:
 
 - EVM-адрес: `0x8db97C7cEcE249c2b98bDC0226Cc4C2A57BF52FC`
-- `BatchMappingWMS` детерминированно деплоится в `0x52C84043CD9c865236f11d9Fc9F56aa003c1f922`
-  (CREATE с nonce 0 у ewoq) на каждой свежей цепочке.
+- `ConsortiumRegistry` детерминированно деплоится в `0x52C84043CD9c865236f11d9Fc9F56aa003c1f922`
+  (CREATE с nonce 0 у ewoq) на каждой свежей цепочке; владелец реестра — ewoq.
+- `BatchMappingWMS` детерминированно деплоится в `0x17aB05351fC94a1a67Bf3f56DdbB941aE6c63E25`
+  (CREATE с nonce 1 у ewoq) на каждой свежей цепочке.
 
 ## Allow-list отправителей транзакций и деплоеров
 
@@ -72,8 +74,9 @@ contract-deployer-allow-list — `0x0200000000000000000000000000000000000000`.
 Интерфейс обоих одинаков: `readAllowList(address) returns (uint256)`, `setAdmin(address)`,
 `setEnabled(address)`, `setNone(address)`.
 
-**Кто есть кто.** ewoq — админ обоих списков; он же ключ деплоя контрактов (one-shot
-`contract-deploy`, `forge create BatchMappingWMS`) и ключ отправки адаптера
+**Кто есть кто.** ewoq — админ обоих списков; он же владелец консорциума в `ConsortiumRegistry`
+и ключ деплоя контрактов (one-shot `contract-deploy`, `forge create ConsortiumRegistry` и
+`forge create BatchMappingWMS`) и ключ отправки адаптера
 (`shared_state:/deployer_key.txt`). Ротация ключа адаптера (issue #7) — это добавление
 нового адреса в tx-список транзакцией админа (процедура ниже); genesis при этом не
 трогается.
