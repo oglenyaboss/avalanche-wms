@@ -37,6 +37,10 @@ type Config struct {
 	JWTSecret        string
 	JWTAccessTTL     time.Duration
 	JWTRefreshTTL    time.Duration
+
+	WebAuthnRPID      string
+	WebAuthnRPName    string
+	WebAuthnRPOrigins []string
 }
 
 func Load() (*Config, error) {
@@ -58,6 +62,10 @@ func Load() (*Config, error) {
 		JWTSecret:        jwtSecret,
 		JWTAccessTTL:     getDurationEnv("JWT_ACCESS_TTL", 15*time.Minute),
 		JWTRefreshTTL:    getDurationEnv("JWT_REFRESH_TTL", 7*24*time.Hour),
+
+		WebAuthnRPID:      getEnv("WEBAUTHN_RP_ID", "localhost"),
+		WebAuthnRPName:    getEnv("WEBAUTHN_RP_NAME", "Avalanche WMS"),
+		WebAuthnRPOrigins: getListEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:5173"),
 	}, nil
 }
 
@@ -83,6 +91,17 @@ func getIntEnv(key string, fallback int) int {
 	}
 
 	return parsed
+}
+
+// getListEnv splits a comma-separated environment variable, trimming blanks.
+func getListEnv(key, fallback string) []string {
+	var out []string
+	for _, item := range strings.Split(getEnv(key, fallback), ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // getDurationEnv retrieves a duration from the environment variable specified by key.

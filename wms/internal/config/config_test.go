@@ -53,3 +53,49 @@ func TestLoadParsesJWTConfig(t *testing.T) {
 		t.Fatalf("unexpected JWTRefreshTTL: %s", cfg.JWTRefreshTTL)
 	}
 }
+
+func TestLoadWebAuthnDefaults(t *testing.T) {
+	t.Setenv("JWT_SECRET", strings.Repeat("a", minJWTSecretLength))
+	t.Setenv("WEBAUTHN_RP_ID", "")
+	t.Setenv("WEBAUTHN_RP_NAME", "")
+	t.Setenv("WEBAUTHN_RP_ORIGINS", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.WebAuthnRPID != "localhost" {
+		t.Fatalf("unexpected WebAuthnRPID: %q", cfg.WebAuthnRPID)
+	}
+	if cfg.WebAuthnRPName != "Avalanche WMS" {
+		t.Fatalf("unexpected WebAuthnRPName: %q", cfg.WebAuthnRPName)
+	}
+	if len(cfg.WebAuthnRPOrigins) != 1 || cfg.WebAuthnRPOrigins[0] != "http://localhost:5173" {
+		t.Fatalf("unexpected WebAuthnRPOrigins: %v", cfg.WebAuthnRPOrigins)
+	}
+}
+
+func TestLoadParsesWebAuthnOrigins(t *testing.T) {
+	t.Setenv("JWT_SECRET", strings.Repeat("a", minJWTSecretLength))
+	t.Setenv("WEBAUTHN_RP_ID", "wms.example.com")
+	t.Setenv("WEBAUTHN_RP_ORIGINS", " https://wms.example.com , ,https://admin.example.com ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.WebAuthnRPID != "wms.example.com" {
+		t.Fatalf("unexpected WebAuthnRPID: %q", cfg.WebAuthnRPID)
+	}
+	want := []string{"https://wms.example.com", "https://admin.example.com"}
+	if len(cfg.WebAuthnRPOrigins) != len(want) {
+		t.Fatalf("unexpected WebAuthnRPOrigins: %v", cfg.WebAuthnRPOrigins)
+	}
+	for i := range want {
+		if cfg.WebAuthnRPOrigins[i] != want[i] {
+			t.Fatalf("WebAuthnRPOrigins[%d] = %q, want %q", i, cfg.WebAuthnRPOrigins[i], want[i])
+		}
+	}
+}
