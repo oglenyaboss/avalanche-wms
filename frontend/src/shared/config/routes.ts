@@ -8,5 +8,7 @@ export const routes = {
   shipping: '/shipping',
   analytics: '/analytics',
   trace: '/trace',
+  myKey: '/passkey',
+  orgKeys: '/organization/keys',
   notFound: '*',
 } as const
