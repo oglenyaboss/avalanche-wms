@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"golang.org/x/sync/errgroup"
 
@@ -48,6 +49,7 @@ func run(log *slog.Logger) error {
 		"kafka_brokers", cfg.KafkaBrokers,
 		"topic", eventsTopic,
 		"contract_addr", cfg.ContractAddr,
+		"registry_addr", cfg.RegistryAddr,
 		"batch_size", cfg.BatchSize,
 		"batch_timeout", cfg.BatchTimeout,
 		"pipeline_window", cfg.PipelineWindow,
@@ -120,7 +122,23 @@ func run(log *slog.Logger) error {
 		return reconciler.Run(gCtx)
 	})
 
-	srv := startHealthServer(log, cfg.Port, clients[0])
+	// Интерфейсная переменная: при незаданном REGISTRY_ADDR реестр остаётся nil-интерфейсом
+	// (typed-nil указатель внутри интерфейса не равен nil и обошёл бы проверку в handler).
+	var registry handler.RegistryReader
+	if cfg.RegistryAddr != "" {
+		ec, err := ethclient.Dial(cfg.RpcURL)
+		if err != nil {
+			return fmt.Errorf("registry dial: %w", err)
+		}
+		defer ec.Close()
+		reg, err := chain.NewRegistry(ec, common.HexToAddress(cfg.RegistryAddr))
+		if err != nil {
+			return fmt.Errorf("registry: %w", err)
+		}
+		registry = reg
+	}
+
+	srv := startHealthServer(log, cfg.Port, clients[0], registry)
 
 	runErr := g.Wait()
 	log.Info("consumer stopped, shutting down http")
@@ -189,9 +207,9 @@ func assertSignersFunded(ctx context.Context, rpcURL string, clients []*chain.Cl
 	return nil
 }
 
-func startHealthServer(log *slog.Logger, port string, chainReader handler.ChainReader) *http.Server {
+func startHealthServer(log *slog.Logger, port string, chainReader handler.ChainReader, registry handler.RegistryReader) *http.Server {
 	mux := http.NewServeMux()
-	handler.New(chainReader).RegisterRoutes(mux)
+	handler.New(chainReader, registry).RegisterRoutes(mux)
 
 	srv := &http.Server{
 		Addr:              ":" + port,

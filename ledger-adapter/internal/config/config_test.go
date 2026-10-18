@@ -387,3 +387,46 @@ func TestLoad_KMSModeDuplicateKeys(t *testing.T) {
 		t.Fatalf("want duplicate error, got %v", err)
 	}
 }
+
+func TestLoad_RegistryAddr(t *testing.T) {
+	const addr = "0x00000000000000000000000000000000000000aa"
+	cases := []struct {
+		name    string
+		env     string
+		file    string
+		want    string
+		wantErr string
+	}{
+		{name: "не задан", want: ""},
+		{name: "из env", env: addr, want: addr},
+		{name: "из файла", file: addr + "\n", want: addr},
+		{name: "невалидный адрес", env: "0xnothex", wantErr: "REGISTRY_ADDR: invalid address"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("REGISTRY_ADDR", tc.env)
+			t.Setenv("REGISTRY_ADDR_FILE", "")
+			if tc.file != "" {
+				path := filepath.Join(t.TempDir(), "registry_addr.txt")
+				if err := os.WriteFile(path, []byte(tc.file), 0o600); err != nil {
+					t.Fatalf("setup: %v", err)
+				}
+				t.Setenv("REGISTRY_ADDR_FILE", path)
+			}
+			cfg, err := Load()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.RegistryAddr != tc.want {
+				t.Errorf("RegistryAddr = %q, want %q", cfg.RegistryAddr, tc.want)
+			}
+		})
+	}
+}

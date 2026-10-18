@@ -11,6 +11,9 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/google/uuid"
+
+	"ledger-adapter/internal/chain"
 )
 
 // ChainReader is the minimal chain surface the proof endpoint needs.
@@ -21,19 +24,30 @@ type ChainReader interface {
 	BlockNumber(ctx context.Context) (uint64, error)
 }
 
-// Handler holds HTTP handler state: /health (liveness) + /onchain/tx (proof).
-type Handler struct {
-	chain ChainReader
+// RegistryReader is the ConsortiumRegistry read surface for /registry/keys.
+// *chain.Registry satisfies it.
+type RegistryReader interface {
+	GetKey(ctx context.Context, keyID [32]byte) (chain.RegistryKey, error)
 }
 
-// New creates a Handler. chain may be nil if the process runs without a chain
-// client (then /onchain/tx returns 502); /health never depends on it.
-func New(chain ChainReader) *Handler { return &Handler{chain: chain} }
+// Handler holds HTTP handler state: /health (liveness), /onchain/tx (proof)
+// and /registry/keys (key status).
+type Handler struct {
+	chain    ChainReader
+	registry RegistryReader
+}
 
-// RegisterRoutes wires /health (liveness) and the on-demand receipt proof.
+// New creates a Handler. chain or registry may be nil if the process runs without
+// them (then the corresponding endpoints return 502); /health never depends on them.
+func New(chain ChainReader, registry RegistryReader) *Handler {
+	return &Handler{chain: chain, registry: registry}
+}
+
+// RegisterRoutes wires /health (liveness), the on-demand receipt proof and the registry key status.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", h.Health)
 	mux.HandleFunc("GET /onchain/tx/{hash}", h.TxProof)
+	mux.HandleFunc("GET /registry/keys/{keyId}", h.RegistryKey)
 }
 
 // Health отвечает 200 если процесс жив.
@@ -49,7 +63,10 @@ func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-var txHashRe = regexp.MustCompile(`^0x[0-9a-fA-F]{64}$`)
+var (
+	txHashRe = regexp.MustCompile(`^0x[0-9a-fA-F]{64}$`)
+	keyIDRe  = regexp.MustCompile(`^0x[0-9a-fA-F]{64}$`)
+)
 
 type txProofResponse struct {
 	Found         bool   `json:"found"`
@@ -105,6 +122,51 @@ func (h *Handler) TxProof(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type registryKeyResponse struct {
+	Found  bool   `json:"found"`
+	OrgID  string `json:"org_id"`
+	Role   string `json:"role"`
+	Active bool   `json:"active"`
+}
+
+// RegistryKey читает статус ключа в ConsortiumRegistry (один eth_call, без polling).
+//
+// SECURITY: как и TxProof, эндпоинт UNAUTHENTICATED — допустим только во внутренней
+// docker-сети адаптера; не публиковать наружу без shared-secret проверки.
+func (h *Handler) RegistryKey(w http.ResponseWriter, r *http.Request) {
+	raw := r.PathValue("keyId")
+	if !keyIDRe.MatchString(raw) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_KEY_ID"})
+		return
+	}
+	if h.registry == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+	defer cancel()
+
+	key, err := h.registry.GetKey(ctx, [32]byte(common.HexToHash(raw)))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
+		return
+	}
+	if key.Role == 0 {
+		writeJSON(w, http.StatusOK, map[string]bool{"found": false})
+		return
+	}
+	role := "operator"
+	if key.Role == 1 {
+		role = "admin"
+	}
+	writeJSON(w, http.StatusOK, registryKeyResponse{
+		Found:  true,
+		OrgID:  uuid.UUID(key.OrgID).String(),
+		Role:   role,
+		Active: key.Active,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
