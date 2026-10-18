@@ -221,11 +221,6 @@ cd ledger-adapter/contracts && forge test   # тесты смарт-контра
 | [Performance Journey](docs/load-testing/performance-journey.html) | Интерактивный рассказ о пути оптимизации |
 | [N9 flaky root-cause](docs/load-testing/n9-flaky-rootcause-analysis.md) | Разбор нестабильного e2e-теста |
 
-### Исследование предметной области
-| Документ | О чём |
-|----------|-------|
-| [Blockchain в WMS — обзор](docs/blockchain-wms-research/index.html) | Академический и рыночный обзор (теоретическая база) |
-
 ### Деплой
 | Документ | О чём |
 |----------|-------|
