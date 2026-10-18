@@ -11,7 +11,7 @@
   "staking-tls-key-file": "/staking/staker.key",
   "staking-signer-key-file": "/staking/signer.key",
   "plugin-dir": "/plugins",
-  "track-subnets": "2W9boARgCWL25z6pMFNtkCfNA5v28VGg9PmBgUJfuKndEdhrvw",
+  "track-subnets": "2KDqupa9sn3XwASxi5xU6y4EiAVytb3ovUBkGuKWNm2zrgjCiL",
   "data-dir": "/data",
   "log-level": "info"
 }
