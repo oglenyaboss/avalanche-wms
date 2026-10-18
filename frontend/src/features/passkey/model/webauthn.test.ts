@@ -5,9 +5,11 @@ import {
   bufferToBase64url,
   credentialToJSON,
   toCreationOptions,
+  toRequestOptions,
   webauthnErrorText,
   type CreationOptionsJSON,
 } from './webauthn'
+import type { KeyActionDraft } from './types'
 
 describe('base64url', () => {
   it('round-trips byte arrays of length 0..5 without padding', () => {
@@ -48,6 +50,29 @@ describe('toCreationOptions', () => {
     expect(options.authenticatorSelection).toEqual({ userVerification: 'required' })
     expect(options.rp).toEqual({ name: 'WMS' })
     expect(options.user.name).toBe('alice')
+  })
+})
+
+describe('toRequestOptions', () => {
+  it('decodes challenge and credential ids, copies rpId, userVerification and timeout', () => {
+    const draft: KeyActionDraft = {
+      actionId: '01929c5e-6f00-7000-8000-000000001001',
+      actionType: 5,
+      challenge: '-_8',
+      rpId: 'localhost',
+      allowCredentials: [{ type: 'public-key', id: 'AQID' }],
+      userVerification: 'required',
+      timeout: 60000,
+    }
+    const options = toRequestOptions(draft)
+    expect(new Uint8Array(options.challenge as ArrayBuffer)).toEqual(Uint8Array.from([0xfb, 0xff]))
+    expect(options.rpId).toBe('localhost')
+    expect(options.allowCredentials).toHaveLength(1)
+    expect(new Uint8Array(options.allowCredentials?.[0].id as ArrayBuffer)).toEqual(
+      Uint8Array.from([1, 2, 3])
+    )
+    expect(options.userVerification).toBe('required')
+    expect(options.timeout).toBe(60000)
   })
 })
 

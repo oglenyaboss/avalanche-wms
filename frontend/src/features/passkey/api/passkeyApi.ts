@@ -1,6 +1,16 @@
 import { apiClient } from '@/shared/api'
 
-import type { AdminKeyExport, OrgKeys, Passkey, PasskeyRole, PasskeyStatus } from '../model/types'
+import type {
+  AdminKeyExport,
+  AssertionJSON,
+  ConfirmationState,
+  KeyActionDraft,
+  KeyConfirmation,
+  OrgKeys,
+  Passkey,
+  PasskeyRole,
+  PasskeyStatus,
+} from '../model/types'
 import type { CreationOptionsJSON, RegistrationResponseJSON } from '../model/webauthn'
 
 interface ApiEnvelope<T> {
@@ -26,7 +36,24 @@ interface OrgKeysResponse {
     username: string
     role: PasskeyRole
     passkey: PasskeyResponse | null
+    confirmation: KeyConfirmationResponse | null
   }[]
+}
+
+interface KeyConfirmationResponse {
+  action_id: string
+  state: ConfirmationState
+  reject_reason: number | null
+}
+
+interface KeyActionDraftResponse {
+  action_id: string
+  action_type: number
+  challenge: string
+  rp_id: string
+  allow_credentials: { type: 'public-key'; id: string }[]
+  user_verification: 'required'
+  timeout: number
 }
 
 function unwrap<T>(envelope: ApiEnvelope<T>): T {
@@ -48,6 +75,14 @@ export function mapPasskey(p: PasskeyResponse): Passkey {
   }
 }
 
+export function mapKeyConfirmation(c: KeyConfirmationResponse): KeyConfirmation {
+  return {
+    actionId: c.action_id,
+    state: c.state,
+    rejectReason: c.reject_reason,
+  }
+}
+
 export function mapOrgKeys(r: OrgKeysResponse): OrgKeys {
   return {
     organization: { orgId: r.organization.org_id, name: r.organization.name },
@@ -56,6 +91,7 @@ export function mapOrgKeys(r: OrgKeysResponse): OrgKeys {
       username: m.username,
       role: m.role,
       passkey: m.passkey ? mapPasskey(m.passkey) : null,
+      confirmation: m.confirmation ? mapKeyConfirmation(m.confirmation) : null,
     })),
   }
 }
@@ -84,9 +120,45 @@ export async function getMyPasskey(): Promise<Passkey | null> {
   return data.data ? mapPasskey(data.data) : null
 }
 
+export function mapKeyActionDraft(d: KeyActionDraftResponse): KeyActionDraft {
+  return {
+    actionId: d.action_id,
+    actionType: d.action_type,
+    challenge: d.challenge,
+    rpId: d.rp_id,
+    allowCredentials: d.allow_credentials,
+    userVerification: d.user_verification,
+    timeout: d.timeout,
+  }
+}
+
 export async function getOrganizationKeys(): Promise<OrgKeys> {
   const { data } = await apiClient.get<ApiEnvelope<OrgKeysResponse>>('/passkeys/organization')
   return mapOrgKeys(unwrap(data))
+}
+
+export async function draftKeyConfirmation(targetKeyId: string): Promise<KeyActionDraft> {
+  const { data } = await apiClient.post<ApiEnvelope<KeyActionDraftResponse>>(
+    '/passkeys/actions/key-register/draft',
+    { target_key_id: targetKeyId }
+  )
+  return mapKeyActionDraft(unwrap(data))
+}
+
+export async function submitKeyConfirmation(
+  actionId: string,
+  assertion: AssertionJSON
+): Promise<KeyConfirmation> {
+  const { data } = await apiClient.post<ApiEnvelope<KeyConfirmationResponse>>(
+    `/passkeys/actions/${actionId}/submit`,
+    {
+      credential_id: assertion.credentialId,
+      authenticator_data: assertion.authenticatorData,
+      client_data_json: assertion.clientDataJson,
+      signature: assertion.signature,
+    }
+  )
+  return mapKeyConfirmation(unwrap(data))
 }
 
 export async function getAdminKeyExport(): Promise<AdminKeyExport> {
