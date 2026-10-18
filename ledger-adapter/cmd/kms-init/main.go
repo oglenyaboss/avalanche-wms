@@ -200,7 +200,8 @@ func reloadKeys(ctx context.Context, kmsURL string) error {
 		return fmt.Errorf("kms reload: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	// 202: Web3Signer 26.x перезагружает ключи в фоне — их появление ждёт pollPublicKeys.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("kms reload: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
