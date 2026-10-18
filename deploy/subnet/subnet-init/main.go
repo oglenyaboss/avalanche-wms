@@ -36,9 +36,10 @@ const (
 	wantChainIDHex = "0x1869f" // 99999, из chain-genesis.json
 	healthTimeout  = 180 * time.Second
 	chainTimeout   = 120 * time.Second
-	// End валидатора сабнета должен быть <= End валидатора primary-сети (2027-06-02 в
-	// закоммиченном network-genesis.json). Буфер 1 час ниже него.
-	validatorEnd = uint64(1811958568 - 3600)
+	// End валидатора сабнета должен быть <= End валидатора primary-сети: startTime +
+	// initialStakeDuration в network-genesis.json = 2036-05-30. Буфер 1 час ниже него.
+	// Срок стейка больше года требует max-stake-duration в node-config.json.
+	validatorEnd = uint64(2095782568 - 3600)
 )
 
 func main() {
