@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	ethcommon "github.com/ethereum/go-ethereum/common"
 )
 
 // Config holds the application configuration.
@@ -16,6 +18,7 @@ type Config struct {
 	DbURL              string
 	RpcURL             string
 	ContractAddr       string
+	RegistryAddr       string
 	PrivateKey         string
 	BatchSize          int
 	BatchTimeout       time.Duration
@@ -101,6 +104,16 @@ func Load() (*Config, error) {
 		}
 		*r.field = v
 	}
+
+	// REGISTRY_ADDR необязателен: без него /registry/keys отвечает 502.
+	regAddr, err := getOptional("REGISTRY_ADDR")
+	if err != nil {
+		return nil, err
+	}
+	if regAddr != "" && !ethcommon.IsHexAddress(regAddr) {
+		return nil, fmt.Errorf("REGISTRY_ADDR: invalid address")
+	}
+	c.RegistryAddr = regAddr
 
 	switch c.SignerMode {
 	case "kms":
@@ -188,11 +201,23 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// getRequired сначала читает <NAME>_FILE, потом <NAME>. Пустая строка = missing.
+// getRequired — getOptional, но пустое значение = ошибка.
+func getRequired(name string) (string, error) {
+	v, err := getOptional(name)
+	if err != nil {
+		return "", err
+	}
+	if v == "" {
+		return "", fmt.Errorf("missing required env: %s", name)
+	}
+	return v, nil
+}
+
+// getOptional сначала читает <NAME>_FILE, потом <NAME>. Пустая строка = не задано.
 // Ошибка чтения существующего файла — fatal (явная мисконфигурация).
 // Если <NAME>_FILE задан, но файл не найден — логируем warning в stderr
 // (опечатка в пути молча бы привела к использованию env-var с другим значением).
-func getRequired(name string) (string, error) {
+func getOptional(name string) (string, error) {
 	if path := os.Getenv(name + "_FILE"); path != "" {
 		b, err := os.ReadFile(path)
 		if err == nil {
@@ -203,11 +228,7 @@ func getRequired(name string) (string, error) {
 		}
 		fmt.Fprintf(os.Stderr, "config: %s_FILE=%q not found, falling back to %s env var\n", name, path, name)
 	}
-	v := os.Getenv(name)
-	if v == "" {
-		return "", fmt.Errorf("missing required env: %s", name)
-	}
-	return v, nil
+	return os.Getenv(name), nil
 }
 
 func getDefault(name, def string) string {

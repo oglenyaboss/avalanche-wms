@@ -305,6 +305,7 @@ PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  
 | `DB_URL` | да | — | `string` | pgx DSN. Override: `DB_URL_FILE` |
 | `RPC_URL` | да | — | `string` | RPC Avalanche Subnet-EVM. Override: `RPC_URL_FILE` |
 | `CONTRACT_ADDR` | да | — | `string` | hex-адрес `BatchMappingWMS`. Override: `CONTRACT_ADDR_FILE` |
+| `REGISTRY_ADDR` | нет | — | `string` | hex-адрес `ConsortiumRegistry`; без него `GET /registry/keys/{keyId}` отвечает 502. Override: `REGISTRY_ADDR_FILE` |
 | `PRIVATE_KEY` | да (static) | — | `string` | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE`. В kms-режиме не читается |
 | `SIGNER_MODE` | нет | `static` | `string` | `static` \| `kms`: источник подписи — локальные ключи (только локальная разработка: приватник в env открытым текстом) или внешний Web3Signer |
 | `KMS_URL` | да (kms) | — | `string` | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
