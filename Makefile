@@ -1,6 +1,6 @@
 .PHONY: help up down build logs lint test tidy vendor init migrate seed e2e-test-outbound \
         stress stress-logs stress-smoke stress-health stress-auth stress-receiving stress-full \
-        kms-up kms-down kms-logs
+        kms-up kms-down kms-logs registry-cli
 
 COMPOSE := docker compose
 COMPOSE_KMS := docker compose -f docker-compose.yaml -f docker-compose.kms.yaml
@@ -130,6 +130,9 @@ kms-down: ## Stop the KMS stack (keys volume survives)
 
 kms-logs: ## Tail ledger-adapter + web3signer logs
 	$(COMPOSE_KMS) logs -f ledger-adapter web3signer
+
+registry-cli: ## CLI владельца консорциума: make registry-cli ARGS="list"
+	docker compose run --rm --no-deps --entrypoint /registry-cli -e OWNER_KEY_FILE=/shared/deployer_key.txt -v "$(CURDIR):/work:ro" -w /work ledger-adapter $(ARGS)
 
 stress-smoke: ## Smoke test (1 VU, local k6 required)
 	k6 run tests/stress/01-smoke.js
