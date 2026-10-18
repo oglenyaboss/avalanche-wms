@@ -18,7 +18,7 @@
 | CDC | Debezium (outbox → Kafka) |
 | Очереди | Apache Kafka (рабочий топик `wms.events.v1` + DLQ `wms.dlq.v1`; 4 per-aggregate топика — legacy/rollback) |
 | Мост в блокчейн | Ledger Adapter (Go) |
-| Блокчейн | Avalanche Subnet-EVM (локально, dev; кастомный сабнет chainID 99999); permissioned Allow Lists ещё не реализованы |
+| Блокчейн | Avalanche Subnet-EVM (локально, dev; кастомный сабнет chainID 99999); permissioned Allow Lists включены ([deploy/subnet/README.md](../deploy/subnet/README.md), раздел Allow-list) |
 | Контракт | BatchMappingWMS (Solidity, batch-операции) |
 
 ### Архитектурная схема (упрощённая)
