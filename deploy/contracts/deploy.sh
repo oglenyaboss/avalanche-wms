@@ -79,7 +79,7 @@ else
     --private-key "$EWOQ_KEY" \
     --broadcast \
     --json)
-  REG=$(echo "$OUT" | jq -r '.deployedTo')
+  REG=$(echo "$OUT" | sed -n '/^{$/,/^}$/p' | jq -r '.deployedTo')
 
   echo "==> Sanity: owner() must be ewoq ($EWOQ_ADDR)"
   OWNER=$(cast call "$REG" "owner()(address)" --rpc-url "$RPC_URL")
@@ -106,8 +106,8 @@ OUT=$(forge create BatchMappingWMS \
   --broadcast \
   --json)
 
-ADDR=$(echo "$OUT" | jq -r '.deployedTo')
-TX=$(echo   "$OUT" | jq -r '.transactionHash')
+ADDR=$(echo "$OUT" | sed -n '/^{$/,/^}$/p' | jq -r '.deployedTo')
+TX=$(echo   "$OUT" | sed -n '/^{$/,/^}$/p' | jq -r '.transactionHash')
 
 echo "==> Sanity: itemStatus(0) must be 0 (None)"
 STATUS=$(cast call "$ADDR" "itemStatus(uint256)(uint8)" 0 --rpc-url "$RPC_URL")
