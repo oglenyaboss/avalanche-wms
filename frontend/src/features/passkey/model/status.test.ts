@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { passkeyStatusLabel, shortKeyId } from './status'
+import { passkeyStatusLabel, pendingKeyHint, shortKeyId } from './status'
 
 describe('passkeyStatusLabel', () => {
   it('returns Russian labels for every status', () => {
@@ -8,6 +8,13 @@ describe('passkeyStatusLabel', () => {
     expect(passkeyStatusLabel('ACTIVE')).toBe('Активен в цепи')
     expect(passkeyStatusLabel('REJECTED')).toBe('Отклонён')
     expect(passkeyStatusLabel('REVOKED')).toBe('Отозван')
+  })
+})
+
+describe('pendingKeyHint', () => {
+  it('names who activates the key for each role', () => {
+    expect(pendingKeyHint('ADMIN')).toBe('Ключ станет активным, когда владелец консорциума зарегистрирует его в реестре.')
+    expect(pendingKeyHint('OPERATOR')).toBe('Ключ станет активным, когда его подтвердит админ организации.')
   })
 })
 

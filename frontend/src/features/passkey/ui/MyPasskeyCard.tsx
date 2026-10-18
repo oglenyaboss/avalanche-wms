@@ -2,7 +2,7 @@ import { Alert, AlertDescription, Button, Card, CardContent, CardHeader, CardTit
 import { formatDateTime } from '@/shared/lib'
 
 import { passkeyErrorText } from '../model/errors'
-import { shortKeyId } from '../model/status'
+import { shortKeyId, pendingKeyHint } from '../model/status'
 import { useMyPasskey, useRegisterPasskey } from '../model/usePasskey'
 import { PasskeyStatusBadge } from './PasskeyStatusBadge'
 
@@ -26,18 +26,23 @@ export function MyPasskeyCard() {
             <AlertDescription>{passkeyErrorText(error)}</AlertDescription>
           </Alert>
         ) : passkey ? (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
-            <dt className="text-muted-foreground">Статус</dt>
-            <dd>
-              <PasskeyStatusBadge status={passkey.status} />
-            </dd>
-            <dt className="text-muted-foreground">Key ID</dt>
-            <dd className="font-mono" title={passkey.keyId}>
-              {shortKeyId(passkey.keyId)}
-            </dd>
-            <dt className="text-muted-foreground">Создан</dt>
-            <dd>{formatDateTime(passkey.createdAt)}</dd>
-          </dl>
+          <>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
+              <dt className="text-muted-foreground">Статус</dt>
+              <dd>
+                <PasskeyStatusBadge status={passkey.status} />
+              </dd>
+              <dt className="text-muted-foreground">Key ID</dt>
+              <dd className="font-mono" title={passkey.keyId}>
+                {shortKeyId(passkey.keyId)}
+              </dd>
+              <dt className="text-muted-foreground">Создан</dt>
+              <dd>{formatDateTime(passkey.createdAt)}</dd>
+            </dl>
+            {passkey.status === 'PENDING' && (
+              <p className="text-sm text-muted-foreground">{pendingKeyHint(passkey.role)}</p>
+            )}
+          </>
         ) : (
           <p className="text-sm text-muted-foreground">Ключа пока нет.</p>
         )}
