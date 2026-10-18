@@ -305,7 +305,10 @@ PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  
 | `DB_URL` | да | — | `string` | pgx DSN. Override: `DB_URL_FILE` |
 | `RPC_URL` | да | — | `string` | RPC Avalanche Subnet-EVM. Override: `RPC_URL_FILE` |
 | `CONTRACT_ADDR` | да | — | `string` | hex-адрес `BatchMappingWMS`. Override: `CONTRACT_ADDR_FILE` |
-| `PRIVATE_KEY` | да | — | `string` | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE` |
+| `PRIVATE_KEY` | да (static) | — | `string` | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE`. В kms-режиме не читается |
+| `SIGNER_MODE` | нет | `static` | `string` | `static` \| `kms`: источник подписи — локальные ключи или внешний Web3Signer |
+| `KMS_URL` | да (kms) | — | `string` | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
+| `KMS_PUBLIC_KEYS` | да (kms) | — | `string` | CSV identifier'ов (uncompressed X\|\|Y pubkey, 0x+128 hex) из `GET /api/v1/eth1/publicKeys`; определяет и multi-signer шардирование. Override: `KMS_PUBLIC_KEYS_FILE` |
 | `PORT` | нет | `8085` | `string` | HTTP-порт `/health` |
 | `KAFKA_GROUP_ID` | нет | `ledger-adapter` | `string` | Kafka consumer group |
 | `DLQ_TOPIC` | нет | `wms.dlq.v1` | `string` | Kafka DLQ-топик |
@@ -332,7 +335,7 @@ PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  
 1. `config.Load()` — валидация env и инвариантов.
 2. `store.NewPool(ctx, cfg.DbURL)` — `pgxpool`, startup-ping (10s).
 3. `store.NewRepository(pool)`.
-4. `chain.NewClient(cfg.RpcURL, cfg.PrivateKey, cfg.ContractAddr)` — dial RPC, парсинг ключа (`0x` опционален), парсинг ABI; логирует адрес signer'а.
+4. `buildSigners(cfg)` + цикл `chain.NewClientWithSigner(...)` — один Client на signer: в static-режиме signer'ы — это `PRIVATE_KEYS` (fallback `PRIVATE_KEY`), в kms — по одному на каждый `KMS_PUBLIC_KEYS` (адрес выводится из public key, приватник адаптеру не нужен). Каждый Client логирует адрес signer'а. 
 5. `dlq.NewProducer(brokers, cfg.DLQTopic)`.
 6. `consumer.NewFlusher(cli, repo, prod, cfg.ReceiptPollTimeout, log)`.
 7. `consumer.NewReconciler(cli, repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log)`.
@@ -426,6 +429,10 @@ var ErrChainTransient = errors.New("chain transient") // retry → Batcher.Unshi
 func config.Load() (*Config, error)
 
 func chain.NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error)
+func chain.NewClientWithSigner(rpcURL, contractAddr string, s TxSigner) (*Client, error)
+type chain.TxSigner interface { Address() common.Address; SignTx(ctx, tx, chainID) (*types.Transaction, error) }
+func chain.NewStaticSigner(privateKeyHex string) (TxSigner, error)
+func kms.NewSigner(baseURL, identifier string, hc *http.Client) (*kms.Signer, error) // Web3Signer
 func (c *Client) BatchCall(ctx context.Context, aggregateType string, eventIDs, itemIDs []*big.Int) (common.Hash, error)
 func chain.WaitReceipt(ctx context.Context, fetcher ReceiptFetcher, txHash common.Hash, timeout time.Duration) (*types.Receipt, error)
 func chain.UUIDToUint256(s string) *big.Int   // keccak256([]byte(s)) → *big.Int
@@ -441,7 +448,7 @@ func dlq.NewProducer(brokers []string, topic string) *Producer
 func (p *Producer) PublishAll(ctx context.Context, msgs []*Message, reason string) error
 ```
 
-> `Client.sendMethod` держит мьютекс `sendMu` на весь nonce-критичный участок (`PendingNonceAt → SuggestGasPrice → EstimateGas → ChainID → NewTransaction → SignTx → SendTransaction`), сериализуя исходящие транзакции одного `Client`. В продакшене (один consumer-goroutine) мьютекс не контендится; защищает от будущей параллелизации. RPC-ошибки оборачиваются в `ErrChainTransient`, revert на `EstimateGas` — в `ErrChainRevert`.
+> `Client.sendMethod` держит мьютекс `sendMu` на весь nonce-критичный участок (`PendingNonceAt → SuggestGasPrice → EstimateGas → ChainID → NewTransaction → SignTx → SendTransaction`), сериализуя исходящие транзакции одного `Client`. В продакшене (один consumer-goroutine) мьютекс не контендится; защищает от будущей параллелизации. RPC-ошибки оборачиваются в `ErrChainTransient`, revert на `EstimateGas` — в `ErrChainRevert`. Подпись — через `chain.TxSigner`: static (локальный ecdsa) или `internal/kms` (Web3Signer). KMS-режим: EIP-155 sighash считается локально, Web3Signer подписывает готовый digest (`applyHash=false`), parity восстановления выводится `Ecrecover`-перебором против адреса из public key (v из ответа не доверяется), s нормализуется в low-s (EIP-2); недоступность KMS — `ErrSignerTransient` → `ErrChainTransient` (ретрай, nonce не тратится), 4xx — terminal.
 
 ---
 

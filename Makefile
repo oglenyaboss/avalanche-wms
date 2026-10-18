@@ -1,7 +1,9 @@
 .PHONY: help up down build logs lint test tidy vendor init migrate seed e2e-test-outbound \
-        stress stress-logs stress-smoke stress-health stress-auth stress-receiving stress-full
+        stress stress-logs stress-smoke stress-health stress-auth stress-receiving stress-full \
+        kms-up kms-down kms-logs
 
 COMPOSE := docker compose
+COMPOSE_KMS := docker compose -f docker-compose.yaml -f docker-compose.kms.yaml
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -111,6 +113,23 @@ stress: ## Run all stress tests 01–07 in Docker (seeds DB automatically)
 
 stress-logs: ## Tail k6 stress test output
 	$(COMPOSE) logs -f k6
+
+# ── KMS (issue #7: ключ адаптера во внешнем Web3Signer) ───
+kms-up: ## Start stack with adapter signing via external KMS (Web3Signer)
+	$(COMPOSE_KMS) --profile test up -d --build
+	@echo ""
+	@echo "KMS stack running: ledger-adapter signs via web3signer."
+	@echo "Multi-signer: KMS_SIGNER_COUNT=3 make kms-up (после изменения — форс-рекреация"
+	@echo "              адаптера: ... up -d --force-recreate ledger-adapter, env меняет kms-init)"
+	@echo "Follow logs  : make kms-logs"
+	@echo "NOTE: стеки репо монопольны (container_name глобальны) — сначала погасите"
+	@echo "      стеки других worktree-ов (make down там)."
+
+kms-down: ## Stop the KMS stack (keys volume survives)
+	$(COMPOSE_KMS) --profile test down
+
+kms-logs: ## Tail ledger-adapter + web3signer logs
+	$(COMPOSE_KMS) logs -f ledger-adapter web3signer
 
 stress-smoke: ## Smoke test (1 VU, local k6 required)
 	k6 run tests/stress/01-smoke.js

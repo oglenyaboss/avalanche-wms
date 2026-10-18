@@ -2,7 +2,6 @@ package chain
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"math/big"
@@ -13,7 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -84,8 +82,7 @@ type ethBackend interface {
 // pipeline сериализовался бы на скорости майнинга блоков (старое поведение).
 type Client struct {
 	eth          ethBackend
-	privateKey   *ecdsa.PrivateKey
-	fromAddress  common.Address
+	signer       TxSigner
 	contractAddr common.Address
 	parsedABI    abi.ABI
 	sendMu       sync.Mutex
@@ -93,25 +90,23 @@ type Client struct {
 	nonceSeeded  bool   // seed произошёл; guarded by sendMu
 }
 
-// NewClient подключается к RPC, парсит приватник и ABI.
+// NewClient подключается к RPC и подписывает локальным hex-ключом (static-режим).
+// КМС-режим использует NewClientWithSigner.
 func NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error) {
+	signer, err := NewStaticSigner(privateKeyHex)
+	if err != nil {
+		return nil, err
+	}
+	return NewClientWithSigner(rpcURL, contractAddr, signer)
+}
+
+// NewClientWithSigner подключается к RPC и подписывает через внешний TxSigner
+// (static-ключ или удалённый KMS — Client'у без разницы).
+func NewClientWithSigner(rpcURL, contractAddr string, signer TxSigner) (*Client, error) {
 	eth, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("dial rpc %q: %w", rpcURL, err)
 	}
-
-	pk, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
-	if err != nil {
-		eth.Close()
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-
-	pubECDSA, ok := pk.Public().(*ecdsa.PublicKey)
-	if !ok {
-		eth.Close()
-		return nil, fmt.Errorf("cast public key to ECDSA failed")
-	}
-	from := crypto.PubkeyToAddress(*pubECDSA)
 
 	parsed, err := abi.JSON(strings.NewReader(ContractABI))
 	if err != nil {
@@ -121,8 +116,7 @@ func NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error) {
 
 	return &Client{
 		eth:          eth,
-		privateKey:   pk,
-		fromAddress:  from,
+		signer:       signer,
 		contractAddr: common.HexToAddress(contractAddr),
 		parsedABI:    parsed,
 	}, nil
@@ -132,7 +126,7 @@ func NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error) {
 func (c *Client) Close() { c.eth.Close() }
 
 // FromAddress — адрес, из-под которого клиент подписывает tx.
-func (c *Client) FromAddress() common.Address { return c.fromAddress }
+func (c *Client) FromAddress() common.Address { return c.signer.Address() }
 
 // aggregateToMethod маппит WMS aggregate_type в solidity-методы BatchMappingWMS.
 var aggregateToMethod = map[string]string{
@@ -206,7 +200,7 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	// через ErrChainTransient, чтобы Flusher classified их как retry-able и не
 	// слал в DLQ при транзитивном блипе. См. MR !35 M7.
 	if !c.nonceSeeded {
-		n, nerr := c.eth.PendingNonceAt(ctx, c.fromAddress)
+		n, nerr := c.eth.PendingNonceAt(ctx, c.signer.Address())
 		if nerr != nil {
 			return common.Hash{}, fmt.Errorf("%w: nonce: %v", ErrChainTransient, nerr)
 		}
@@ -223,7 +217,7 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	gasPrice = new(big.Int).Div(new(big.Int).Mul(gasPrice, big.NewInt(gasPriceHeadroomNum)), big.NewInt(gasPriceHeadroomDen))
 
 	gasLimit, err := c.eth.EstimateGas(ctx, ethereum.CallMsg{
-		From: c.fromAddress,
+		From: c.signer.Address(),
 		To:   &c.contractAddr,
 		Data: data,
 	})
@@ -245,10 +239,14 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	}
 
 	tx := types.NewTransaction(nonce, c.contractAddr, big.NewInt(0), gasLimit, gasPrice, data)
-	signed, err := types.SignTx(tx, types.NewEIP155Signer(chainID), c.privateKey)
+	signed, err := c.signer.SignTx(ctx, tx, chainID)
 	if err != nil {
-		// Local crypto error — не chain-related. Оставляем raw, Flusher пометит
-		// как terminal (DLQ) — это адекватно: sign не падает transient'но.
+		// Удалённый signer недоступен — tx не построен, nonce не потрачен:
+		// transient, retry при следующем poll'е (не DLQ). Локальная crypto-ошибка
+		// static-ключа — terminal, как и раньше.
+		if errors.Is(err, ErrSignerTransient) {
+			return common.Hash{}, fmt.Errorf("%w: sign tx: %v", ErrChainTransient, err)
+		}
 		return common.Hash{}, fmt.Errorf("sign tx: %w", err)
 	}
 
@@ -269,7 +267,7 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 func (c *Client) ReseedNonce(ctx context.Context) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	n, err := c.eth.PendingNonceAt(ctx, c.fromAddress)
+	n, err := c.eth.PendingNonceAt(ctx, c.signer.Address())
 	if err != nil {
 		return fmt.Errorf("reseed nonce: %w", err)
 	}

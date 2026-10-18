@@ -20,6 +20,7 @@ import (
 	"ledger-adapter/internal/consumer"
 	"ledger-adapter/internal/dlq"
 	"ledger-adapter/internal/handler"
+	"ledger-adapter/internal/kms"
 	"ledger-adapter/internal/store"
 )
 
@@ -63,11 +64,17 @@ func run(log *slog.Logger) error {
 	defer pool.Close()
 	repo := store.NewRepository(pool)
 
-	// Multi-signer: один Client на signer-ключ. Flusher шардит in-flight tx по
+	// Multi-signer: один Client на signer. Flusher шардит in-flight tx по
 	// ProductID между ними (N× in-flight ёмкость). clients[0] обслуживает receipt-
 	// чтения (Confirm/reconcile/health) — receipt'ы node-global.
-	callers := make([]consumer.ChainCaller, 0, len(cfg.PrivateKeys))
-	clients := make([]*chain.Client, 0, len(cfg.PrivateKeys))
+	// Источник signer'ов — режим: static (локальные hex-ключи) или kms
+	// (Web3Signer: адаптеру нужен только public key каждого ключа).
+	signers, err := buildSigners(cfg)
+	if err != nil {
+		return err
+	}
+	callers := make([]consumer.ChainCaller, 0, len(signers))
+	clients := make([]*chain.Client, 0, len(signers))
 	// Закрываем все клиенты одним deferred-closure (ranges по слайсу на момент
 	// выполнения → закроет и те, что успели создаться при раннем return).
 	defer func() {
@@ -75,14 +82,14 @@ func run(log *slog.Logger) error {
 			cl.Close()
 		}
 	}()
-	for i, key := range cfg.PrivateKeys {
-		cl, cerr := chain.NewClient(cfg.RpcURL, key, cfg.ContractAddr)
+	for i, s := range signers {
+		cl, cerr := chain.NewClientWithSigner(cfg.RpcURL, cfg.ContractAddr, s)
 		if cerr != nil {
 			return fmt.Errorf("signer %d: %w", i, cerr)
 		}
 		clients = append(clients, cl)
 		callers = append(callers, cl)
-		log.Info("chain client ready", "signer_index", i, "signer", cl.FromAddress().Hex())
+		log.Info("chain client ready", "signer_mode", cfg.SignerMode, "signer_index", i, "signer", cl.FromAddress().Hex())
 	}
 	// Fail-fast: каждый signer должен быть профинансирован, иначе его tx'ы под
 	// нагрузкой реверят (out-of-funds) и портят замер/целостность.
@@ -129,6 +136,35 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("consumer drained, bye")
 	return nil
+}
+
+// buildSigners собирает TxSigner'ы по режиму: static — локальные ecdsa-ключи
+// из PRIVATE_KEY/PRIVATE_KEYS; kms — удалённая подпись в Web3Signer по
+// KMS_PUBLIC_KEYS (адрес каждого выводится из public key, приватник адаптеру
+// не нужен вообще).
+func buildSigners(cfg *config.Config) ([]chain.TxSigner, error) {
+	if cfg.SignerMode != "kms" {
+		signers := make([]chain.TxSigner, 0, len(cfg.PrivateKeys))
+		for i, key := range cfg.PrivateKeys {
+			s, err := chain.NewStaticSigner(key)
+			if err != nil {
+				return nil, fmt.Errorf("static signer %d: %w", i, err)
+			}
+			signers = append(signers, s)
+		}
+		return signers, nil
+	}
+
+	hc := &http.Client{Timeout: 10 * time.Second}
+	signers := make([]chain.TxSigner, 0, len(cfg.KMSPublicKeys))
+	for i, id := range cfg.KMSPublicKeys {
+		s, err := kms.NewSigner(cfg.KMSURL, id, hc)
+		if err != nil {
+			return nil, fmt.Errorf("kms signer %d: %w", i, err)
+		}
+		signers = append(signers, s)
+	}
+	return signers, nil
 }
 
 // assertSignersFunded fail-fast'ит, если любой signer не профинансирован: под

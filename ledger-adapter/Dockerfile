@@ -11,7 +11,8 @@ COPY . .
 
 # CGO_ENABLED=0 + static linking → полностью автономный бинарь без libc/SSL.
 # ldflags -s -w убирает debug symbols (~30% меньше размер).
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /server ./cmd/adapter
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /server ./cmd/adapter && \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /kms-init ./cmd/kms-init
 
 # Stage 2: distroless runtime, non-root uid, без shell/package manager.
 # Плюсы: минимальная attack surface, нельзя exec'ить curl/wget/sh.
@@ -23,6 +24,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /server ./cmd/adapter
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /server /server
+COPY --from=builder /kms-init /kms-init
 
 EXPOSE 8085
 USER nonroot:nonroot
