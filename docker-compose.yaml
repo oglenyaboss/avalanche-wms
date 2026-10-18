@@ -230,7 +230,7 @@ services:
     image: prom/prometheus:latest
     container_name: prometheus
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml
     command:

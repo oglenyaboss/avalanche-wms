@@ -146,7 +146,7 @@ curl -s localhost:8085/health  # health ledger-adapter
 | `kafka-init` | `apache/kafka:3.7.0` (one-shot) | — | `kafka` (healthy), `db-init` (completed) | — |
 | `debezium` | `debezium/connect:2.5` | `8083`, `9012` | `db-init` (completed), `kafka-init` (completed) | **нет** (Compose не ждёт готовности) |
 | `kafka-ui` | `ghcr.io/kafbat/kafka-ui:v1.5.0` | `8080:8080` | `kafka` (started) | — |
-| `prometheus` | `prom/prometheus:latest` | `9090:9090` | — | — |
+| `prometheus` | `prom/prometheus:latest` | `${PROMETHEUS_PORT:-9090}:9090` | — | — |
 | `grafana` | `grafana/grafana:latest` | `3000:3000` | `prometheus` | — |
 | `postgres-exporter` | `prometheuscommunity/postgres-exporter` | `9187:9187` | `postgres` (healthy), `db-init` (completed) | — |
 | `kafka-jmx-exporter` | `sscaling/jmx-prometheus-exporter` | `5556` (без host-маппинга) | — | — |
@@ -333,7 +333,7 @@ make seed               # переналить dev-данные (postgres дол
 
 ### 6.1. Prometheus
 
-Config `deploy/prometheus.yml`, `scrape_interval: 10s`. URL: `http://localhost:9090`.
+Config `deploy/prometheus.yml`, `scrape_interval: 10s`. URL: `http://localhost:9090`; если порт 9090 на хосте занят, задайте другой через `PROMETHEUS_PORT`.
 
 | Job | Target | Источник |
 |-----|--------|----------|
