@@ -230,7 +230,7 @@ services:
     image: prom/prometheus:latest
     container_name: prometheus
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml
     command:
@@ -291,6 +291,9 @@ services:
       context: ./ledger-adapter
       dockerfile: Dockerfile
     container_name: ledger-adapter
+    # Зависшая в пайплайне tx — фатальная ошибка: адаптер выходит и восстанавливается
+    # рестартом (reconcile подтягивает домайненные tx). Без политики он просто умирает.
+    restart: on-failure
     ports:
       - "8085:8085"
     environment:

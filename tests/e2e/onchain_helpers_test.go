@@ -138,7 +138,7 @@ func waitItemStatus(t *testing.T, ctx context.Context, env *env, productID uuid.
 const adapterHealthURL = "http://localhost:8085/health"
 const adapterContainer = "ledger-adapter"
 
-// adapterNetwork / adapterSharedVolume / adapterPortMap mirror the compose service
+// adapterNetwork / adapterSharedVolume / adapterPortMap / adapterRestartPolicy mirror the compose service
 // definition (docker-compose.yaml ledger-adapter + env.sh). The recreate re-creates
 // the container by hand against the EXISTING project network rather than via
 // `docker compose up`, which reconciles (and tries to recreate) a network that
@@ -147,6 +147,7 @@ const adapterContainer = "ledger-adapter"
 const adapterNetwork = e2eProjectName + "_app_network"
 const adapterSharedVolume = e2eProjectName + "_shared_state"
 const adapterPortMap = "8085:8085"
+const adapterRestartPolicy = "on-failure"
 
 // adapterTimingVars are the four env knobs the scenarios tune. They are STRIPPED from
 // the inherited env on every recreate and re-applied explicitly (override value, or
@@ -205,6 +206,7 @@ func recreateAdapterWithEnv(t *testing.T, ctx context.Context, env *env, overrid
 		"run", "-d",
 		"--name", adapterContainer,
 		"--network", adapterNetwork,
+		"--restart", adapterRestartPolicy,
 		"-p", adapterPortMap,
 		"-v", adapterSharedVolume + ":/shared:ro",
 	}
@@ -244,7 +246,7 @@ const adapterConsumingTimeout = 90 * time.Second
 // matches its random product_id (it has no outbox row — it is published straight to
 // Kafka), and no assertion counts total onchain_events rows. aggregate_type "receiving"
 // keeps it on the valid None->Accepted path (commits cleanly under default config; lands
-// FAILED only under N1's 1ms poll — still a row).
+// SENT and stalls the pipeline under N1's 1ms poll — still a row).
 func waitAdapterConsuming(t *testing.T, ctx context.Context, env *env) {
 	t.Helper()
 	warmupEvent := uuid.New()

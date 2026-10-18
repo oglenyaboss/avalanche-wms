@@ -119,9 +119,9 @@ bash deploy/subnet/allowlist-check.sh
 
 | Путь | Назначение |
 |---|---|
-| `network-genesis.json` | Genesis сети avalanchego (network-id 1337), P-Chain с префандженым ewoq. |
+| `network-genesis.json` | Genesis сети avalanchego (network-id 1337), P-Chain с префандженым ewoq. Стейк валидатора действует 10 лет (до 2036-05-30); после этой даты `subnet-init` на свежем стенде не пройдёт. |
 | `chain-genesis.json` | Genesis EVM-цепочки сабнета (chainId 99999) — тюнингованный feeConfig (gasLimit 200M, targetBlockRate 1, **targetGas 2B** — рекалибровка fee-market под нагрузку, иначе baseFee растёт ×50 и адаптер залипает на `rpc-tx-fee-cap`; коммит `50ce2515`); включены allow-list прекомпайлы (`txAllowListConfig` + `contractDeployerAllowListConfig`, админ ewoq — см. раздел «Allow-list» выше). |
-| `node-config.json` | Флаги узла: sybil-off, `http-host 0.0.0.0`, `http-allowed-hosts "*"`, преднабитый `track-subnets`, plugin-dir. |
+| `node-config.json` | Флаги узла: sybil-off, `http-host 0.0.0.0`, `http-allowed-hosts "*"`, преднабитый `track-subnets`, plugin-dir, `max-stake-duration`/`stake-minting-period` под 10-летний стейк из genesis. |
 | `staking/` | Публичные креды staker1 локальной сети (только для тестов — см. `staking/README.md`). |
 | `subnet-node/Dockerfile` | avalanchego + плагин subnet-evm v0.8.0 (под `TARGETARCH`). |
 | `subnet-init/` | Bootstrap через Go wallet SDK (one-shot). |

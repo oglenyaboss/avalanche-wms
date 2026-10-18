@@ -289,7 +289,8 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 	require.NotNil(t, env)
 
 	// Shrink RECEIPT_POLL_TIMEOUT so the flusher's poll always loses the race to mining
-	// (transiently marking the row FAILED), and shrink the reconcile cadence so recovery
+	// (the pipeline stalls: the row stays SENT, the adapter exits and its restart policy
+	// brings it back), and shrink the reconcile cadence so recovery
 	// happens within the test's patience window. CONSTRAINT: RECONCILE_MIN_AGE (2s) must
 	// stay > RECEIPT_POLL_TIMEOUT (1ms) or the adapter refuses to boot — 2s > 1ms is fine.
 	t.Cleanup(func() { restoreDefaultAdapter(t, env) })
@@ -303,7 +304,7 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 	productID := uuid.New()
 
 	// Publish a perfectly valid receiving event. With the tiny RECEIPT_POLL_TIMEOUT the
-	// adapter (transiently) marks it FAILED on the poll timeout while the tx still mines.
+	// adapter gives up on the receipt and exits while the tx still mines.
 	publishEvent(t, ctx, "receiving", eventID, productID, "{}")
 
 	// The transition DOES land on-chain (the tx mines regardless of the adapter giving up).

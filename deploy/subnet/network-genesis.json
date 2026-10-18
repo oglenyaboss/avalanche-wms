@@ -29,7 +29,7 @@
     }
   ],
   "startTime": 1780422568,
-  "initialStakeDuration": 31536000,
+  "initialStakeDuration": 315360000,
   "initialStakeDurationOffset": 5400,
   "initialStakedFunds": [
     "X-custom17vyx67luxklpc6xmve96nnnp5grqzf4sh3jctv"
