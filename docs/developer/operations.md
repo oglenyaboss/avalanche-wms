@@ -149,8 +149,8 @@ curl -s localhost:8085/health  # health ledger-adapter
 | `prometheus` | `prom/prometheus:latest` | `${PROMETHEUS_PORT:-9090}:9090` | — | — |
 | `grafana` | `grafana/grafana:latest` | `3000:3000` | `prometheus` | — |
 | `postgres-exporter` | `prometheuscommunity/postgres-exporter` | `9187:9187` | `postgres` (healthy), `db-init` (completed) | — |
-| `kafka-jmx-exporter` | `sscaling/jmx-prometheus-exporter` | `5556` (без host-маппинга) | — | — |
-| `debezium-jmx-exporter` | `sscaling/jmx-prometheus-exporter` | `5556` (без host-маппинга) | — | — |
+| `kafka-jmx-exporter` | сборка `deploy/jmx` (Temurin 21 + jmx_exporter 0.20.0) | `5556` (без host-маппинга) | — | — |
+| `debezium-jmx-exporter` | сборка `deploy/jmx` (Temurin 21 + jmx_exporter 0.20.0) | `5556` (без host-маппинга) | — | — |
 | `ledger-adapter` | build `./ledger-adapter/Dockerfile` | `8085:8085` | `db-init` (completed), `kafka-init` (completed), `contract-deploy` (completed, `required: false`) | **нет** (distroless — нет `curl`/`wget`/`nc`) |
 | `subnet-node1` *(test)* | build `./deploy/subnet/subnet-node` (avalanchego v1.14.0 + плагин subnet-evm v0.8.0, нативная арх.) | `127.0.0.1:9650`, `127.0.0.1:9651` | — | `curl /ext/health` + grep `"healthy": true` (10s/30 ретраев/start 30s) |
 | `subnet-init` *(test)* | build `./deploy/subnet/subnet-init` (Go wallet SDK, one-shot) | — | `subnet-node1` (healthy) | — |
