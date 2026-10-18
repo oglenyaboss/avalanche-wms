@@ -66,9 +66,9 @@ type InflightTx struct {
 // (видимы, не потеряны) для redelivery/reconcile (invariant 4).
 var ErrConfirmStalled = errors.New("confirm stalled")
 
-// maxActionCalldata — эвристический потолок calldata одной applyKeyActions-tx:
-// держимся заметно ниже газ-лимита блока, чтобы чанк гарантированно влезал с
-// запасом на исполнение. Package var — тесты занижают его для проверки нарезки.
+// maxActionCalldata — потолок calldata одной applyKeyActions-tx (ADR-0001 §9):
+// узел subnet-evm отклоняет tx больше 131 072 байт, газ при таком объёме не
+// упирается в лимит блока. Package var — тесты занижают его для проверки нарезки.
 var maxActionCalldata = 120_000
 
 // Flusher — pipeline: группировка по aggregate_type → обработка в FSM-порядке →
