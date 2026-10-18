@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # fund-signers.sh — фондит N детерминированных signer-аккаунтов из ewoq на geo-цепи
-# для multi-signer ledger-adapter'а. Flusher шардит in-flight tx по этим аккаунтам
+# для multi-signer ledger-adapter'а и разрешает их в tx-allow-list (issue #5: в genesis
+# включён allow-list отправителей tx, поэтому signer без роли в прекомпайле
+# 0x0200000000000000000000000000000000000002 не может слать tx — адаптер отвалится).
+# Flusher шардит in-flight tx по этим аккаунтам
 # (каждый ограничен TxPoolAccountSlots узла → N аккаунтов = N× in-flight ёмкость →
 # насыщение WAN-цепи; single signer её голодит). Ключи выводятся ДЕТЕРМИНИРОВАННО из
 # публичного seed keccak("geo-ms-signer-v1:<i>") — воспроизводимо для ВКР и не секрет
@@ -48,6 +51,25 @@ for pk in "${keys[@]}"; do
   [ "$(cast balance "$addr" --rpc-url "$GEO_RPC")" = "0" ] && { echo "FATAL: $addr unfunded" >&2; exit 1; }
 done
 echo "  all $N signers funded ✓" >&2
+
+# Разрешаем signer-ов в tx-allow-list: readAllowList на tx-прекомпайле; роль 0 (нет в
+# списке) → setEnabled от админа ewoq (он же админ в genesis) на живой цепи.
+TX_ALLOW_LIST=0x0200000000000000000000000000000000000002
+for pk in "${keys[@]}"; do
+  addr=$(cast wallet address --private-key "$pk")
+  role=$(cast call "$TX_ALLOW_LIST" 'readAllowList(address)(uint256)' "$addr" --rpc-url "$GEO_RPC")
+  if [ "$role" = "0" ]; then
+    cast send "$TX_ALLOW_LIST" 'setEnabled(address)' "$addr" --private-key "$EWOQ" --rpc-url "$GEO_RPC" >/dev/null
+    echo "  allow-list: setEnabled $addr" >&2
+  fi
+done
+# Повторная проверка: каждый signer должен стать Enabled (роль 1).
+for pk in "${keys[@]}"; do
+  addr=$(cast wallet address --private-key "$pk")
+  role=$(cast call "$TX_ALLOW_LIST" 'readAllowList(address)(uint256)' "$addr" --rpc-url "$GEO_RPC")
+  [ "$role" = "1" ] || { echo "FATAL: $addr role=$role, ожидалось 1 (Enabled)" >&2; exit 1; }
+done
+echo "  all $N signers allowed in tx-allow-list ✓" >&2
 (
   IFS=','
   echo "${keys[*]}"

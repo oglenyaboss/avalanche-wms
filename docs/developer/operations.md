@@ -379,6 +379,32 @@ docker compose --profile test down -v
 
 `contract-deploy` идемпотентен: проверяет `/shared/contract_addr.txt`, при живом контракте — не передеплоит. Деплой: `forge create BatchMappingWMS` ключом ewoq, проверка `itemStatus(0)==0`, запись `rpc_url.txt` / `contract_addr.txt` / `deployer_key.txt` в `shared_state`.
 
+### 7.1. Allow-list отправителей транзакций и деплоеров
+
+В `chain-genesis.json` включены оба пермиссионных прекомпайла: `txAllowListConfig`
+(адрес `0x0200000000000000000000000000000000000002`) и `contractDeployerAllowListConfig`
+(`0x0200000000000000000000000000000000000000`); админ обоих списков — ewoq. Транзакция с
+неразрешённого адреса отбрасывается mempool-ом с ошибкой
+`cannot issue transaction from non-allow listed address`, деплой с адреса вне
+deployer-списка — в EVM (`tx.origin … is not authorized to deploy a contract`), поэтому
+ключ адаптера (`PRIVATE_KEY`, а при multi-signer — все `PRIVATE_KEYS`) обязан быть в списке.
+
+Добавить адрес на живой цепи (genesis читается один раз при `CreateChain` — список
+меняется только транзакциями админа; `cast` на хосте нет — docker-образ foundry;
+`RPC_URL` — динамический путь из `shared_state:/rpc_url.txt`, см. быстрый старт выше):
+
+```bash
+# роль адреса (0=None, 1=Enabled, 2=Admin):
+docker run --rm --network host --entrypoint cast ghcr.io/foundry-rs/foundry:stable call 0x0200000000000000000000000000000000000002 'readAllowList(address)(uint256)' 0xАДРЕС --rpc-url "$RPC_URL"
+# разрешить слать tx (от админа ewoq):
+docker run --rm --network host --entrypoint cast ghcr.io/foundry-rs/foundry:stable send 0x0200000000000000000000000000000000000002 'setEnabled(address)' 0xАДРЕС --private-key <ewoq> --rpc-url "$RPC_URL"
+```
+
+Сквозная проверка стенда: `bash deploy/subnet/allowlist-check.sh` (сам находит RPC).
+Полная документация (роли, отзыв `setNone`, выдача админа `setAdmin`, ротация ключа
+адаптера) — [deploy/subnet/README.md](../../deploy/subnet/README.md), раздел
+«Allow-list отправителей транзакций и деплоеров».
+
 Маппинг WMS→контракт и формат данных — [blockchain-mapping](../integration/blockchain-mapping.md), [data-contract](../integration/data-contract.md), [batch-mapping-approach](../integration/batch-mapping-approach.md).
 
 ---
