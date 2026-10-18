@@ -131,10 +131,7 @@ type registryKeyResponse struct {
 	Active bool   `json:"active"`
 }
 
-// RegistryKey читает статус ключа в ConsortiumRegistry (один eth_call, без polling).
-//
-// SECURITY: как и TxProof, эндпоинт UNAUTHENTICATED — допустим только во внутренней
-// docker-сети адаптера; не публиковать наружу без shared-secret проверки.
+// RegistryKey — статус ключа в ConsortiumRegistry; без аутентификации, как TxProof (только внутренняя сеть).
 func (h *Handler) RegistryKey(w http.ResponseWriter, r *http.Request) {
 	raw := r.PathValue("keyId")
 	if !keyIDRe.MatchString(raw) {
