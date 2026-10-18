@@ -267,20 +267,16 @@ services:
       - app_network
 
   kafka-jmx-exporter:
-    image: sscaling/jmx-prometheus-exporter
+    build: ./deploy/jmx
     container_name: kafka-jmx-exporter
-    environment:
-      SERVICE_PORT: 5556
     volumes:
       - ./deploy/jmx/kafka-jmx-config.yaml:/opt/jmx_exporter/config.yml
     networks:
       - app_network
 
   debezium-jmx-exporter:
-    image: sscaling/jmx-prometheus-exporter
+    build: ./deploy/jmx
     container_name: debezium-jmx-exporter
-    environment:
-      SERVICE_PORT: 5556
     volumes:
       - ./deploy/jmx/debezium-jmx-config.yaml:/opt/jmx_exporter/config.yml
     networks:
