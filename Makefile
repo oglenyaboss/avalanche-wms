@@ -132,7 +132,7 @@ kms-logs: ## Tail ledger-adapter + web3signer logs
 	$(COMPOSE_KMS) logs -f ledger-adapter web3signer
 
 registry-cli: ## CLI владельца консорциума: make registry-cli ARGS="list"
-	docker compose run --rm --no-deps --entrypoint /registry-cli -e OWNER_KEY_FILE=/shared/deployer_key.txt -v "$(CURDIR):/work:ro" -w /work ledger-adapter $(ARGS)
+	$(COMPOSE) run --rm --no-deps --entrypoint /registry-cli -e OWNER_KEY_FILE=/shared/deployer_key.txt -v "$(CURDIR):/work:ro" -w /work ledger-adapter $(ARGS)
 
 stress-smoke: ## Smoke test (1 VU, local k6 required)
 	k6 run tests/stress/01-smoke.js
