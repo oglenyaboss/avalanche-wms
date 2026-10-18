@@ -293,7 +293,8 @@ services:
     # рестартом (reconcile подтягивает домайненные tx). Без политики он просто умирает.
     restart: on-failure
     ports:
-      - "8085:8085"
+      # только loopback: HTTP-эндпоинты адаптера без аутентификации.
+      - "127.0.0.1:8085:8085"
     environment:
       PORT: 8085
       KAFKA_BROKERS: kafka:9092
