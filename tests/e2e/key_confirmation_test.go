@@ -299,8 +299,14 @@ func callRegistryKey(t *testing.T, ctx context.Context, env *env, registryAddr s
 	}, nil)
 	require.NoError(t, err)
 
+	values, err := parsed.Unpack("getKey", result)
+	require.NoError(t, err)
+	require.Len(t, values, 1)
+
+	raw, err := json.Marshal(values[0])
+	require.NoError(t, err)
 	var out registryKeyView
-	require.NoError(t, parsed.UnpackIntoInterface(&out, "getKey", result))
+	require.NoError(t, json.Unmarshal(raw, &out))
 	return out
 }
 
