@@ -181,6 +181,8 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 		requireProductStatus(t, ctx, env, pid, "STORED")
 		e := eventIDForAggregate(t, ctx, env, pid, "putaway")
 		waitForOnchainCommitted(t, ctx, env, e, "putaway")
+		require.Equal(t, statusPutAway, callItemStatus(t, ctx, env, pid),
+			"product should be PutAway(2) on-chain after the signed putaway")
 	}
 
 	// ── Two NEW orders for the destination, one line of qty 1 each ──
@@ -232,6 +234,7 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 			{`DELETE FROM wms_ops.receiving_gate WHERE cargoplace_id IN ` + cpSel, []any{sc.CargoplaceCode}},
 			{`DELETE FROM wms_inventory.products WHERE product_id = ANY($1::uuid[])`, []any{productIDStrings}},
 			{`DELETE FROM wms_inventory.boxes WHERE cargoplace_id IN ` + cpSel, []any{sc.CargoplaceCode}},
+			{`DELETE FROM wms_ops.assembly_tasks WHERE order_id IN (SELECT order_id FROM wms_inventory.orders WHERE external_order_no = ANY($1::text[]))`, []any{[]string{orderNo1, orderNo2}}},
 			{`DELETE FROM wms_inventory.order_lines WHERE order_id IN (SELECT order_id FROM wms_inventory.orders WHERE external_order_no = ANY($1::text[]))`, []any{[]string{orderNo1, orderNo2}}},
 			{`DELETE FROM wms_inventory.orders WHERE external_order_no = ANY($1::text[])`, []any{[]string{orderNo1, orderNo2}}},
 			{`DELETE FROM wms_inventory.outbound_dispatches WHERE dispatch_code=$1`, []any{dispatchCode}},
@@ -257,6 +260,11 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 	require.Len(t, order1Products, 1)
 	require.Len(t, order2Products, 1)
 	allProducts := append(order1Products, order2Products...)
+	// The signed chain below is valid only for THIS test's own products: allocate
+	// is FIFO over ALL STORED products of the SKU, so if stale leftovers of earlier
+	// tests sit in the pool, the pick would chain-fail on foreign items. Guard it.
+	require.ElementsMatchf(t, run.productIDs, allProducts,
+		"allocate must hand out this test's own signed-chain products, got stale FIFO leftovers")
 
 	for _, pid := range allProducts {
 		parsed, err := uuid.Parse(pid)
@@ -511,6 +519,14 @@ func TestSignedShip_PickingNotConfirmed(t *testing.T) {
 		mustExec(t, ctx, env, `DELETE FROM public.onchain_events WHERE event_id = $1`, pickActionID)
 		mustExec(t, ctx, env, `DELETE FROM public.outbox_events WHERE event_id = $1`, pickActionID)
 	}
+
+	// The signed ship draft requires the dispatch at the gate: scan the driver
+	// first (SCHEDULED → AT_GATE), so the picking gate is what refuses below.
+	var driver scanDriverData
+	postJSON(t, env, op.token, "/shipping/scan-driver", map[string]string{
+		"dispatch_code": fx.DispatchCode,
+	}, &driver)
+	require.Equal(t, fx.DispatchID, driver.DispatchID)
 
 	status, code := draftShipRaw(t, env, op.token, fx.ShippingBinID.String(), fx.DispatchID.String(), orderProductIDs)
 	require.Equal(t, http.StatusConflict, status)
