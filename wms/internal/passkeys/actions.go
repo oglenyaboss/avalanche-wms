@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -131,12 +132,11 @@ func (s *Service) RejectKey(ctx context.Context, userID uuid.UUID, targetKeyID s
 		return err
 	}
 
-	rejected, err := s.repo.RejectPendingPasskey(ctx, target.CredentialID)
-	if err != nil {
+	if err := s.repo.RejectPendingPasskey(ctx, target.CredentialID); err != nil {
+		if errors.Is(err, ErrTargetNotPending) || errors.Is(err, ErrActionInProgress) {
+			return err
+		}
 		return fmt.Errorf("passkeys.Service.RejectKey reject: %w", err)
-	}
-	if !rejected {
-		return ErrTargetNotPending
 	}
 	return nil
 }

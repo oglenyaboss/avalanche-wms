@@ -284,6 +284,38 @@ func TestRejectKey_Errors(t *testing.T) {
 	})
 }
 
+// TestRejectKey_RepoErrorMapping checks that sentinel errors from the
+// transactional reject pass through Service.RejectKey unwrapped, so the HTTP
+// layer can map them by errors.Is.
+func TestRejectKey_RepoErrorMapping(t *testing.T) {
+	targetKeyID := func(target *domain.Passkey) string {
+		return "0x" + hex.EncodeToString(target.KeyID[:])
+	}
+
+	t.Run("repo action in progress", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.repo.rejectPendingPasskeyFn = func(context.Context, []byte) error { return ErrActionInProgress }
+		if err := f.svc.RejectKey(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrActionInProgress) {
+			t.Fatalf("err = %v, want ErrActionInProgress", err)
+		}
+	})
+	t.Run("repo target not pending", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.repo.rejectPendingPasskeyFn = func(context.Context, []byte) error { return ErrTargetNotPending }
+		if err := f.svc.RejectKey(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrTargetNotPending) {
+			t.Fatalf("err = %v, want ErrTargetNotPending", err)
+		}
+	})
+	t.Run("other repo error is wrapped", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.repo.rejectPendingPasskeyFn = func(context.Context, []byte) error { return errors.New("db down") }
+		err := f.svc.RejectKey(context.Background(), adminA, targetKeyID(f.target))
+		if err == nil || errors.Is(err, ErrTargetNotPending) || errors.Is(err, ErrActionInProgress) {
+			t.Fatalf("err = %v, want a wrapped non-sentinel error", err)
+		}
+	})
+}
+
 func TestHandler_RejectKeyForbiddenForOperator(t *testing.T) {
 	f := newActionFixture(t)
 

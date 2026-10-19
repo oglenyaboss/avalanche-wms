@@ -3,21 +3,19 @@ package passkeys
 import (
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
 	"wms/internal/domain"
 	"wms/internal/platform/httputil"
-	"wms/internal/signedaction"
 )
 
 const maxRegistrationBodyBytes = 64 << 10
+const maxActionBodyBytes = 16 << 10
 
 const msgInvalidRequest = "Некорректный запрос"
 
@@ -106,108 +104,6 @@ func (h *Handler) AdminKeyExport(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true, Data: export})
 }
 
-type draftKeyRegisterRequest struct {
-	TargetKeyID string `json:"target_key_id"`
-}
-
-func (h *Handler) DraftKeyRegister(w http.ResponseWriter, r *http.Request) {
-	userID, ok := httputil.RequireAdmin(w, r)
-	if !ok {
-		return
-	}
-	var body draftKeyRegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
-		return
-	}
-	draft, err := h.svc.DraftKeyRegister(r.Context(), userID, body.TargetKeyID)
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true, Data: toDraftView(draft)})
-}
-
-func (h *Handler) RejectKey(w http.ResponseWriter, r *http.Request) {
-	userID, ok := httputil.RequireAdmin(w, r)
-	if !ok {
-		return
-	}
-	var body draftKeyRegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
-		return
-	}
-	if err := h.svc.RejectKey(r.Context(), userID, body.TargetKeyID); err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true})
-}
-
-type submitKeyActionRequest struct {
-	CredentialID      string `json:"credential_id"`
-	AuthenticatorData string `json:"authenticator_data"`
-	ClientDataJSON    string `json:"client_data_json"`
-	Signature         string `json:"signature"`
-}
-
-func (h *Handler) SubmitKeyAction(w http.ResponseWriter, r *http.Request) {
-	userID, ok := httputil.RequireAdmin(w, r)
-	if !ok {
-		return
-	}
-	actionID, err := uuid.Parse(mux.Vars(r)["actionID"])
-	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
-		return
-	}
-	var body submitKeyActionRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
-		return
-	}
-	assertion, err := decodeAssertion(body)
-	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
-		return
-	}
-	confirmation, err := h.svc.SubmitKeyAction(r.Context(), userID, actionID, assertion)
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true, Data: toConfirmationView(confirmation)})
-}
-
-// decodeAssertion decodes the four base64url (no padding) body fields the way
-// navigator.credentials.get returns them.
-func decodeAssertion(body submitKeyActionRequest) (signedaction.Assertion, error) {
-	decode := base64.RawURLEncoding.DecodeString
-	credID, err := decode(body.CredentialID)
-	if err != nil {
-		return signedaction.Assertion{}, err
-	}
-	authData, err := decode(body.AuthenticatorData)
-	if err != nil {
-		return signedaction.Assertion{}, err
-	}
-	cdj, err := decode(body.ClientDataJSON)
-	if err != nil {
-		return signedaction.Assertion{}, err
-	}
-	sig, err := decode(body.Signature)
-	if err != nil {
-		return signedaction.Assertion{}, err
-	}
-	return signedaction.Assertion{
-		CredentialID:      credID,
-		AuthenticatorData: authData,
-		ClientDataJSON:    cdj,
-		Signature:         sig,
-	}, nil
-}
-
 type passkeyView struct {
 	CredentialID string `json:"credential_id"`
 	KeyID        string `json:"key_id"`
@@ -265,66 +161,6 @@ func toOrganizationView(o OrganizationOverview) organizationView {
 	return organizationView{
 		Organization: organizationInfoView{OrgID: o.Organization.ID.String(), Name: o.Organization.Name},
 		Members:      members,
-	}
-}
-
-type coordinateView struct {
-	QX string `json:"qx"`
-	QY string `json:"qy"`
-}
-
-type allowCredentialView struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-}
-
-type keyActionDraftView struct {
-	ActionID         string                `json:"action_id"`
-	ActionType       int                   `json:"action_type"`
-	ItemIDs          []string              `json:"item_ids"`
-	SubjectKey       coordinateView        `json:"subject_key"`
-	DetailsHash      string                `json:"details_hash"`
-	SignerKeyID      string                `json:"signer_key_id"`
-	Challenge        string                `json:"challenge"`
-	RPID             string                `json:"rp_id"`
-	AllowCredentials []allowCredentialView `json:"allow_credentials"`
-	UserVerification string                `json:"user_verification"`
-	Timeout          int                   `json:"timeout"`
-}
-
-func toDraftView(d *KeyActionDraft) keyActionDraftView {
-	return keyActionDraftView{
-		ActionID:   d.Action.ActionID.String(),
-		ActionType: int(d.Action.ActionType),
-		ItemIDs:    []string{},
-		SubjectKey: coordinateView{
-			QX: "0x" + hex.EncodeToString(d.SubjectQX[:]),
-			QY: "0x" + hex.EncodeToString(d.SubjectQY[:]),
-		},
-		DetailsHash:      "0x" + hex.EncodeToString(d.DetailsHash[:]),
-		SignerKeyID:      "0x" + hex.EncodeToString(d.SignerKeyID[:]),
-		Challenge:        base64.RawURLEncoding.EncodeToString(d.Action.Challenge[:]),
-		RPID:             d.RPID,
-		AllowCredentials: []allowCredentialView{{Type: "public-key", ID: base64.RawURLEncoding.EncodeToString(d.Action.SignerCredentialID)}},
-		UserVerification: "required",
-		Timeout:          60000,
-	}
-}
-
-type confirmationView struct {
-	ActionID     string `json:"action_id"`
-	State        string `json:"state"`
-	RejectReason *int16 `json:"reject_reason"`
-}
-
-func toConfirmationView(c *KeyConfirmation) *confirmationView {
-	if c == nil {
-		return nil
-	}
-	return &confirmationView{
-		ActionID:     c.ActionID.String(),
-		State:        string(c.State),
-		RejectReason: c.RejectReason,
 	}
 }
 
