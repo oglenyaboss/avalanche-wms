@@ -61,6 +61,7 @@ export function TableReceiving() {
           cargoplace={state.cargoplace}
           bufferPlaced={state.bufferPlaced}
           summary={state.summary}
+          operationId={state.operationId}
           onScanBuffer={table.submitBuffer}
           onCloseCargoplace={table.submitCloseCargoplace}
           onFinish={table.finish}

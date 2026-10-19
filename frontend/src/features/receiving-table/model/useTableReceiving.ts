@@ -1,20 +1,24 @@
 import { useReducer } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
+import { webauthnSignErrorText } from '@/shared/lib'
+
 import {
   closeBox,
-  closeCargoplace,
+  draftCloseCargoplace,
   scanBox,
   scanBuffer,
   scanQr,
   scanSku,
   scanTableCargoplace,
+  submitCloseCargoplace as submitCloseCargoplaceRequest,
 } from '../api/receivingTableApi'
 import {
   getReceivingErrorMessage,
   isBoxTerminalError,
   isCargoplaceTerminalError,
 } from './errors'
+import { signOperation } from './signOperation'
 import {
   initialTableState,
   tableReducer,
@@ -70,9 +74,15 @@ export function useTableReceiving() {
     mutationFn: scanBuffer,
     retry: false,
   })
+  // Closing signs the operation with the passkey: draft the parts, then one
+  // authenticator touch per part, then submit the assertions.
   const closeCargoplaceMutation = useMutation({
     mutationKey: ['receiving', 'table', 'close-cargoplace'],
-    mutationFn: closeCargoplace,
+    mutationFn: async (cargoplaceId: string) => {
+      const draft = await draftCloseCargoplace(cargoplaceId)
+      const assertions = await signOperation(draft)
+      return submitCloseCargoplaceRequest(draft.operationId, assertions)
+    },
     retry: false,
   })
 
@@ -185,8 +195,21 @@ export function useTableReceiving() {
       const result = await closeCargoplaceMutation.mutateAsync(
         state.cargoplace.cargoplaceId,
       )
-      dispatch({ type: 'CARGOPLACE_CLOSED', summary: result.summary })
+      dispatch({
+        type: 'CARGOPLACE_CLOSED',
+        summary: result.summary,
+        operationId: result.operationId,
+      })
     } catch (error) {
+      // A DOMException comes from the authenticator (dismissed prompt or
+      // timeout) — the request never happened, so the receiving error
+      // classification does not apply; show the signing text instead.
+      const signError = webauthnSignErrorText(error)
+      if (signError) {
+        dispatch({ type: 'SHOW_ERROR', message: signError })
+        return
+      }
+
       dispatch(errorAction(error))
     }
   }

@@ -50,9 +50,6 @@ export interface KeyActionDraft {
   timeout: number
 }
 
-export interface AssertionJSON {
-  credentialId: string
-  authenticatorData: string
-  clientDataJson: string
-  signature: string
-}
+// The assertion wire shape is shared with the signed-action flow; the
+// canonical definition lives in @/shared/lib.
+export type { AssertionJSON } from '@/shared/lib'
