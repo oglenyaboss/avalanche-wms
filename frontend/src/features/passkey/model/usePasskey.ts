@@ -8,6 +8,7 @@ import {
   getAdminKeyExport,
   getMyPasskey,
   getOrganizationKeys,
+  rejectKey,
   submitKeyConfirmation,
 } from '../api/passkeyApi'
 import { createPasskeyCredential, getAssertion, toCreationOptions, toRequestOptions } from './webauthn'
@@ -68,6 +69,16 @@ export function useConfirmKey() {
       const assertion = await getAssertion(toRequestOptions(draft))
       return submitKeyConfirmation(draft.actionId, assertion)
     },
+    retry: false,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['passkey'] }),
+  })
+}
+
+export function useRejectKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: ['passkey', 'rejectKey'],
+    mutationFn: (keyId: string) => rejectKey(keyId),
     retry: false,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['passkey'] }),
   })

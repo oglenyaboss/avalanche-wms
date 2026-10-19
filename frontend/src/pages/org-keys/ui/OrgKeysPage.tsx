@@ -5,12 +5,14 @@ import {
   passkeyErrorText,
   useConfirmKey,
   useOrganizationKeys,
+  useRejectKey,
 } from '@/features/passkey'
 import { Alert, AlertDescription } from '@/shared/ui'
 
 export function OrgKeysPage() {
   const { data, isPending, isError, error } = useOrganizationKeys()
   const confirm = useConfirmKey()
+  const reject = useRejectKey()
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-6 py-10">
@@ -33,12 +35,19 @@ export function OrgKeysPage() {
             members={data.members}
             onConfirm={(keyId) => confirm.mutate(keyId)}
             confirmingKeyId={confirm.isPending ? (confirm.variables ?? null) : null}
+            onReject={(keyId) => reject.mutate(keyId)}
+            rejectingKeyId={reject.isPending ? (reject.variables ?? null) : null}
           />
           {confirm.isError && (
             <Alert variant="destructive">
               <AlertDescription>
                 {assertionErrorText(confirm.error) ?? passkeyErrorText(confirm.error)}
               </AlertDescription>
+            </Alert>
+          )}
+          {reject.isError && (
+            <Alert variant="destructive">
+              <AlertDescription>{passkeyErrorText(reject.error)}</AlertDescription>
             </Alert>
           )}
           <AdminKeyDownloadButton />

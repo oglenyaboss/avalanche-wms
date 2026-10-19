@@ -145,6 +145,10 @@ export async function draftKeyConfirmation(targetKeyId: string): Promise<KeyActi
   return mapKeyActionDraft(unwrap(data))
 }
 
+export async function rejectKey(targetKeyId: string): Promise<void> {
+  await apiClient.post('/passkeys/organization/keys/reject', { target_key_id: targetKeyId })
+}
+
 export async function submitKeyConfirmation(
   actionId: string,
   assertion: AssertionJSON

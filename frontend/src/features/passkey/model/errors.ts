@@ -6,7 +6,7 @@ const FALLBACK = 'Не удалось выполнить операцию'
 
 const CODE_TEXTS: Record<string, string> = {
   SIGNER_KEY_NOT_ACTIVE: 'Ваш ключ ещё не активен в цепи',
-  TARGET_NOT_PENDING: 'Ключ уже подтверждён или отозван',
+  TARGET_NOT_PENDING: 'Ключ уже подтверждён, отклонён или отозван',
   ACTION_IN_PROGRESS: 'Подтверждение уже отправлено',
   ACTION_ALREADY_SUBMITTED: 'Подтверждение уже отправлено',
   ACTION_NOT_FOUND: 'Черновик подтверждения не найден, попробуйте ещё раз',
