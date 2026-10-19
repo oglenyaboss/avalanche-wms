@@ -92,6 +92,12 @@ func (r *Registry) OrganizationExists(ctx context.Context, orgID [16]byte) (bool
 // Address — адрес контракта реестра.
 func (r *Registry) Address() common.Address { return r.addr }
 
+// SignedAction.State (ConsortiumRegistry): исход подписанного действия на цепи.
+const (
+	actionStateApplied  uint8 = 1
+	actionStateRejected uint8 = 2
+)
+
 // ActionOutcomes восстанавливает исход каждого actionId из receipt'а tx с
 // applyKeyActions. Логи реестра (Address == r.addr):
 //   - KeyRegistered/KeyRevoked (actionId — последнее non-indexed поле в data)
@@ -147,12 +153,12 @@ func (r *Registry) ActionOutcomes(ctx context.Context, receipt *types.Receipt, i
 		}
 		state, err := r.actionState(ctx, [16]byte(id))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("action state %s: %w", id, err)
 		}
 		switch state {
-		case 1: // SignedAction.State.Applied
+		case actionStateApplied:
 			outcomes[id] = ActionOutcome{Applied: true}
-		case 2: // SignedAction.State.Rejected — reason достаём из журнала
+		case actionStateRejected: // reason достаём из журнала
 			reason, err := r.rejectedReason(ctx, actionRejected, id)
 			if err != nil {
 				return nil, err
@@ -173,7 +179,7 @@ func (r *Registry) actionState(ctx context.Context, id [16]byte) (uint8, error) 
 	}
 	out, err := r.call(ctx, data)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("call actionState: %w", err)
 	}
 	vals, err := r.abi.Unpack("actionState", out)
 	if err != nil {

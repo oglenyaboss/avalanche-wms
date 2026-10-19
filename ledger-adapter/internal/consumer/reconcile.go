@@ -96,13 +96,15 @@ func reconcileReceipt(
 // возвращается наружу — строки остаются SENT, их подберёт следующий reconcile.
 func applyActionOutcomes(ctx context.Context, resolver ActionResolver, st terminalMarker, receipt *types.Receipt, ids []uuid.UUID, txHash string) error {
 	if resolver == nil {
-		// Недостижимо из нормального потока (без реестра действия не отправляются),
-		// но panic на nil-интерфейсе в collector-горутине недопустим — громкая ошибка.
+		// Достижимо: рестарт адаптера без REGISTRY_ADDR при живых SENT
+		// signed_action-строках — flusher их уже не отправит (без реестра действия
+		// терминально фейлятся), а reconcile дойдёт до их tx. Без этой проверки —
+		// panic на nil-интерфейсе в горутине; громкая ошибка вместо него.
 		return errors.New("apply action outcomes: registry not configured")
 	}
 	outcomes, err := resolver.ActionOutcomes(ctx, receipt, ids)
 	if err != nil {
-		return err
+		return fmt.Errorf("action outcomes: %w", err)
 	}
 	var applied []uuid.UUID
 	byReason := make(map[uint8][]uuid.UUID)

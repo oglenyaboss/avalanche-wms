@@ -87,7 +87,7 @@ ledger-adapter/
 | `PRIVATE_KEY` | ✓ (static) | — | Hex signer key (0x-prefixed ok); не нужен в kms-режиме |
 | `SIGNER_MODE` | | `static` | `static` — **только локальная разработка**: приватник в env открытым текстом; `kms` — подпись во внешнем Web3Signer (ключ адаптеру не нужен) |
 | `KMS_URL` | ✓ (kms) | — | Базовый URL Web3Signer (eth1 mode), напр. `http://web3signer:9000` |
-| `KMS_PUBLIC_KEYS` | ✓ (kms) | — | CSV identifier'ов ключей (uncompressed X\|\|Y public key из `GET /api/v1/eth1/publicKeys`); multi-signer — просто перечислить несколько. Override: `KMS_PUBLIC_KEYS_FILE` |
+| `KMS_PUBLIC_KEYS` | ✓ (kms) | — | Identifier единственного ключа (uncompressed X\|\|Y public key из `GET /api/v1/eth1/publicKeys`); больше одного адаптер отклоняет на старте. Override: `KMS_PUBLIC_KEYS_FILE` |
 | `BATCH_SIZE` | | `10` | Events per tx |
 | `BATCH_TIMEOUT` | | `100ms` | Flush by time если batch не набрался |
 | `DLQ_TOPIC` | | `wms.dlq.v1` | |
@@ -117,8 +117,7 @@ make kms-down # том kms_keys выживает — рефанд не нуже�
 ```
 
 Prod-путь без изменения адаптера — конфиги Web3Signer `type: "hashicorp"`
-(ключ в Vault KV v2) или `type: "aws-kms"`; `PIPELINE_WINDOW` масштабируется
-от числа KMS-ключей так же, как от `PRIVATE_KEYS`.
+(ключ в Vault KV v2) или `type: "aws-kms"`.
 
 ### Локально без docker (unit-dev)
 

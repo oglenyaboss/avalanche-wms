@@ -119,8 +119,6 @@ kms-up: ## Start stack with adapter signing via external KMS (Web3Signer)
 	$(COMPOSE_KMS) --profile test up -d --build
 	@echo ""
 	@echo "KMS stack running: ledger-adapter signs via web3signer."
-	@echo "Multi-signer: KMS_SIGNER_COUNT=3 make kms-up (после изменения — форс-рекреация"
-	@echo "              адаптера: ... up -d --force-recreate ledger-adapter, env меняет kms-init)"
 	@echo "Follow logs  : make kms-logs"
 	@echo "NOTE: стеки репо монопольны (container_name глобальны) — сначала погасите"
 	@echo "      стеки других worktree-ов (make down там)."

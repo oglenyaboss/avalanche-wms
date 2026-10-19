@@ -17,6 +17,12 @@ import (
 // Kafka value = JSON-строка с конвертом ActionEnvelope, key = actionId.
 const aggregateSignedAction = "signed_action"
 
+// Значения SignedAction.Type из ADR-0001.
+const (
+	actionTypeKeyRegister uint8 = 5
+	actionTypeKeyRevoke   uint8 = 6
+)
+
 // ActionEnvelope — конверт подписанного действия из outbox payload (контракт §2).
 // hex-поля 0x-prefixed lowercase; keyId — ключ ПОДПИСАНТА (админа).
 type ActionEnvelope struct {
@@ -131,7 +137,7 @@ func parseSignedAction(m *kafka.Message, eventID uuid.UUID, eventIDStr string) (
 	if env.ActionID != eventIDStr {
 		return nil, fmt.Errorf("signed_action: actionId %q != id header %q", env.ActionID, eventIDStr)
 	}
-	if env.ActionType != 5 && env.ActionType != 6 {
+	if env.ActionType != actionTypeKeyRegister && env.ActionType != actionTypeKeyRevoke {
 		return nil, fmt.Errorf("unsupported action type %d", env.ActionType)
 	}
 	if env.SubjectKey == nil {
