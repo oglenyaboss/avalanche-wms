@@ -1,7 +1,6 @@
 import type { CloseCargoplaceSummary } from '@/entities/cargoplace'
+import { OperationChainStatus } from '@/entities/signed-action'
 import { Alert, AlertDescription } from '@/shared/ui'
-
-import { OperationChainStatus } from './OperationChainStatus'
 
 interface CargoplaceSummaryProps {
   summary: CloseCargoplaceSummary

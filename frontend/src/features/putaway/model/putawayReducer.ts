@@ -7,10 +7,9 @@ import type {
 
 // The putaway flow walks three phases for one buffer:
 //   buffer → pick → storage
-// The storage phase has two sub-steps: scan the target bin, then place picked
-// products into it one at a time.
+// The storage phase has one step: scan the target bin — one signed action
+// places the whole unplaced cart into it.
 export type PutawayPhase = 'buffer' | 'pick' | 'storage'
-export type StorageStep = 'bin' | 'place'
 
 export interface ActiveBuffer {
   bufferBinId: string
@@ -21,10 +20,6 @@ export interface ActiveBuffer {
   totalProducts: number
 }
 
-export interface ActiveStorageBin {
-  storageBinId: string
-}
-
 export interface PutawayState {
   phase: PutawayPhase
   buffer: ActiveBuffer | null
@@ -33,8 +28,6 @@ export interface PutawayState {
   // Buffer's RECEIVED inventory count from the last scan-product (informational
   // — it does not decrement as items are picked).
   cartSize: number | null
-  storageStep: StorageStep
-  activeBin: ActiveStorageBin | null
   // product_ids already placed into a storage bin during this task.
   placedProductIds: string[]
   // The last successful placement (drives the running success message).
@@ -50,9 +43,11 @@ export type PutawayAction =
   | { type: 'BUFFER_SCANNED'; result: BufferScan }
   | { type: 'PRODUCT_PICKED'; result: PickedProductResult }
   | { type: 'GO_TO_STORAGE' }
-  | { type: 'STORAGE_BIN_SCANNED'; storageBinId: string }
-  | { type: 'CHANGE_BIN' }
-  | { type: 'PRODUCT_PLACED'; productId: string; result: StoragePlacement }
+  | {
+      type: 'PRODUCTS_PLACED'
+      productIds: string[]
+      result: StoragePlacement
+    }
   | { type: 'OPEN_DRAFTER' }
   | { type: 'CLOSE_DRAFTER' }
   | { type: 'OPEN_CONFIRM_FINISH' }
@@ -67,8 +62,6 @@ export const initialPutawayState: PutawayState = {
   buffer: null,
   cart: [],
   cartSize: null,
-  storageStep: 'bin',
-  activeBin: null,
   placedProductIds: [],
   lastPlacement: null,
   drafterOpen: false,
@@ -140,51 +133,24 @@ export function putawayReducer(
       return {
         ...state,
         phase: 'storage',
-        storageStep: 'bin',
-        activeBin: null,
         drafterOpen: false,
         errorMessage: null,
       }
     }
 
-    case 'STORAGE_BIN_SCANNED': {
+    case 'PRODUCTS_PLACED': {
       if (state.phase !== 'storage') {
         return state
       }
 
-      return {
-        ...state,
-        storageStep: 'place',
-        activeBin: { storageBinId: action.storageBinId },
-        // The success banner belongs to a bin; a new bin starts without one.
-        lastPlacement: null,
-        errorMessage: null,
+      // One signed action places the whole unplaced cart into the scanned
+      // bin; the batch lands as a single state transition.
+      const placedProductIds = state.placedProductIds.slice()
+      for (const productId of action.productIds) {
+        if (!placedProductIds.includes(productId)) {
+          placedProductIds.push(productId)
+        }
       }
-    }
-
-    case 'CHANGE_BIN': {
-      if (state.phase !== 'storage') {
-        return state
-      }
-
-      return {
-        ...state,
-        storageStep: 'bin',
-        activeBin: null,
-        lastPlacement: null,
-        errorMessage: null,
-      }
-    }
-
-    case 'PRODUCT_PLACED': {
-      if (state.phase !== 'storage') {
-        return state
-      }
-
-      const alreadyPlaced = state.placedProductIds.includes(action.productId)
-      const placedProductIds = alreadyPlaced
-        ? state.placedProductIds
-        : [...state.placedProductIds, action.productId]
 
       return {
         ...state,

@@ -1,6 +1,7 @@
 import { useReducer } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
+import { signOperation } from '@/entities/signed-action'
 import { webauthnSignErrorText } from '@/shared/lib'
 
 import {
@@ -18,7 +19,6 @@ import {
   isBoxTerminalError,
   isCargoplaceTerminalError,
 } from './errors'
-import { signOperation } from './signOperation'
 import {
   initialTableState,
   tableReducer,

@@ -42,12 +42,14 @@ export interface PickedProduct {
   qrCode: string
 }
 
-// scan-storage-bin result: products moved RECEIVED → STORED into a storage bin.
-// storageBinCode (e.g. "M2-A-03") is only known from this response — there is
-// no separate "resolve bin" endpoint.
+// scan-storage-bin/submit result: products moved RECEIVED → STORED into a
+// storage bin by one signed operation. storageBinCode (e.g. "M2-A-03") is only
+// known from this response — there is no separate "resolve bin" endpoint.
+// operationId identifies the signed action for the chain-status polling.
 export interface StoragePlacement {
   storageBinId: string
   storageBinCode: string
   productsPlaced: number
   outboxEventsCreated: number
+  operationId: string
 }
