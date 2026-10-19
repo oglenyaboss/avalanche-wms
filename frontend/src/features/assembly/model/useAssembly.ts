@@ -2,13 +2,16 @@ import { useEffect, useReducer } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 
 import type { Destination } from '@/entities/assembly'
+import { signOperation } from '@/entities/signed-action'
+import { webauthnSignErrorText } from '@/shared/lib'
 
 import {
   allocate,
+  draftUnloadToShippingBuffer,
   getDestinations,
   getTasks,
   pick,
-  scanShippingBuffer,
+  submitUnloadToShippingBuffer,
 } from '../api/assemblyApi'
 import { getAssemblyErrorMessage } from './errors'
 import { assemblyReducer, initialAssemblyState } from './assemblyReducer'
@@ -57,9 +60,16 @@ export function useAssembly() {
     mutationFn: pick,
     retry: false,
   })
-  const scanBufferMutation = useMutation({
-    mutationKey: ['assembly', 'scan-shipping-buffer'],
-    mutationFn: scanShippingBuffer,
+  // Scanning the shipping buffer unloads the whole cart as one signed action:
+  // draft the batch against the buffer bin, one passkey touch per part, then
+  // submit the assertions.
+  const unloadMutation = useMutation({
+    mutationKey: ['assembly', 'unload-to-shipping-buffer'],
+    mutationFn: async (bufferBinId: string) => {
+      const draft = await draftUnloadToShippingBuffer(bufferBinId)
+      const assertions = await signOperation(draft)
+      return submitUnloadToShippingBuffer(draft.operationId, assertions)
+    },
     retry: false,
   })
 
@@ -140,14 +150,14 @@ export function useAssembly() {
   const backToPick = () => dispatch({ type: 'BACK_TO_PICK' })
 
   const submitBuffer = async (bufferBinId: string) => {
-    if (state.phase !== 'buffer' || scanBufferMutation.isPending) {
+    if (state.phase !== 'buffer' || unloadMutation.isPending) {
       return
     }
 
     const destinationId = state.selectedDestination?.destinationId
 
     try {
-      const result = await scanBufferMutation.mutateAsync(bufferBinId)
+      const result = await unloadMutation.mutateAsync(bufferBinId)
       // The batch is placed; BUFFER_SCANNED returns to the store panel keeping
       // the store selected (multi-trip). Reload the remaining PENDING tasks so
       // the operator can keep picking for the same store without re-selecting.
@@ -156,6 +166,16 @@ export function useAssembly() {
         await loadTasks(destinationId)
       }
     } catch (error) {
+      // A DOMException comes from the authenticator (dismissed prompt or
+      // timeout) — the unload may not even have been requested, so the
+      // assembly error classification does not apply; show the signing text
+      // instead.
+      const signError = webauthnSignErrorText(error)
+      if (signError) {
+        showError(signError)
+        return
+      }
+
       showError(getAssemblyErrorMessage(error))
     }
   }
@@ -181,6 +201,6 @@ export function useAssembly() {
     isAllocating: allocateMutation.isPending,
     isLoadingTasks: tasksMutation.isPending,
     isPicking: pickMutation.isPending,
-    isPlacing: scanBufferMutation.isPending,
+    isPlacing: unloadMutation.isPending,
   }
 }

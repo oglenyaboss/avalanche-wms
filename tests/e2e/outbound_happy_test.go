@@ -98,11 +98,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
 
-	var putaway scanStorageBinData
-	postJSON(t, env, token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    []string{scannedProduct.ProductID.String()},
-		"storage_bin_id": fixture.StorageBinID.String(),
-	}, &putaway)
+	putaway := placeToStorageBinSigned(t, env, op, []uuid.UUID{scannedProduct.ProductID}, fixture.StorageBinID)
 	require.Equal(t, 1, putaway.ProductsPlaced)
 	require.Equal(t, 1, putaway.OutboxEventsCreated)
 	requireProductStatus(t, ctx, env, scannedProduct.ProductID, "STORED")
@@ -126,7 +122,11 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	productIDs := productIDsFromTasks(tasks.Tasks)
 	require.Equal(t, []string{scannedProduct.ProductID.String()}, productIDs)
 
-	// 8. Pick the product: task DONE, product ASSEMBLED, picking outbox + on-chain.
+	// 8. Pick the product: task DONE, product ASSEMBLED. #14: the pick itself
+	// writes no picking event — the signed unload action is the picking event,
+	// so the on-chain assertions follow the unload.
+	// The unload must be done by the same (signed) operator who picked: the
+	// basket is keyed by assembly_tasks.operator_id.
 	for i, productID := range productIDs {
 		parsedProductID, err := uuid.Parse(productID)
 		require.NoError(t, err)
@@ -134,27 +134,24 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 		requireTaskStatus(t, ctx, env, parsedProductID, "PENDING")
 
 		var picked pickData
-		postJSON(t, env, token, "/assembly/pick", map[string]string{
+		postJSON(t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": productID,
 		}, &picked)
 		require.Equal(t, productID, picked.ProductID)
 		require.Equal(t, i+1, picked.CartSize)
 		requireProductStatus(t, ctx, env, parsedProductID, "ASSEMBLED")
 		requireTaskStatus(t, ctx, env, parsedProductID, "DONE")
-
-		pickingEventID := eventIDForAggregate(t, ctx, env, parsedProductID, "picking")
-		waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
-		stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
 	}
-	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "picking"))
 
-	// 9. Move from the picking cart into the shipping buffer so the order is ASSEMBLED.
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fixture.ShippingBinID.String(),
-	}, &placed)
+	// 9. Unload the picking basket into the shipping buffer so the order is ASSEMBLED.
+	placed := unloadToShippingBufferSigned(t, env, op, fixture.ShippingBinID.String())
 	require.Equal(t, len(productIDs), placed.ProductsPlaced)
 	require.GreaterOrEqual(t, placed.OrdersAssembled, 1)
+
+	pickingEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "picking")
+	waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
+	stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
+	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "picking"))
 	requireOrderStatus(t, ctx, env, fixture.OrderID, "ASSEMBLED")
 	for _, productID := range productIDs {
 		parsedProductID, err := uuid.Parse(productID)

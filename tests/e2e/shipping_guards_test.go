@@ -25,6 +25,8 @@ func TestShipping_DoubleShip_Conflict(t *testing.T) {
 
 	const productCount = 2
 	token := operatorToken(t, env)
+	// #14: the unload is a signed action, so the picking operator is a signed one.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", productCount, productCount)
 
 	// Allocate and pick all products.
@@ -37,16 +39,13 @@ func TestShipping_DoubleShip_Conflict(t *testing.T) {
 	orderProductIDs := productIDsForOrder(t, ctx, env, fx.OrderID)
 	require.Len(t, orderProductIDs, productCount)
 	for _, pid := range orderProductIDs {
-		postJSON[pickData](t, env, token, "/assembly/pick", map[string]string{
+		postJSON[pickData](t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, nil)
 	}
 
-	// Place into shipping buffer.
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	// Unload the basket into the shipping buffer.
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 	require.Equal(t, productCount, placed.ProductsPlaced)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 
@@ -144,9 +143,11 @@ func TestShipping_ScanDriver_AlreadyDeparted(t *testing.T) {
 	require.NotNil(t, env)
 
 	token := operatorToken(t, env)
+	// #14: the unload is a signed action, so the picking operator is a signed one.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 1, 1)
 
-	// Full flow: allocate -> pick -> scan-shipping-buffer -> scan-buffer ->
+	// Full flow: allocate -> pick -> signed unload -> scan-buffer ->
 	// scan-driver -> ship (all products -> dispatch DEPARTED).
 	postJSON[allocateData](t, env, token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
@@ -155,14 +156,12 @@ func TestShipping_ScanDriver_AlreadyDeparted(t *testing.T) {
 	orderProductIDs := productIDsForOrder(t, ctx, env, fx.OrderID)
 	require.Len(t, orderProductIDs, 1)
 	for _, pid := range orderProductIDs {
-		postJSON[pickData](t, env, token, "/assembly/pick", map[string]string{
+		postJSON[pickData](t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, nil)
 	}
 
-	postJSON[scanShippingBufferData](t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, nil)
+	unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 
 	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),

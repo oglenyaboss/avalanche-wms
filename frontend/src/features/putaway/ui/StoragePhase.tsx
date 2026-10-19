@@ -1,50 +1,30 @@
 import type { PickedProduct, StoragePlacement } from '@/entities/putaway'
+import { OperationChainStatus } from '@/entities/signed-action'
 import { Alert, AlertDescription, Button } from '@/shared/ui'
 
-import type { ActiveBuffer, ActiveStorageBin } from '../model/putawayReducer'
-import { productQrSchema, storageBinUuidSchema } from '../model/schema'
+import type { ActiveBuffer } from '../model/putawayReducer'
+import { storageBinUuidSchema } from '../model/schema'
 import { ScanForm } from './ScanForm'
 
 interface StoragePhaseProps {
   buffer: ActiveBuffer
   cart: PickedProduct[]
   placedProductIds: string[]
-  storageStep: 'bin' | 'place'
-  activeBin: ActiveStorageBin | null
   lastPlacement: StoragePlacement | null
   onScanBin: (value: string) => Promise<void> | void
-  onScanProduct: (value: string) => Promise<void> | void
-  onChangeBin: () => void
   onFinish: () => void
   isPlacing: boolean
   isBlocked: boolean
 }
 
-// Resolve the human-readable bin code. It only exists after a successful
-// placement into the active bin (no resolve endpoint), so before that we show a
-// short form of the scanned UUID.
-function binLabel(
-  activeBin: ActiveStorageBin,
-  lastPlacement: StoragePlacement | null,
-): string {
-  if (lastPlacement && lastPlacement.storageBinId === activeBin.storageBinId) {
-    return lastPlacement.storageBinCode
-  }
-  return `${activeBin.storageBinId.slice(0, 8)}…`
-}
-
-// Step 3 of putaway (two sub-steps): scan a storage bin, then place picked
-// products into it one at a time. The whole task is finished from either step.
+// Step 3 of putaway: scanning a storage bin places the whole unplaced cart
+// into it as one signed action. The task is finished from here as before.
 export function StoragePhase({
   buffer,
   cart,
   placedProductIds,
-  storageStep,
-  activeBin,
   lastPlacement,
   onScanBin,
-  onScanProduct,
-  onChangeBin,
   onFinish,
   isPlacing,
   isBlocked,
@@ -56,16 +36,7 @@ export function StoragePhase({
     <section className="mx-auto flex max-w-xl flex-col gap-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-0.5">
-          {storageStep === 'place' && activeBin ? (
-            <>
-              <span className="text-sm text-muted-foreground">{taskLabel}</span>
-              <h2 className="text-lg font-semibold">
-                Ячейка {binLabel(activeBin, lastPlacement)}
-              </h2>
-            </>
-          ) : (
-            <h2 className="text-lg font-semibold">{taskLabel}</h2>
-          )}
+          <h2 className="text-lg font-semibold">{taskLabel}</h2>
           <p className="text-sm text-muted-foreground">
             Размещено: {placedCount} из {cart.length}
           </p>
@@ -76,15 +47,18 @@ export function StoragePhase({
       </div>
 
       {lastPlacement ? (
-        <Alert variant="success">
-          <AlertDescription>
-            Размещено в ячейку {lastPlacement.storageBinCode}. Всего размещено:{' '}
-            {placedCount} из {cart.length}.
-          </AlertDescription>
-        </Alert>
+        <div className="flex flex-col gap-3">
+          <Alert variant="success">
+            <AlertDescription>
+              Размещено в ячейку {lastPlacement.storageBinCode}:{' '}
+              {lastPlacement.productsPlaced} товаров
+            </AlertDescription>
+          </Alert>
+          <OperationChainStatus operationId={lastPlacement.operationId} />
+        </div>
       ) : null}
 
-      {storageStep === 'bin' || !activeBin ? (
+      {placedCount < cart.length ? (
         <ScanForm
           key="storage-bin"
           title="Отсканируйте ШК ячейки, в которую хотите положить товар"
@@ -93,37 +67,11 @@ export function StoragePhase({
           placeholder="Данные со штрих-кода"
           submitLabel="Далее"
           onScan={onScanBin}
-          isScanning={false}
+          isScanning={isPlacing}
           isBlocked={isBlocked}
           schema={storageBinUuidSchema}
         />
-      ) : (
-        <div className="flex flex-col gap-3">
-          <ScanForm
-            key="storage-place"
-            title="Отсканируйте QR-код товара, складываемого в ячейку"
-            inputId="putaway-place"
-            srLabel="QR-код товара"
-            placeholder="Данные с QR-кода"
-            submitLabel="Положить"
-            manualHint="В случае неполадки сканирования, введите QR вручную"
-            onScan={onScanProduct}
-            isScanning={isPlacing}
-            isBlocked={isBlocked}
-            schema={productQrSchema}
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="self-start"
-            onClick={onChangeBin}
-            disabled={isPlacing}
-          >
-            Сменить ячейку
-          </Button>
-        </div>
-      )}
+      ) : null}
     </section>
   )
 }

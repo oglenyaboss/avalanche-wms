@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -270,6 +272,69 @@ func closeCargoplaceSigned(t *testing.T, env *env, op *signedOperator, cargoplac
 	return submitCloseCargoplace(t, env, op.token, draft.OperationID, assertions)
 }
 
+// ── signed putaway (basket → storage bin) DTOs and helpers ─────────────────
+
+// draftPlaceToStorageBin POSTs the putaway draft endpoint: the draft response
+// has the same shape as the cargoplace close draft, so it reuses closeDraftDTO.
+func draftPlaceToStorageBin(t *testing.T, env *env, op *signedOperator, productIDs []uuid.UUID, binID uuid.UUID) closeDraftDTO {
+	t.Helper()
+	var draft closeDraftDTO
+	postJSON(t, env, op.token, "/putaway/scan-storage-bin/draft", map[string]any{
+		"product_ids":    uuidStrings(productIDs),
+		"storage_bin_id": binID.String(),
+	}, &draft)
+	return draft
+}
+
+// submitPlaceToStorageBin POSTs the putaway submit endpoint and requires 200.
+func submitPlaceToStorageBin(t *testing.T, env *env, token, operationID string, assertions []map[string]string) scanStorageBinData {
+	t.Helper()
+	var result scanStorageBinData
+	postJSON(t, env, token, "/putaway/scan-storage-bin/submit", map[string]any{
+		"operation_id": operationID,
+		"assertions":   assertions,
+	}, &result)
+	return result
+}
+
+// placeToStorageBinSigned runs the whole signed putaway: draft → sign → submit.
+func placeToStorageBinSigned(t *testing.T, env *env, op *signedOperator, productIDs []uuid.UUID, binID uuid.UUID) scanStorageBinData {
+	t.Helper()
+	draft := draftPlaceToStorageBin(t, env, op, productIDs, binID)
+	assertions := signDraft(t, op, draft)
+	return submitPlaceToStorageBin(t, env, op.token, draft.OperationID, assertions)
+}
+
+// draftPlaceToStorageBinRaw POSTs the putaway draft endpoint and returns the raw
+// status + error code + message without failing, for guard tests. Product ids stay
+// strings so a guard can pass a bogus (but well-formed) uuid.
+func draftPlaceToStorageBinRaw(t *testing.T, env *env, token string, productIDs []string, binID string) (int, string, string) {
+	t.Helper()
+	return postExpectError(t, env, token, "/putaway/scan-storage-bin/draft", map[string]any{
+		"product_ids":    productIDs,
+		"storage_bin_id": binID,
+	})
+}
+
+// submitPlaceToStorageBinRaw POSTs the putaway submit endpoint and returns the
+// raw status + error code + message without failing, for guard tests.
+func submitPlaceToStorageBinRaw(t *testing.T, env *env, token, operationID string, assertions []map[string]string) (int, string, string) {
+	t.Helper()
+	return postExpectError(t, env, token, "/putaway/scan-storage-bin/submit", map[string]any{
+		"operation_id": operationID,
+		"assertions":   assertions,
+	})
+}
+
+// uuidStrings renders uuids as their canonical strings.
+func uuidStrings(ids []uuid.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}
+
 // operationStatusDTO models GET /signed-actions/operations/{id}.
 type operationStatusDTO struct {
 	OperationID string `json:"operation_id"`
@@ -358,16 +423,52 @@ func waitForOperationState(t *testing.T, ctx context.Context, env *env, token, o
 
 // softReceiveDetailsHash is an independent re-implementation of ADR-0001 §4 for
 // Receive: keccak256(abi.encode(bytes32 salt, bytes16 cargoplaceId,
-// bytes16 operatorId, uint64 occurredAtMs)). bytes16 words are left-aligned
-// (zero tail), the uint64 is right-aligned big-endian in its word.
+// bytes16 operatorId, uint64 occurredAtMs)).
 func softReceiveDetailsHash(salt [32]byte, cargoplaceID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
-	var buf [128]byte
-	copy(buf[0:32], salt[:])
-	copy(buf[32:48], cargoplaceID[:])
-	copy(buf[64:80], operatorID[:])
-	binary.BigEndian.PutUint64(buf[120:128], occurredAtMs)
+	var cargo [32]byte
+	copy(cargo[:16], cargoplaceID[:])
+	return softEntityDetailsHash(salt, cargo, operatorID, occurredAtMs)
+}
+
+// softPutAwayDetailsHash is an independent re-implementation of ADR-0001 §4 for
+// PutAway: keccak256(abi.encode(bytes32 salt, bytes16 storageBinId,
+// bytes16 operatorId, uint64 occurredAtMs)).
+func softPutAwayDetailsHash(salt [32]byte, storageBinID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	var bin [32]byte
+	copy(bin[:16], storageBinID[:])
+	return softEntityDetailsHash(salt, bin, operatorID, occurredAtMs)
+}
+
+// softDetailsWords is the one shared encoder of the ADR-0001 details-hash words
+// (receive, putaway, pick): a uuid.UUID is left-aligned in its 32-byte word
+// (zero tail), a uint64 is right-aligned big-endian, a [32]byte passes through
+// unchanged (salt), an int encodes an ABI offset/length word.
+func softDetailsWords(words ...any) []byte {
+	buf := make([]byte, 0, 32*len(words))
+	for _, w := range words {
+		var word [32]byte
+		switch v := w.(type) {
+		case [32]byte:
+			word = v
+		case uuid.UUID:
+			copy(word[:16], v[:])
+		case uint64:
+			binary.BigEndian.PutUint64(word[24:], v)
+		case int:
+			binary.BigEndian.PutUint64(word[24:], uint64(v))
+		default:
+			panic(fmt.Sprintf("softDetailsWords: unsupported word type %T", w))
+		}
+		buf = append(buf, word[:]...)
+	}
+	return buf
+}
+
+// softEntityDetailsHash is the shared body of the single-entity details hashes
+// (receive, putaway).
+func softEntityDetailsHash(salt, entity [32]byte, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
 	var out [32]byte
-	copy(out[:], crypto.Keccak256(buf[:]))
+	copy(out[:], crypto.Keccak256(softDetailsWords(salt, entity, operatorID, occurredAtMs)))
 	return out
 }
 
@@ -398,4 +499,96 @@ func warehouseActionsContainingProduct(t *testing.T, ctx context.Context, env *e
 // bigIntFromWord reads a 32-byte ABI word as a big-endian uint256.
 func bigIntFromWord(word []byte) *big.Int {
 	return new(big.Int).SetBytes(word)
+}
+
+// ── signed assembly unload (shipping-buffer scan) DTOs and helpers ───────────
+
+// shippingBufferData models the submit response of the signed unload: the old
+// shipping-buffer response plus the operation id.
+type shippingBufferData struct {
+	BufferBinID     string `json:"buffer_bin_id"`
+	ProductsPlaced  int    `json:"products_placed"`
+	OrdersAssembled int    `json:"orders_assembled"`
+	OperationID     string `json:"operation_id"`
+}
+
+// draftUnloadToShippingBuffer POSTs the draft endpoint of the signed unload.
+func draftUnloadToShippingBuffer(t *testing.T, env *env, op *signedOperator, bufferBinID string) closeDraftDTO {
+	t.Helper()
+	var draft closeDraftDTO
+	postJSON(t, env, op.token, "/assembly/scan-shipping-buffer/draft", map[string]string{
+		"buffer_bin_id": bufferBinID,
+	}, &draft)
+	return draft
+}
+
+// draftUnloadToShippingBufferRaw POSTs the draft endpoint and returns the raw
+// error envelope (status + code) instead of failing the test.
+func draftUnloadToShippingBufferRaw(t *testing.T, env *env, token, bufferBinID string) (int, string) {
+	t.Helper()
+	status, code, _ := postExpectError(t, env, token, "/assembly/scan-shipping-buffer/draft", map[string]string{
+		"buffer_bin_id": bufferBinID,
+	})
+	return status, code
+}
+
+// submitUnloadToShippingBuffer POSTs the submit endpoint and requires 200.
+func submitUnloadToShippingBuffer(t *testing.T, env *env, token, operationID string, assertions []map[string]string) shippingBufferData {
+	t.Helper()
+	var result shippingBufferData
+	postJSON(t, env, token, "/assembly/scan-shipping-buffer/submit", map[string]any{
+		"operation_id": operationID,
+		"assertions":   assertions,
+	}, &result)
+	return result
+}
+
+// submitUnloadToShippingBufferRaw POSTs the submit endpoint and returns the raw
+// error envelope (status + code) instead of failing the test.
+func submitUnloadToShippingBufferRaw(t *testing.T, env *env, token, operationID string, assertions []map[string]string) (int, string) {
+	t.Helper()
+	status, code, _ := postExpectError(t, env, token, "/assembly/scan-shipping-buffer/submit", map[string]any{
+		"operation_id": operationID,
+		"assertions":   assertions,
+	})
+	return status, code
+}
+
+// unloadToShippingBufferSigned runs the whole signed unload: draft → sign → submit.
+func unloadToShippingBufferSigned(t *testing.T, env *env, op *signedOperator, bufferBinID string) shippingBufferData {
+	t.Helper()
+	draft := draftUnloadToShippingBuffer(t, env, op, bufferBinID)
+	assertions := signDraft(t, op, draft)
+	return submitUnloadToShippingBuffer(t, env, op.token, draft.OperationID, assertions)
+}
+
+// softPickDetailsHash is an independent re-implementation of ADR-0001 §4 for
+// Pick: keccak256(abi.encode(bytes32 salt, bytes16 shippingBufferBinId,
+// bytes16[] orderIds, bytes16 operatorId, uint64 occurredAtMs)). Head: salt,
+// bin (left-aligned), offset 0xa0, operator (left-aligned), uint64 (right-aligned);
+// tail: length, one left-aligned bytes16 per orderId. orderIds go ascending by
+// raw bytes without duplicates.
+func softPickDetailsHash(salt [32]byte, binID uuid.UUID, orderIDs []uuid.UUID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	orders := sortedUniqueUUIDs(orderIDs)
+
+	// Head: salt, bin, offset 0xa0 (5 static words), operator, uint64; tail:
+	// length, one left-aligned bytes16 per orderId.
+	words := make([]any, 0, 6+len(orders))
+	words = append(words, salt, binID, 0xa0, operatorID, occurredAtMs, len(orders))
+	for _, id := range orders {
+		words = append(words, id)
+	}
+	var out [32]byte
+	copy(out[:], crypto.Keccak256(softDetailsWords(words...)))
+	return out
+}
+
+// sortedUniqueUUIDs returns a fresh slice sorted ascending by raw uuid bytes
+// with duplicates removed; the input is not mutated.
+func sortedUniqueUUIDs(ids []uuid.UUID) []uuid.UUID {
+	out := slices.Clone(ids)
+	slices.SortFunc(out, func(a, b uuid.UUID) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	return slices.Compact(out)
 }

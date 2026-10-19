@@ -1,7 +1,8 @@
 import type { AssertionJSON } from '@/shared/lib'
 
-// Draft of a signed close-cargoplace operation: the backend splits the close
-// into parts (one per box), each signed with its own authenticator touch.
+// Draft of a signed operation (shared by receiving close and putaway): the
+// backend splits the action into parts, each signed with its own authenticator
+// touch.
 // itemIds and detailsHash describe what the part commits to; challenge and the
 // request options come prebuilt from the backend.
 export interface SignedOperationDraft {

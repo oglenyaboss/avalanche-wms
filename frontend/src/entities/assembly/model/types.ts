@@ -68,11 +68,13 @@ export interface PickedProduct {
   orderNo: string
 }
 
-// scan-shipping-buffer result: the whole cart moved into the buffer bin in one
-// call. productsPlaced is how many cart items landed; ordersAssembled is how
-// many orders became fully assembled as a result.
+// scan-shipping-buffer result: the whole cart moved into the buffer bin by one
+// signed operation. productsPlaced is how many cart items landed;
+// ordersAssembled is how many orders became fully assembled as a result.
+// operationId identifies the signed action for the chain-status polling.
 export interface ShippingBufferResult {
   bufferBinId: string
   productsPlaced: number
   ordersAssembled: number
+  operationId: string
 }

@@ -104,9 +104,11 @@ func TestAuth_OperatorOnlyEndpoints(t *testing.T) {
 	}{
 		{"putaway scan-buffer", "/putaway/scan-buffer", map[string]string{"buffer_bin_id": uuid.NewString()}},
 		{"putaway scan-product", "/putaway/scan-product", map[string]string{"product_id": uuid.NewString(), "buffer_bin_id": uuid.NewString()}},
-		{"putaway scan-storage-bin", "/putaway/scan-storage-bin", map[string]string{"storage_bin_id": uuid.NewString()}},
+		{"putaway scan-storage-bin draft", "/putaway/scan-storage-bin/draft", map[string]string{"storage_bin_id": uuid.NewString()}},
+		{"putaway scan-storage-bin submit", "/putaway/scan-storage-bin/submit", map[string]string{"operation_id": uuid.NewString()}},
 		{"assembly pick", "/assembly/pick", map[string]string{"product_id": uuid.NewString()}},
-		{"assembly scan-shipping-buffer", "/assembly/scan-shipping-buffer", map[string]string{"buffer_bin_id": uuid.NewString()}},
+		{"assembly scan-shipping-buffer draft", "/assembly/scan-shipping-buffer/draft", map[string]string{"buffer_bin_id": uuid.NewString()}},
+		{"assembly scan-shipping-buffer submit", "/assembly/scan-shipping-buffer/submit", map[string]string{"operation_id": uuid.NewString()}},
 		{"shipping scan-buffer", "/shipping/scan-buffer", map[string]string{"buffer_bin_id": uuid.NewString()}},
 		{"shipping scan-driver", "/shipping/scan-driver", map[string]string{"dispatch_code": "DSP-AUTH-" + uuid.NewString()[:8]}},
 		{"shipping ship", "/shipping/ship", map[string]string{"buffer_bin_id": uuid.NewString(), "dispatch_id": uuid.NewString()}},

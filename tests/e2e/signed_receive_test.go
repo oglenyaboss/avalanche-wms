@@ -266,12 +266,9 @@ func TestSignedReceive_EndToEnd(t *testing.T) {
 		"product_id":    run.productIDs[0].String(),
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
-	var putaway scanStorageBinData
-	postJSON(t, env, op.token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    []string{run.productIDs[0].String()},
-		"storage_bin_id": sc.StorageBinID.String(),
-	}, &putaway)
+	putaway := placeToStorageBinSigned(t, env, op, []uuid.UUID{run.productIDs[0]}, sc.StorageBinID)
 	require.Equal(t, 1, putaway.ProductsPlaced, "putaway must pass the chain-status gate after a committed receive")
+	require.Equal(t, 1, putaway.OutboxEventsCreated, "one product places with exactly one signed part")
 
 	var timeline traceTimeline
 	getJSON(t, env, op.token, "/products/timeline?key="+run.productIDs[0].String(), &timeline)
@@ -418,7 +415,8 @@ func TestSignedReceive_RejectedActionBlocksPutaway(t *testing.T) {
 		SET status = 'FAILED', reject_reason = 12, updated_at = now()
 		WHERE event_id = $1`, actionID)
 
-	// Putaway of the product is blocked by the chain-status gate.
+	// Putaway of the product is blocked by the chain-status gate — the DRAFT already
+	// runs it, so no operation is even drafted.
 	postJSON[map[string]any](t, env, op.token, "/putaway/scan-buffer", map[string]string{
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
@@ -426,10 +424,7 @@ func TestSignedReceive_RejectedActionBlocksPutaway(t *testing.T) {
 		"product_id":    run.productIDs[0].String(),
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
-	status, code, _ := postExpectError(t, env, op.token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    []string{run.productIDs[0].String()},
-		"storage_bin_id": sc.StorageBinID.String(),
-	})
+	status, code, _ := draftPlaceToStorageBinRaw(t, env, op.token, []string{run.productIDs[0].String()}, sc.StorageBinID.String())
 	require.Equal(t, http.StatusConflict, status)
 	require.Equal(t, "CHAIN_EVENT_REJECTED", code)
 

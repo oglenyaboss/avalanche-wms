@@ -36,8 +36,9 @@ function placement(overrides: Partial<StoragePlacement> = {}): StoragePlacement 
   return {
     storageBinId: 'bin-1',
     storageBinCode: 'A-01-12',
-    productsPlaced: 1,
+    productsPlaced: 2,
     outboxEventsCreated: 1,
+    operationId: '01929c5e-op-1',
     ...overrides,
   }
 }
@@ -139,12 +140,10 @@ describe('putawayReducer / PRODUCT_PICKED', () => {
 })
 
 describe('putawayReducer / GO_TO_STORAGE', () => {
-  it('moves to the storage bin step when the cart is non-empty', () => {
+  it('moves to the storage phase when the cart is non-empty', () => {
     const state = putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' })
 
     expect(state.phase).toBe('storage')
-    expect(state.storageStep).toBe('bin')
-    expect(state.activeBin).toBeNull()
   })
 
   it('refuses to advance with an empty cart', () => {
@@ -159,87 +158,49 @@ describe('putawayReducer / GO_TO_STORAGE', () => {
   })
 })
 
-describe('putawayReducer / storage placement', () => {
-  it('sets the active bin and moves to the place step on a bin scan', () => {
+describe('putawayReducer / PRODUCTS_PLACED', () => {
+  it('marks the whole batch placed in one transition and keeps the banner', () => {
     const inStorage = putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' })
 
     const state = putawayReducer(inStorage, {
-      type: 'STORAGE_BIN_SCANNED',
-      storageBinId: 'bin-1',
-    })
-
-    expect(state.storageStep).toBe('place')
-    expect(state.activeBin).toEqual({ storageBinId: 'bin-1' })
-  })
-
-  it('records a placed product without duplicating it', () => {
-    const inPlace = putawayReducer(
-      putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' }),
-      { type: 'STORAGE_BIN_SCANNED', storageBinId: 'bin-1' },
-    )
-
-    const placedOnce = putawayReducer(inPlace, {
-      type: 'PRODUCT_PLACED',
-      productId: 'p-1',
-      result: placement(),
-    })
-    const placedTwice = putawayReducer(placedOnce, {
-      type: 'PRODUCT_PLACED',
-      productId: 'p-1',
+      type: 'PRODUCTS_PLACED',
+      productIds: ['p-1', 'p-2'],
       result: placement(),
     })
 
-    expect(placedTwice.placedProductIds).toEqual(['p-1'])
-    expect(placedTwice.lastPlacement?.storageBinCode).toBe('A-01-12')
+    expect(state.placedProductIds).toEqual(['p-1', 'p-2'])
+    expect(state.lastPlacement).toEqual(placement())
+    expect(state.lastPlacement?.operationId).toBe('01929c5e-op-1')
+    expect(state.errorMessage).toBeNull()
   })
 
-  it('returns to the bin step on CHANGE_BIN, keeping placements', () => {
-    const inPlace = putawayReducer(
-      putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' }),
-      { type: 'STORAGE_BIN_SCANNED', storageBinId: 'bin-1' },
-    )
-    const placed = putawayReducer(inPlace, {
-      type: 'PRODUCT_PLACED',
-      productId: 'p-1',
+  it('does not duplicate already placed ids on a re-dispatch', () => {
+    const inStorage = putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' })
+    const placed = putawayReducer(inStorage, {
+      type: 'PRODUCTS_PLACED',
+      productIds: ['p-1', 'p-2'],
       result: placement(),
     })
 
-    const state = putawayReducer(placed, { type: 'CHANGE_BIN' })
+    const state = putawayReducer(placed, {
+      type: 'PRODUCTS_PLACED',
+      productIds: ['p-2'],
+      result: placement({ storageBinCode: 'A-01-13' }),
+    })
 
-    expect(state.storageStep).toBe('bin')
-    expect(state.activeBin).toBeNull()
-    expect(state.placedProductIds).toEqual(['p-1'])
-    // The success banner belongs to the old bin and must not linger.
-    expect(state.lastPlacement).toBeNull()
+    expect(state.placedProductIds).toEqual(['p-1', 'p-2'])
+    expect(state.lastPlacement?.storageBinCode).toBe('A-01-13')
   })
 
-  it('clears the previous placement banner when a new bin is scanned', () => {
-    const placed = putawayReducer(
-      putawayReducer(
-        putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' }),
-        { type: 'STORAGE_BIN_SCANNED', storageBinId: 'bin-1' },
-      ),
-      { type: 'PRODUCT_PLACED', productId: 'p-1', result: placement() },
-    )
-
-    const state = putawayReducer(
-      putawayReducer(placed, { type: 'CHANGE_BIN' }),
-      { type: 'STORAGE_BIN_SCANNED', storageBinId: 'bin-2' },
-    )
-
-    expect(state.activeBin).toEqual({ storageBinId: 'bin-2' })
-    expect(state.lastPlacement).toBeNull()
-  })
-
-  it('ignores a placement dispatched outside the storage phase', () => {
+  it('ignores a batch dispatched outside the storage phase', () => {
     const inPick = putawayReducer(initialPutawayState, {
       type: 'BUFFER_SCANNED',
       result: bufferScan,
     })
 
     const state = putawayReducer(inPick, {
-      type: 'PRODUCT_PLACED',
-      productId: 'p-1',
+      type: 'PRODUCTS_PLACED',
+      productIds: ['p-1'],
       result: placement(),
     })
 
@@ -250,18 +211,19 @@ describe('putawayReducer / storage placement', () => {
 describe('putawayReducer / FINISH_TASK', () => {
   it('resets to the buffer phase with a summary success message', () => {
     const placed = putawayReducer(
-      putawayReducer(
-        putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' }),
-        { type: 'STORAGE_BIN_SCANNED', storageBinId: 'bin-1' },
-      ),
-      { type: 'PRODUCT_PLACED', productId: 'p-1', result: placement() },
+      putawayReducer(pickTwo(), { type: 'GO_TO_STORAGE' }),
+      {
+        type: 'PRODUCTS_PLACED',
+        productIds: ['p-1', 'p-2'],
+        result: placement(),
+      },
     )
 
     const state = putawayReducer(placed, { type: 'FINISH_TASK' })
 
     expect(state.phase).toBe('buffer')
     expect(state.buffer).toBeNull()
-    expect(state.successMessage).toContain('Размещено товаров: 1')
+    expect(state.successMessage).toContain('Размещено товаров: 2')
     expect(state.successMessage).toContain('BUFFER-01')
   })
 })

@@ -7,7 +7,7 @@ interface OperationChainStatusProps {
   operationId: string
 }
 
-// Live chain verdict for the signed close operation: polls while parts are in
+// Live chain verdict for a signed operation: polls while parts are in
 // flight, then shows the final applied / rejected / failed text.
 export function OperationChainStatus({ operationId }: OperationChainStatusProps) {
   const { data: status } = useOperationStatus(operationId)
