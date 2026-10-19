@@ -280,8 +280,8 @@ func (r *Repository) BatchInsertShippings(
 			$3,
 			$4,
 			$5,
-			$6,
-			$7
+			$5,
+			$6
 		FROM unnest($1::uuid[], $2::uuid[]) AS events(event_id, product_id)`
 
 	if _, err := r.q.Exec(ctx, query, eventIDs, productIDs, dispatchID, operatorID, occurredAt, actionID); err != nil {
