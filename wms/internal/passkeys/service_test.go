@@ -25,12 +25,18 @@ import (
 )
 
 type mockRepo struct {
-	getMemberFn           func(ctx context.Context, userID uuid.UUID) (Member, error)
-	listOrgMembersFn      func(ctx context.Context, orgID uuid.UUID) ([]Member, error)
-	latestPasskeyFn       func(ctx context.Context, userID uuid.UUID) (*domain.Passkey, error)
-	latestPasskeysByOrgFn func(ctx context.Context, orgID uuid.UUID) (map[uuid.UUID]domain.Passkey, error)
-	insertPasskeyFn       func(ctx context.Context, p domain.Passkey) error
-	updatePasskeyStatusFn func(ctx context.Context, credentialID []byte, status domain.PasskeyStatus) error
+	getMemberFn             func(ctx context.Context, userID uuid.UUID) (Member, error)
+	listOrgMembersFn        func(ctx context.Context, orgID uuid.UUID) ([]Member, error)
+	latestPasskeyFn         func(ctx context.Context, userID uuid.UUID) (*domain.Passkey, error)
+	latestPasskeysByOrgFn   func(ctx context.Context, orgID uuid.UUID) (map[uuid.UUID]domain.Passkey, error)
+	insertPasskeyFn         func(ctx context.Context, p domain.Passkey) error
+	updatePasskeyStatusFn   func(ctx context.Context, credentialID []byte, status domain.PasskeyStatus) error
+	passkeyByKeyIDFn        func(ctx context.Context, keyID [32]byte) (*domain.Passkey, error)
+	passkeyByCredentialIDFn func(ctx context.Context, id []byte) (*domain.Passkey, error)
+	insertKeyActionFn       func(ctx context.Context, a KeyAction) error
+	keyActionFn             func(ctx context.Context, actionID uuid.UUID) (*KeyAction, error)
+	latestConfirmationsFn   func(ctx context.Context, orgID uuid.UUID) (map[string]KeyConfirmation, error)
+	submitKeyActionFn       func(ctx context.Context, s KeyActionSubmission) error
 }
 
 func (m *mockRepo) GetMember(ctx context.Context, userID uuid.UUID) (Member, error) {
@@ -73,6 +79,48 @@ func (m *mockRepo) UpdatePasskeyStatus(ctx context.Context, credentialID []byte,
 		return m.updatePasskeyStatusFn(ctx, credentialID, status)
 	}
 	panic("UpdatePasskeyStatus not configured")
+}
+
+func (m *mockRepo) PasskeyByKeyID(ctx context.Context, keyID [32]byte) (*domain.Passkey, error) {
+	if m.passkeyByKeyIDFn != nil {
+		return m.passkeyByKeyIDFn(ctx, keyID)
+	}
+	return nil, nil
+}
+
+func (m *mockRepo) PasskeyByCredentialID(ctx context.Context, id []byte) (*domain.Passkey, error) {
+	if m.passkeyByCredentialIDFn != nil {
+		return m.passkeyByCredentialIDFn(ctx, id)
+	}
+	return nil, nil
+}
+
+func (m *mockRepo) InsertKeyAction(ctx context.Context, a KeyAction) error {
+	if m.insertKeyActionFn != nil {
+		return m.insertKeyActionFn(ctx, a)
+	}
+	panic("InsertKeyAction not configured")
+}
+
+func (m *mockRepo) KeyAction(ctx context.Context, actionID uuid.UUID) (*KeyAction, error) {
+	if m.keyActionFn != nil {
+		return m.keyActionFn(ctx, actionID)
+	}
+	return nil, nil
+}
+
+func (m *mockRepo) LatestConfirmations(ctx context.Context, orgID uuid.UUID) (map[string]KeyConfirmation, error) {
+	if m.latestConfirmationsFn != nil {
+		return m.latestConfirmationsFn(ctx, orgID)
+	}
+	return nil, nil
+}
+
+func (m *mockRepo) SubmitKeyAction(ctx context.Context, s KeyActionSubmission) error {
+	if m.submitKeyActionFn != nil {
+		return m.submitKeyActionFn(ctx, s)
+	}
+	panic("SubmitKeyAction not configured")
 }
 
 type fakeChain struct {

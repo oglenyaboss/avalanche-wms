@@ -1,3 +1,5 @@
+import type { AssertionJSON, KeyActionDraft } from './types'
+
 export function base64urlToBuffer(s: string): ArrayBuffer {
   const base64 = s.replace(/-/g, '+').replace(/_/g, '/')
   const binary = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
@@ -45,6 +47,19 @@ export function toCreationOptions(json: CreationOptionsJSON): PublicKeyCredentia
   }
 }
 
+export function toRequestOptions(draft: KeyActionDraft): PublicKeyCredentialRequestOptions {
+  return {
+    challenge: base64urlToBuffer(draft.challenge),
+    rpId: draft.rpId,
+    allowCredentials: draft.allowCredentials.map((c) => ({
+      type: c.type,
+      id: base64urlToBuffer(c.id),
+    })),
+    userVerification: draft.userVerification,
+    timeout: draft.timeout,
+  }
+}
+
 export function credentialToJSON(cred: PublicKeyCredential): RegistrationResponseJSON {
   const response = cred.response as AuthenticatorAttestationResponse
   const json: RegistrationResponseJSON = {
@@ -72,6 +87,22 @@ export async function createPasskeyCredential(
   return credentialToJSON(cred)
 }
 
+export async function getAssertion(
+  options: PublicKeyCredentialRequestOptions
+): Promise<AssertionJSON> {
+  const cred = await navigator.credentials.get({ publicKey: options })
+  if (!(cred instanceof PublicKeyCredential)) {
+    throw new Error('Браузер не вернул подпись')
+  }
+  const response = cred.response as AuthenticatorAssertionResponse
+  return {
+    credentialId: bufferToBase64url(cred.rawId),
+    authenticatorData: bufferToBase64url(response.authenticatorData),
+    clientDataJson: bufferToBase64url(response.clientDataJSON),
+    signature: bufferToBase64url(response.signature),
+  }
+}
+
 export function webauthnErrorText(e: unknown): string | null {
   if (!(e instanceof DOMException)) return null
   switch (e.name) {
@@ -81,6 +112,18 @@ export function webauthnErrorText(e: unknown): string | null {
       return 'Этот ключ уже зарегистрирован на устройстве'
     case 'SecurityError':
       return 'Браузер запретил создание ключа на этом адресе'
+    default:
+      return null
+  }
+}
+
+export function assertionErrorText(e: unknown): string | null {
+  if (!(e instanceof DOMException)) return null
+  switch (e.name) {
+    case 'NotAllowedError':
+      return 'Подтверждение отменено или истекло время ожидания'
+    case 'SecurityError':
+      return 'Браузер запретил подпись на этом адресе'
     default:
       return null
   }

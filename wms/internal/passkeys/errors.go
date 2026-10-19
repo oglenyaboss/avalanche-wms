@@ -8,4 +8,12 @@ var (
 	ErrPasskeyExists       = errors.New("PASSKEY_EXISTS")
 	ErrInvalidRegistration = errors.New("INVALID_REGISTRATION")
 	ErrPasskeyNotFound     = errors.New("PASSKEY_NOT_FOUND")
+
+	ErrSignerKeyNotActive     = errors.New("SIGNER_KEY_NOT_ACTIVE")
+	ErrTargetNotPending       = errors.New("TARGET_NOT_PENDING")
+	ErrActionInProgress       = errors.New("ACTION_IN_PROGRESS")
+	ErrActionNotFound         = errors.New("ACTION_NOT_FOUND")
+	ErrActionAlreadySubmitted = errors.New("ACTION_ALREADY_SUBMITTED")
+	ErrInvalidAssertion       = errors.New("INVALID_ASSERTION")
+	ErrInvalidRequest         = errors.New("INVALID_REQUEST")
 )

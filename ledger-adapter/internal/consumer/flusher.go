@@ -19,7 +19,15 @@ import (
 // ChainCaller — minimal interface что нужен flusher'у от chain client'а.
 type ChainCaller interface {
 	BatchCall(ctx context.Context, aggregateType string, eventIDs, itemIDs []*big.Int) (common.Hash, error)
+	SendCalldata(ctx context.Context, to common.Address, data []byte) (common.Hash, error)
 	TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error)
+}
+
+// ActionResolver — разбор исходов подписанных действий из receipt'а
+// ConsortiumRegistry (плюс адрес контракта для SendCalldata).
+type ActionResolver interface {
+	ActionOutcomes(ctx context.Context, receipt *types.Receipt, ids []uuid.UUID) (map[uuid.UUID]chain.ActionOutcome, error)
+	Address() common.Address
 }
 
 // Store — minimal interface к onchain_events repo.
@@ -30,6 +38,7 @@ type Store interface {
 	MarkSent(ctx context.Context, ids []uuid.UUID, txHash string) error
 	MarkCommitted(ctx context.Context, ids []uuid.UUID) error
 	MarkFailed(ctx context.Context, ids []uuid.UUID, txHash, reason string) error
+	MarkRejected(ctx context.Context, ids []uuid.UUID, txHash string, reason uint8) error
 }
 
 // DLQPublisher — отправка фейленых сообщений в DLQ-topic.
@@ -57,14 +66,22 @@ type InflightTx struct {
 // (видимы, не потеряны) для redelivery/reconcile (invariant 4).
 var ErrConfirmStalled = errors.New("confirm stalled")
 
+// maxActionCalldata — потолок calldata одной applyKeyActions-tx (ADR-0001 §9):
+// узел subnet-evm отклоняет tx больше 131 072 байт, газ при таком объёме не
+// упирается в лимит блока. Package var — тесты занижают его для проверки нарезки.
+var maxActionCalldata = 120_000
+
 // Flusher — pipeline: группировка по aggregate_type → обработка в FSM-порядке →
 // для каждого sub-batch: idempotency-filter → InsertPending → шардинг по signer'у →
 // chain.BatchCall → MarkSent → WaitReceipt → MarkCommitted / MarkFailed+DLQ.
+// Подписанные действия (signed_action) идут в сегментах окна между legacy-стадиями
+// в Kafka-порядке через ConsortiumRegistry.applyKeyActions.
 type Flusher struct {
 	chains         []ChainCaller // N signer-аккаунтов; Send шардит по ним по ProductID
 	receiptReader  ChainCaller   // = chains[0]; receipt-чтения node-global (Confirm/reconcile)
 	store          Store
 	dlq            DLQPublisher
+	registry       ActionResolver // nil = подписанные действия не отправляются (recordFailure)
 	receiptTimeout time.Duration
 	log            *slog.Logger
 }
@@ -90,6 +107,13 @@ func NewFlusher(chains []ChainCaller, store Store, dlq DLQPublisher, receiptTime
 		receiptTimeout: receiptTimeout,
 		log:            log,
 	}
+}
+
+// WithRegistry подключает разбор исходов подписанных действий (nil = действия
+// терминально фейлятся с «registry not configured»). Возвращает f для цепочки.
+func (f *Flusher) WithRegistry(r ActionResolver) *Flusher {
+	f.registry = r
+	return f
 }
 
 // Flush — serial-совместимая обёртка: Send всех sub-batch'ей, затем Confirm
@@ -119,16 +143,17 @@ func (f *Flusher) Flush(ctx context.Context, msgs []*Message) error {
 	return sendErr
 }
 
-// Send группирует mixed-batch по aggregate_type, обрабатывает sub-batch'и в
-// FSM-порядке и БЕЗ ожидания receipt'а broadcast'ит каждую batch-tx. Возвращает
-// in-flight tx в FSM = nonce порядке.
+// Send режет batch на подряд идущие сегменты (подписанные действия / legacy) и
+// обрабатывает их в Kafka-порядке окна: действия не перепрыгивают legacy-стадии
+// между ними (все tx уходят с одного signer'а одной nonce-цепочкой). Legacy-сегмент
+// внутри себя группируется и отправляется в FSM-порядке (см. sendLegacy).
 //
 // Семантика ошибок (как у старого flushSubBatch):
-//   - transient BatchCall error → возвращает (уже собранный inflight, error);
+//   - transient chain error → возвращает (уже собранный inflight, error);
 //     caller ретраит весь drained-batch (Unshift). Уже-SENT sub-batch'и
 //     reconcile'ятся на redelivery, не переотправляются.
-//   - terminal revert → recordFailure (DLQ+MarkFailed), sub-batch НЕ попадает в
-//     inflight, переходим к следующему aggregate.
+//   - terminal revert / терминальный фейл действия → recordFailure (DLQ+MarkFailed),
+//     сегмент/чанк НЕ попадает в inflight, переходим к следующему.
 //   - success → MarkSent + append в inflight.
 //
 // Partial inflight возвращается даже вместе с error — serial Flush дожимает уже
@@ -139,8 +164,43 @@ func (f *Flusher) Send(ctx context.Context, msgs []*Message) ([]InflightTx, erro
 		return nil, nil
 	}
 
+	var inflight []InflightTx
+	for _, seg := range splitSegments(msgs) {
+		var err error
+		if seg[0].Action != nil {
+			inflight, err = f.sendKeyActions(ctx, seg, inflight)
+		} else {
+			inflight, err = f.sendLegacy(ctx, seg, inflight)
+		}
+		if err != nil {
+			return inflight, err
+		}
+	}
+	return inflight, nil
+}
+
+// splitSegments режет batch на подряд идущие сегменты: действия (Action != nil)
+// и legacy-сообщения. Порядок сообщений внутри сегмента сохраняется.
+func splitSegments(msgs []*Message) [][]*Message {
+	segs := make([][]*Message, 0, 2)
+	start := 0
+	isAction := msgs[0].Action != nil
+	for i := 1; i < len(msgs); i++ {
+		if (msgs[i].Action != nil) != isAction {
+			segs = append(segs, msgs[start:i])
+			start = i
+			isAction = msgs[i].Action != nil
+		}
+	}
+	return append(segs, msgs[start:])
+}
+
+// sendLegacy — прежнее тело Send для FSM-агрегатов (receiving/putaway/picking/
+// shipping): группировка по aggregate_type, отправка в FSM-порядке; неизвестные
+// агрегаты сегмента — DLQ. inflight — накопленные tx предыдущих сегментов,
+// возвращается обновлённым.
+func (f *Flusher) sendLegacy(ctx context.Context, msgs []*Message, inflight []InflightTx) ([]InflightTx, error) {
 	grouped := groupByAggregate(msgs)
-	inflight := make([]InflightTx, 0, len(fsmOrder))
 
 	for _, agg := range fsmOrder {
 		sub, ok := grouped[agg]
@@ -195,10 +255,128 @@ func (f *Flusher) Send(ctx context.Context, msgs []*Message) ([]InflightTx, erro
 	return inflight, nil
 }
 
+// sendKeyActions отправляет подписанные действия в ConsortiumRegistry через
+// applyKeyActions. Signer один (f.chains[0]): действия уходят одной nonce-
+// цепочкой, поэтому жадная упаковка в calldata-лимит сохраняет Kafka-порядок
+// и внутри чанка, и между чанками/tx. inflight — накопленные tx предыдущих
+// сегментов, возвращается обновлённым.
+func (f *Flusher) sendKeyActions(ctx context.Context, msgs []*Message, inflight []InflightTx) ([]InflightTx, error) {
+	pending, err := f.filterAndMarkPending(ctx, msgs)
+	if err != nil {
+		return inflight, err
+	}
+	if len(pending) == 0 {
+		f.log.Info("all actions already processed, skipping", "aggregate", aggregateSignedAction, "size", len(msgs))
+		return inflight, nil
+	}
+
+	if f.registry == nil {
+		// Реестр не сконфигурирован (REGISTRY_ADDR пуст) — отправить некуда;
+		// терминальный фейл (DLQ + FAILED), чтобы действия не зависали в PENDING.
+		f.log.Error("registry not configured — failing signed actions", "size", len(pending))
+		if rerr := f.recordFailure(ctx, pending, idsOf(pending), "", "registry not configured"); rerr != nil {
+			return inflight, rerr
+		}
+		return inflight, nil
+	}
+
+	for i := 0; i < len(pending); {
+		n, perr := maxActionChunk(pending[i:], maxActionCalldata)
+		switch {
+		case perr != nil:
+			// Действие не пакуется в ABI (например отрицательный индекс) —
+			// терминальный фейл его одного; остальные пойдут следующим шагом.
+			f.log.Error("action packing failed", "event_id", pending[i].EventID, "err", perr)
+			if rerr := f.recordFailure(ctx, pending[i:i+1], []uuid.UUID{pending[i].EventID}, "", perr.Error()); rerr != nil {
+				return inflight, rerr
+			}
+			i++
+		case n == 0:
+			// Одиночное действие превышает calldata-лимит — терминальный фейл.
+			f.log.Error("action exceeds calldata limit", "event_id", pending[i].EventID, "limit", maxActionCalldata)
+			if rerr := f.recordFailure(ctx, pending[i:i+1], []uuid.UUID{pending[i].EventID}, "", "action exceeds calldata limit"); rerr != nil {
+				return inflight, rerr
+			}
+			i++
+		default:
+			chunk := pending[i : i+n]
+			data, err := chain.PackApplyKeyActions(actionsOf(chunk))
+			if err != nil {
+				// Парс уже отвалидировал поля; сюда не ждём. Логика maxActionChunk
+				// гарантирует, что чанк пакуется — на всякий случай терминальный фейл.
+				f.log.Error("action packing failed", "size", len(chunk), "err", err)
+				if rerr := f.recordFailure(ctx, chunk, idsOf(chunk), "", err.Error()); rerr != nil {
+					return inflight, rerr
+				}
+				i += n
+				continue
+			}
+			txHash, err := f.chains[0].SendCalldata(ctx, f.registry.Address(), data)
+			if err != nil {
+				if errors.Is(err, chain.ErrChainTransient) {
+					f.log.Warn("applyKeyActions transient error — will retry", "size", len(chunk), "err", err)
+					return inflight, fmt.Errorf("chain call transient: %w", err)
+				}
+				f.log.Error("applyKeyActions failed", "size", len(chunk), "err", err)
+				if rerr := f.recordFailure(ctx, chunk, idsOf(chunk), "", err.Error()); rerr != nil {
+					return inflight, rerr
+				}
+				i += n
+				continue
+			}
+			ids := idsOf(chunk)
+			if err := f.store.MarkSent(ctx, ids, txHash.Hex()); err != nil {
+				return inflight, fmt.Errorf("mark sent: %w", err)
+			}
+			inflight = append(inflight, InflightTx{Aggregate: aggregateSignedAction, TxHash: txHash, IDs: ids, Msgs: chunk})
+			i += n
+		}
+	}
+	return inflight, nil
+}
+
+// maxActionChunk — сколько действий с начала msgs влезает в calldata-лимит
+// (жадно, в порядке следования). Возвращает 0, если даже одиночное действие
+// превышает лимит; err — если первое действие вообще не пакуется. О(n²) по
+// перепаковке — приемлемо: сегмент ограничен размером Kafka-окна (BATCH_SIZE).
+func maxActionChunk(msgs []*Message, limit int) (int, error) {
+	for n := 1; n <= len(msgs); n++ {
+		data, err := chain.PackApplyKeyActions(actionsOf(msgs[:n]))
+		if err != nil {
+			if n == 1 {
+				return 0, err
+			}
+			return n - 1, nil // префикс валиден; сломанное действие дойдёт следующим шагом
+		}
+		if len(data) > limit {
+			return n - 1, nil
+		}
+	}
+	return len(msgs), nil
+}
+
+func actionsOf(msgs []*Message) []chain.KeyAction {
+	actions := make([]chain.KeyAction, len(msgs))
+	for i, m := range msgs {
+		actions[i] = *m.Action
+	}
+	return actions
+}
+
+func idsOf(msgs []*Message) []uuid.UUID {
+	ids := make([]uuid.UUID, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.EventID
+	}
+	return ids
+}
+
 // Confirm дожидается receipt'а одной in-flight tx и применяет терминальный
-// результат: success → MarkCommitted; revert (status 0) → recordFailure
-// (DLQ+MarkFailed); timeout/RPC-fail → ErrConfirmStalled (строки остаются SENT,
-// без DLQ — pipeline запустит recovery, reconcile-loop подтянет).
+// результат: success → MarkCommitted (для подписанных действий — разбор исходов
+// реестра: Applied → COMMITTED, отклонённые → MarkRejected с reject_reason);
+// revert (status 0) → recordFailure (DLQ+MarkFailed); timeout/RPC-fail →
+// ErrConfirmStalled (строки остаются SENT, без DLQ — pipeline запустит recovery,
+// reconcile-loop подтянет).
 func (f *Flusher) Confirm(ctx context.Context, tx *InflightTx) error {
 	receipt, err := chain.WaitReceipt(ctx, f.receiptReader, tx.TxHash, f.receiptTimeout)
 	if err != nil {
@@ -208,6 +386,13 @@ func (f *Flusher) Confirm(ctx context.Context, tx *InflightTx) error {
 	if receipt.Status == 0 {
 		f.log.Error("execution reverted", "aggregate", tx.Aggregate, "tx", tx.TxHash.Hex())
 		return f.recordFailure(ctx, tx.Msgs, tx.IDs, tx.TxHash.Hex(), "execution reverted")
+	}
+	if tx.Aggregate == aggregateSignedAction {
+		if err := applyActionOutcomes(ctx, f.registry, f.store, receipt, tx.IDs, tx.TxHash.Hex()); err != nil {
+			return fmt.Errorf("apply action outcomes: %w", err)
+		}
+		f.log.Info("signed actions resolved from receipt", "tx", tx.TxHash.Hex(), "size", len(tx.IDs))
+		return nil
 	}
 	if err := f.store.MarkCommitted(ctx, tx.IDs); err != nil {
 		return fmt.Errorf("mark committed: %w", err)
@@ -274,7 +459,7 @@ func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]
 		case txHash != "":
 			// Уже broadcast'нуто (crash-recovery S2 / receipt-timeout N1). НЕ resubmit:
 			// reconcile существующую tx, tx_hash остаётся стабильным.
-			terminal, rerr := reconcileReceipt(ctx, f.receiptReader, f.store, []uuid.UUID{m.EventID}, txHash, f.log)
+			terminal, rerr := reconcileReceipt(ctx, f.receiptReader, f.store, []uuid.UUID{m.EventID}, txHash, m.AggregateType, f.registry, f.log)
 			if rerr != nil {
 				return nil, fmt.Errorf("reconcile %s: %w", m.EventID, rerr)
 			}

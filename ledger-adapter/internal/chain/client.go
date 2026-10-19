@@ -76,7 +76,7 @@ type ethBackend interface {
 }
 
 // Client обёртка над ethclient с методами для BatchMappingWMS.
-// sendMu сериализует nonce-critical секцию в sendMethod: локальный монотонный
+// sendMu сериализует nonce-critical секцию в send: локальный монотонный
 // nonce (nonce++ только при успешном SendTransaction) позволяет держать
 // несколько tx in-flight в одном блоке без per-send PendingNonceAt — иначе
 // pipeline сериализовался бы на скорости майнинга блоков (старое поведение).
@@ -189,7 +189,21 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("pack %s: %w", method, err)
 	}
+	return c.send(ctx, c.contractAddr, data, method)
+}
 
+// SendCalldata отправляет произвольные готовые calldata на указанный адрес —
+// вызовы вне BatchMappingWMS (например ConsortiumRegistry.applyKeyActions,
+// пакуемые отдельным RegistryABI). Идёт по тому же nonce/gas/sign/send-пути,
+// что и sendMethod: одна nonce-последовательность подписанта и те же классы
+// ошибок (ErrChainTransient/ErrChainRevert).
+func (c *Client) SendCalldata(ctx context.Context, to common.Address, data []byte) (common.Hash, error) {
+	return c.send(ctx, to, data, "calldata")
+}
+
+// send строит, подписывает и отправляет legacy-tx с готовыми calldata на to.
+// label попадает в текст ошибок estimate-gas для диагностики.
+func (c *Client) send(ctx context.Context, to common.Address, data []byte, label string) (common.Hash, error) {
 	// Сериализуем nonce-allocation + sign + send: один fromAddress.
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -218,16 +232,16 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 
 	gasLimit, err := c.eth.EstimateGas(ctx, ethereum.CallMsg{
 		From: c.signer.Address(),
-		To:   &c.contractAddr,
+		To:   &to,
 		Data: data,
 	})
 	if err != nil {
 		// Revert (контракт rejected state transition) — terminal, DLQ.
 		// Network/RPC blip — transient, retry при следующем tick.
 		if isRevertError(err) {
-			return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainRevert, method, err)
+			return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainRevert, label, err)
 		}
-		return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainTransient, method, err)
+		return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainTransient, label, err)
 	}
 	// Запас на gas-лимит против skip→real разрыва под пайплайном (см.
 	// gasLimitHeadroomNum/Den) — иначе stale skip-оценка → OutOfGas-реверт.
@@ -238,7 +252,7 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 		return common.Hash{}, fmt.Errorf("%w: chain id: %v", ErrChainTransient, err)
 	}
 
-	tx := types.NewTransaction(nonce, c.contractAddr, big.NewInt(0), gasLimit, gasPrice, data)
+	tx := types.NewTransaction(nonce, to, big.NewInt(0), gasLimit, gasPrice, data)
 	signed, err := c.signer.SignTx(ctx, tx, chainID)
 	if err != nil {
 		// Удалённый signer недоступен — tx не построен, nonce не потрачен:

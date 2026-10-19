@@ -28,6 +28,12 @@ type repository interface {
 	LatestPasskeysByOrg(ctx context.Context, orgID uuid.UUID) (map[uuid.UUID]domain.Passkey, error)
 	InsertPasskey(ctx context.Context, p domain.Passkey) error
 	UpdatePasskeyStatus(ctx context.Context, credentialID []byte, status domain.PasskeyStatus) error
+	PasskeyByKeyID(ctx context.Context, keyID [32]byte) (*domain.Passkey, error)
+	PasskeyByCredentialID(ctx context.Context, id []byte) (*domain.Passkey, error)
+	InsertKeyAction(ctx context.Context, a KeyAction) error
+	KeyAction(ctx context.Context, actionID uuid.UUID) (*KeyAction, error)
+	LatestConfirmations(ctx context.Context, orgID uuid.UUID) (map[string]KeyConfirmation, error)
+	SubmitKeyAction(ctx context.Context, s KeyActionSubmission) error
 }
 
 // KeyStatusGetter is the slice of *ledger.Client used to read a key's registry
@@ -42,10 +48,11 @@ type pending struct {
 }
 
 type OrgMember struct {
-	UserID   uuid.UUID
-	Username string
-	Role     domain.UserRole
-	Passkey  *domain.Passkey
+	UserID       uuid.UUID
+	Username     string
+	Role         domain.UserRole
+	Passkey      *domain.Passkey
+	Confirmation *KeyConfirmation
 }
 
 type OrganizationOverview struct {
@@ -182,6 +189,10 @@ func (s *Service) Organization(ctx context.Context, userID uuid.UUID) (Organizat
 	if err != nil {
 		return OrganizationOverview{}, fmt.Errorf("passkeys.Service.Organization keys: %w", err)
 	}
+	confirmations, err := s.repo.LatestConfirmations(ctx, orgID)
+	if err != nil {
+		return OrganizationOverview{}, fmt.Errorf("passkeys.Service.Organization confirmations: %w", err)
+	}
 
 	out := OrganizationOverview{
 		Organization: domain.Organization{ID: orgID, Name: member.OrgName},
@@ -192,6 +203,9 @@ func (s *Service) Organization(ctx context.Context, userID uuid.UUID) (Organizat
 		if p, ok := keys[u.UserID]; ok {
 			s.syncStatus(ctx, &p)
 			m.Passkey = &p
+			if c, ok := confirmations[string(p.CredentialID)]; ok {
+				m.Confirmation = &c
+			}
 		}
 		out.Members = append(out.Members, m)
 	}

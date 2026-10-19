@@ -93,9 +93,9 @@ endif
 .PHONY: register-connector connector-status delete-connector
 
 register-connector:
-	@curl -X POST http://localhost:8083/connectors \
-  		-H "Content-Type: application/json" \
-  		-d @deploy/debezium/connectors/postgres-connector.json
+	@CONNECT_URL=http://localhost:8083 \
+		CONNECTOR_JSON=deploy/debezium/connectors/postgres-connector.json \
+		sh deploy/debezium/register-connector.sh
 
 connector-status:
 	@curl http://localhost:8083/connectors/outbox-connector/status

@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 
+	"ledger-adapter/internal/chain"
 	"ledger-adapter/internal/store"
 )
 
@@ -151,5 +152,58 @@ func TestReconciler_Run_StopsOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not stop within 2s of ctx cancel")
+	}
+}
+
+// TestReconciler_SignedAction_RejectedReasonRecorded: stuck signed_action-строка
+// с успешным receipt'ом разбирается резолвером — отклонённое действие получает
+// FAILED + reject_reason (MarkRejected), а не безусловный COMMITTED.
+func TestReconciler_SignedAction_RejectedReasonRecorded(t *testing.T) {
+	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
+	st := newStubStore()
+	applied, rejected := uuid.New(), uuid.New()
+	st.reconcilable = []store.ReconcileRow{
+		{EventID: applied, AggregateType: "signed_action", TxHash: "0xactions"},
+		{EventID: rejected, AggregateType: "signed_action", TxHash: "0xactions"},
+	}
+	r := newReconcilerT(ch, st).WithRegistry(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		applied:  {Applied: true},
+		rejected: {Reason: 6},
+	}})
+
+	if err := r.reconcileOnce(context.Background()); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if !st.committed[applied] {
+		t.Errorf("applied action must reconcile to COMMITTED")
+	}
+	if st.rejected[rejected] != 6 {
+		t.Errorf("rejected action must record reason 6, got %d", st.rejected[rejected])
+	}
+	if st.committed[rejected] {
+		t.Errorf("rejected action must NOT be committed")
+	}
+	if ch.receiptCalls != 1 {
+		t.Errorf("one receipt check per tx, got %d", ch.receiptCalls)
+	}
+}
+
+// TestReconciler_ResolverError_LeavesRows: ошибка резолвера не терминальна —
+// sweep изолирует её, строки остаются для следующего tick'а.
+func TestReconciler_ResolverError_LeavesRows(t *testing.T) {
+	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
+	st := newStubStore()
+	id := uuid.New()
+	st.reconcilable = []store.ReconcileRow{
+		{EventID: id, AggregateType: "signed_action", TxHash: "0xactions"},
+	}
+	r := newReconcilerT(ch, st).WithRegistry(&stubResolver{err: errors.New("rpc down")})
+
+	// reconcileOnce изолирует ошибку по tx и возвращает nil (логирует).
+	if err := r.reconcileOnce(context.Background()); err != nil {
+		t.Fatalf("resolver error must be isolated: %v", err)
+	}
+	if len(st.committed) != 0 || len(st.rejected) != 0 || len(st.failed) != 0 {
+		t.Errorf("rows must stay untouched, got committed=%v rejected=%v failed=%v", st.committed, st.rejected, st.failed)
 	}
 }
