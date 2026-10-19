@@ -35,6 +35,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/organization/admin-key", h.AdminKeyExport).Methods(http.MethodGet)
 	router.HandleFunc("/organization/keys/reject", h.RejectKey).Methods(http.MethodPost)
 	router.HandleFunc("/actions/key-register/draft", h.DraftKeyRegister).Methods(http.MethodPost)
+	router.HandleFunc("/actions/key-revoke/draft", h.DraftKeyRevoke).Methods(http.MethodPost)
 	router.HandleFunc("/actions/{actionID}/submit", h.SubmitKeyAction).Methods(http.MethodPost)
 }
 
@@ -180,6 +181,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httputil.WriteError(w, http.StatusConflict, "SIGNER_KEY_NOT_ACTIVE", "Ключ администратора не активен в реестре")
 	case errors.Is(err, ErrTargetNotPending):
 		httputil.WriteError(w, http.StatusConflict, "TARGET_NOT_PENDING", "Ключ оператора не ожидает подтверждения")
+	case errors.Is(err, ErrTargetNotActive):
+		httputil.WriteError(w, http.StatusConflict, "TARGET_NOT_ACTIVE", "Ключ оператора не активен в реестре")
 	case errors.Is(err, ErrActionInProgress):
 		httputil.WriteError(w, http.StatusConflict, "ACTION_IN_PROGRESS", "Для ключа уже есть действие в работе")
 	case errors.Is(err, ErrActionNotFound):

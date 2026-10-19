@@ -38,10 +38,11 @@ type signedOperator struct {
 // consortiumOrg is the shared consortium created once per test binary: org +
 // ADMIN user + admin passkey registered on chain by the owner.
 type consortiumOrg struct {
-	orgID      uuid.UUID
-	adminToken string
-	adminKey   *ecdsa.PrivateKey
-	adminCred  []byte
+	orgID       uuid.UUID
+	adminUserID uuid.UUID
+	adminToken  string
+	adminKey    *ecdsa.PrivateKey
+	adminCred   []byte
 }
 
 var (
@@ -110,10 +111,11 @@ func setupConsortium(t *testing.T, ctx context.Context, env *env) error {
 	})
 
 	consortiumShared = &consortiumOrg{
-		orgID:      fx.orgID,
-		adminToken: adminToken,
-		adminKey:   fx.adminKey,
-		adminCred:  fx.adminCred,
+		orgID:       fx.orgID,
+		adminUserID: fx.adminUserID,
+		adminToken:  adminToken,
+		adminKey:    fx.adminKey,
+		adminCred:   fx.adminCred,
 	}
 	return nil
 }

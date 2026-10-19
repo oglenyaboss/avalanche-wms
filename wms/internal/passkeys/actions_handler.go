@@ -1,6 +1,7 @@
 package passkeys
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -18,22 +19,34 @@ type targetKeyRequest struct {
 }
 
 func (h *Handler) DraftKeyRegister(w http.ResponseWriter, r *http.Request) {
-	userID, ok := httputil.RequireAdmin(w, r)
-	if !ok {
-		return
+	h.draftKeyAction(h.svc.DraftKeyRegister)(w, r)
+}
+
+func (h *Handler) DraftKeyRevoke(w http.ResponseWriter, r *http.Request) {
+	h.draftKeyAction(h.svc.DraftKeyRevoke)(w, r)
+}
+
+// draftKeyAction serves both key-action draft endpoints: admin-only, a small
+// body with the target key id, one draft view as the response.
+func (h *Handler) draftKeyAction(draft func(ctx context.Context, userID uuid.UUID, targetKeyID string) (*KeyActionDraft, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := httputil.RequireAdmin(w, r)
+		if !ok {
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxActionBodyBytes)
+		var body targetKeyRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
+			return
+		}
+		d, err := draft(r.Context(), userID, body.TargetKeyID)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true, Data: toDraftView(d)})
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxActionBodyBytes)
-	var body targetKeyRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
-		return
-	}
-	draft, err := h.svc.DraftKeyRegister(r.Context(), userID, body.TargetKeyID)
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true, Data: toDraftView(draft)})
 }
 
 func (h *Handler) RejectKey(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +141,7 @@ func toDraftView(d *KeyActionDraft) keyActionDraftView {
 
 type confirmationView struct {
 	ActionID     string `json:"action_id"`
+	ActionType   uint8  `json:"action_type"`
 	State        string `json:"state"`
 	RejectReason *int16 `json:"reject_reason"`
 }
@@ -138,6 +152,7 @@ func toConfirmationView(c *KeyConfirmation) *confirmationView {
 	}
 	return &confirmationView{
 		ActionID:     c.ActionID.String(),
+		ActionType:   c.ActionType,
 		State:        string(c.State),
 		RejectReason: c.RejectReason,
 	}

@@ -51,7 +51,7 @@ func (r *Repository) KeyAction(ctx context.Context, actionID uuid.UUID) (*KeyAct
 func (r *Repository) LatestConfirmations(ctx context.Context, orgID uuid.UUID) (map[string]KeyConfirmation, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT DISTINCT ON (ka.target_credential_id)
-			ka.target_credential_id, ka.action_id, oe.status::text, oe.reject_reason
+			ka.target_credential_id, ka.action_id, ka.action_type, oe.status::text, oe.reject_reason
 		FROM public.key_actions ka
 		LEFT JOIN public.onchain_events oe ON oe.event_id = ka.action_id
 		WHERE ka.org_id = $1 AND ka.submitted_at IS NOT NULL
@@ -65,11 +65,13 @@ func (r *Repository) LatestConfirmations(ctx context.Context, orgID uuid.UUID) (
 	for rows.Next() {
 		var credID []byte
 		var c KeyConfirmation
+		var actionType int16
 		var status *string
 		var reason *int16
-		if err := rows.Scan(&credID, &c.ActionID, &status, &reason); err != nil {
+		if err := rows.Scan(&credID, &c.ActionID, &actionType, &status, &reason); err != nil {
 			return nil, fmt.Errorf("passkeys.Repository.LatestConfirmations scan: %w", err)
 		}
+		c.ActionType = uint8(actionType)
 		c.State, c.RejectReason = signedaction.ConfirmationStateOf(status, reason)
 		out[string(credID)] = c
 	}
@@ -79,27 +81,28 @@ func (r *Repository) LatestConfirmations(ctx context.Context, orgID uuid.UUID) (
 	return out, nil
 }
 
-// keyActionInFlight reports whether the latest submitted key action for the
-// target credential is still awaiting or already got its chain confirmation:
-// such a key must not get a second submit or an administrative reject. Must be
-// called inside the transaction that holds the target row lock.
-func keyActionInFlight(ctx context.Context, q pgx.Tx, targetCredentialID []byte) (bool, error) {
+// keyActionInFlight returns the action type and the derived chain confirmation
+// state of the latest submitted key action for the target credential; found is
+// false when there is none. Must be called inside the transaction that holds
+// the target row lock.
+func keyActionInFlight(ctx context.Context, q pgx.Tx, targetCredentialID []byte) (uint8, signedaction.ConfirmationState, bool, error) {
+	var actionType int16
 	var status *string
 	var reason *int16
 	err := q.QueryRow(ctx, `
-		SELECT oe.status::text, oe.reject_reason
+		SELECT ka.action_type, oe.status::text, oe.reject_reason
 		FROM public.key_actions ka
 		LEFT JOIN public.onchain_events oe ON oe.event_id = ka.action_id
 		WHERE ka.target_credential_id = $1 AND ka.submitted_at IS NOT NULL
-		ORDER BY ka.submitted_at DESC LIMIT 1`, targetCredentialID).Scan(&status, &reason)
+		ORDER BY ka.submitted_at DESC LIMIT 1`, targetCredentialID).Scan(&actionType, &status, &reason)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return 0, "", false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("passkeys.Repository.keyActionInFlight: %w", err)
+		return 0, "", false, fmt.Errorf("passkeys.Repository.keyActionInFlight: %w", err)
 	}
 	state, _ := signedaction.ConfirmationStateOf(status, reason)
-	return state == signedaction.ConfirmationSent || state == signedaction.ConfirmationApplied, nil
+	return uint8(actionType), state, true, nil
 }
 
 // SubmitKeyAction submits a drafted key action in one transaction: it locks the
@@ -126,20 +129,31 @@ func (r *Repository) SubmitKeyAction(ctx context.Context, s KeyActionSubmission)
 		return fmt.Errorf("passkeys.Repository.SubmitKeyAction: %w", ErrActionAlreadySubmitted)
 	}
 
+	// KeyRegister подтверждает PENDING ключ, KeyRevoke отзывает ACTIVE;
+	// ожидаемый статус целевого ключа зависит от типа действия.
+	wantStatus, wrongStatus := domain.PasskeyStatusPending, error(ErrTargetNotPending)
+	if s.ActionType == signedaction.TypeKeyRevoke {
+		wantStatus, wrongStatus = domain.PasskeyStatusActive, ErrTargetNotActive
+	}
 	var targetStatus string
 	if err := tx.QueryRow(ctx,
 		`SELECT status FROM public.passkey_credentials WHERE credential_id = $1 FOR UPDATE`,
 		s.TargetCredentialID).Scan(&targetStatus); err != nil {
 		return fmt.Errorf("passkeys.Repository.SubmitKeyAction lock target: %w", err)
 	}
-	if targetStatus != string(domain.PasskeyStatusPending) {
-		return fmt.Errorf("passkeys.Repository.SubmitKeyAction: %w", ErrTargetNotPending)
+	if targetStatus != string(wantStatus) {
+		return fmt.Errorf("passkeys.Repository.SubmitKeyAction: %w", wrongStatus)
 	}
 
-	inFlight, err := keyActionInFlight(ctx, tx, s.TargetCredentialID)
+	lastType, state, found, err := keyActionInFlight(ctx, tx, s.TargetCredentialID)
 	if err != nil {
 		return err
 	}
+	// KeyRegister блокируется действием в работе или уже применённым;
+	// KeyRevoke — только действием в работе или уже применённым отзывом.
+	inFlight := found && (state == signedaction.ConfirmationSent ||
+		(state == signedaction.ConfirmationApplied &&
+			(s.ActionType == signedaction.TypeKeyRegister || lastType == signedaction.TypeKeyRevoke)))
 	if inFlight {
 		return fmt.Errorf("passkeys.Repository.SubmitKeyAction: %w", ErrActionInProgress)
 	}
@@ -196,11 +210,11 @@ func (r *Repository) RejectPendingPasskey(ctx context.Context, credentialID []by
 		return fmt.Errorf("passkeys.Repository.RejectPendingPasskey: %w", ErrTargetNotPending)
 	}
 
-	inFlight, err := keyActionInFlight(ctx, tx, credentialID)
+	_, state, found, err := keyActionInFlight(ctx, tx, credentialID)
 	if err != nil {
 		return err
 	}
-	if inFlight {
+	if found && (state == signedaction.ConfirmationSent || state == signedaction.ConfirmationApplied) {
 		return fmt.Errorf("passkeys.Repository.RejectPendingPasskey: %w", ErrActionInProgress)
 	}
 

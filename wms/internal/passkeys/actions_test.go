@@ -229,6 +229,127 @@ func TestDraftKeyRegister_Errors(t *testing.T) {
 	})
 }
 
+func TestDraftKeyRevoke_Success(t *testing.T) {
+	f := newActionFixture(t)
+	f.target.Status = domain.PasskeyStatusActive
+
+	draft, err := f.svc.DraftKeyRevoke(context.Background(), adminA, "0x"+hex.EncodeToString(f.target.KeyID[:]))
+	if err != nil {
+		t.Fatalf("DraftKeyRevoke: %v", err)
+	}
+
+	want := signedaction.Challenge(draft.Action.ActionID, signedaction.TypeKeyRevoke, signedaction.NoItems, signedaction.KeyDetailsHash(f.target.QX, f.target.QY))
+	if draft.Action.ActionType != signedaction.TypeKeyRevoke {
+		t.Errorf("actionType = %d, want 6", draft.Action.ActionType)
+	}
+	if draft.Action.Challenge != want {
+		t.Errorf("challenge = %x, want %x", draft.Action.Challenge, want)
+	}
+	if draft.Action.ActionID.Version() != 7 {
+		t.Errorf("actionID version = %d, want 7", draft.Action.ActionID.Version())
+	}
+	if draft.SubjectQX != f.target.QX || draft.SubjectQY != f.target.QY {
+		t.Errorf("subject key mismatch")
+	}
+	if draft.DetailsHash != signedaction.KeyDetailsHash(f.target.QX, f.target.QY) {
+		t.Errorf("detailsHash mismatch")
+	}
+	if f.stored == nil || f.stored.ActionType != signedaction.TypeKeyRevoke {
+		t.Errorf("stored action = %+v, want type 6", f.stored)
+	}
+	if !bytes.Equal(f.stored.TargetCredentialID, f.target.CredentialID) || !bytes.Equal(f.stored.SignerCredentialID, f.signer.CredentialID) {
+		t.Errorf("stored credentials mismatch")
+	}
+}
+
+func TestDraftKeyRevoke_Errors(t *testing.T) {
+	targetKeyID := func(target *domain.Passkey) string {
+		return "0x" + hex.EncodeToString(target.KeyID[:])
+	}
+
+	t.Run("target of another org", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.target.Status = domain.PasskeyStatusActive
+		f.target.OrgID = orgB
+		if _, err := f.svc.DraftKeyRevoke(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrPasskeyNotFound) {
+			t.Fatalf("err = %v, want ErrPasskeyNotFound", err)
+		}
+	})
+	t.Run("target is not an operator key", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.target.Status = domain.PasskeyStatusActive
+		f.target.Role = domain.UserRoleAdmin
+		if _, err := f.svc.DraftKeyRevoke(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrPasskeyNotFound) {
+			t.Fatalf("err = %v, want ErrPasskeyNotFound", err)
+		}
+	})
+	t.Run("target not active", func(t *testing.T) {
+		f := newActionFixture(t)
+		if _, err := f.svc.DraftKeyRevoke(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrTargetNotActive) {
+			t.Fatalf("err = %v, want ErrTargetNotActive", err)
+		}
+	})
+	t.Run("confirmation in flight", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.target.Status = domain.PasskeyStatusActive
+		f.repo.latestConfirmationsFn = func(context.Context, uuid.UUID) (map[string]KeyConfirmation, error) {
+			return map[string]KeyConfirmation{
+				string(f.target.CredentialID): {State: signedaction.ConfirmationSent},
+			}, nil
+		}
+		if _, err := f.svc.DraftKeyRevoke(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrActionInProgress) {
+			t.Fatalf("err = %v, want ErrActionInProgress", err)
+		}
+	})
+	t.Run("applied register does not block revoke", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.target.Status = domain.PasskeyStatusActive
+		f.repo.latestConfirmationsFn = func(context.Context, uuid.UUID) (map[string]KeyConfirmation, error) {
+			return map[string]KeyConfirmation{
+				string(f.target.CredentialID): {State: signedaction.ConfirmationApplied, ActionType: signedaction.TypeKeyRegister},
+			}, nil
+		}
+		if _, err := f.svc.DraftKeyRevoke(context.Background(), adminA, targetKeyID(f.target)); err != nil {
+			t.Fatalf("DraftKeyRevoke: %v", err)
+		}
+	})
+	t.Run("invalid key id", func(t *testing.T) {
+		f := newActionFixture(t)
+		if _, err := f.svc.DraftKeyRevoke(context.Background(), adminA, "0xzz"); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("err = %v, want ErrInvalidRequest", err)
+		}
+	})
+}
+
+func TestSubmitKeyAction_RevokeEnvelope(t *testing.T) {
+	f := newActionFixture(t)
+	f.target.Status = domain.PasskeyStatusActive
+	draft, err := f.svc.DraftKeyRevoke(context.Background(), adminA, "0x"+hex.EncodeToString(f.target.KeyID[:]))
+	if err != nil {
+		t.Fatalf("DraftKeyRevoke: %v", err)
+	}
+
+	confirmation, err := f.svc.SubmitKeyAction(context.Background(), adminA, draft.Action.ActionID, f.assertion(t, &draft.Action))
+	if err != nil {
+		t.Fatalf("SubmitKeyAction: %v", err)
+	}
+	if confirmation.ActionType != signedaction.TypeKeyRevoke || confirmation.State != signedaction.ConfirmationSent {
+		t.Fatalf("confirmation = %+v, want type 6 SENT", confirmation)
+	}
+	if f.submissions[0].ActionType != signedaction.TypeKeyRevoke {
+		t.Errorf("submission actionType = %d, want 6", f.submissions[0].ActionType)
+	}
+	var doc struct {
+		ActionType int `json:"actionType"`
+	}
+	if err := json.Unmarshal(f.submissions[0].Payload, &doc); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if doc.ActionType != 6 {
+		t.Errorf("envelope actionType = %d, want 6", doc.ActionType)
+	}
+}
+
 func TestRejectKey_Success(t *testing.T) {
 	f := newActionFixture(t)
 
@@ -324,6 +445,65 @@ func TestHandler_RejectKeyForbiddenForOperator(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("reject status = %d, want 403", rec.Code)
 	}
+}
+
+func TestHandler_DraftKeyRevokeRoute(t *testing.T) {
+	f := newActionFixture(t)
+	f.target.Status = domain.PasskeyStatusActive
+	body := `{"target_key_id":"0x` + hex.EncodeToString(f.target.KeyID[:]) + `"}`
+
+	rec := serveAsBody(t, f.svc, http.MethodPost, "/passkeys/actions/key-revoke/draft",
+		strings.NewReader(body), operatorA, domain.UserRoleOperator)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("operator status = %d, want 403", rec.Code)
+	}
+
+	rec = serveAsBody(t, f.svc, http.MethodPost, "/passkeys/actions/key-revoke/draft",
+		strings.NewReader(body), adminA, domain.UserRoleAdmin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var draft struct {
+		ActionID   string `json:"action_id"`
+		ActionType int    `json:"action_type"`
+		Challenge  string `json:"challenge"`
+	}
+	if err := json.Unmarshal(dataEnvelope(t, rec), &draft); err != nil {
+		t.Fatalf("unmarshal draft: %v", err)
+	}
+	if draft.ActionType != 6 {
+		t.Errorf("action_type = %d, want 6", draft.ActionType)
+	}
+	if draft.Challenge != base64.RawURLEncoding.EncodeToString(f.stored.Challenge[:]) {
+		t.Errorf("challenge does not match the stored action")
+	}
+}
+
+func TestHandler_DraftKeyRevokeErrorMapping(t *testing.T) {
+	t.Run("TARGET_NOT_ACTIVE", func(t *testing.T) {
+		f := newActionFixture(t)
+		rec := serveAsBody(t, f.svc, http.MethodPost, "/passkeys/actions/key-revoke/draft",
+			strings.NewReader(`{"target_key_id":"0x`+hex.EncodeToString(f.target.KeyID[:])+`"}`), adminA, domain.UserRoleAdmin)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != "TARGET_NOT_ACTIVE" {
+			t.Fatalf("code = %q, want TARGET_NOT_ACTIVE", code)
+		}
+	})
+	t.Run("PASSKEY_NOT_FOUND", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.target.Status = domain.PasskeyStatusActive
+		f.target.Role = domain.UserRoleAdmin
+		rec := serveAsBody(t, f.svc, http.MethodPost, "/passkeys/actions/key-revoke/draft",
+			strings.NewReader(`{"target_key_id":"0x`+hex.EncodeToString(f.target.KeyID[:])+`"}`), adminA, domain.UserRoleAdmin)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rec.Code)
+		}
+		if code := errorCode(t, rec); code != "PASSKEY_NOT_FOUND" {
+			t.Fatalf("code = %q, want PASSKEY_NOT_FOUND", code)
+		}
+	})
 }
 
 func TestSubmitKeyAction_Success(t *testing.T) {

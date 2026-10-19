@@ -143,8 +143,11 @@ func LockOperation(ctx context.Context, tx pgx.Tx, operationID, createdBy uuid.U
 	return op, nil
 }
 
-// LockSigner locks the signer's passkey row FOR SHARE and requires it to be
-// ACTIVE, serializing against key revocation (ADR §7).
+// LockSigner locks the signer's passkey row FOR SHARE, requires it to be
+// ACTIVE and refuses when a submitted, not-failed KeyRevoke exists for the
+// credential (ADR §7). READ COMMITTED takes a fresh snapshot per statement, so
+// a revoke committed while this transaction waited for the lock becomes visible
+// to the second, separate statement.
 func LockSigner(ctx context.Context, tx pgx.Tx, credentialID []byte) error {
 	var status string
 	err := tx.QueryRow(ctx, `
@@ -157,6 +160,27 @@ func LockSigner(ctx context.Context, tx pgx.Tx, credentialID []byte) error {
 		return fmt.Errorf("signedops.LockSigner: %w", err)
 	}
 	if status != string(domain.PasskeyStatusActive) {
+		return fmt.Errorf("signedops.LockSigner: %w", ErrSignerNotActive)
+	}
+
+	// Отзыв сериализуется со складским действием (ADR §7): транзакция отзыва
+	// берёт строку ключа FOR UPDATE и ждёт, пока уйдёт наш FOR SHARE. Отдельный
+	// стейтмент после блокировки видит и отзыв, закоммиченный пока мы ждали.
+	var revoked bool
+	err = tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM public.key_actions ka
+			LEFT JOIN public.onchain_events oe ON oe.event_id = ka.action_id
+			WHERE ka.target_credential_id = $1
+			  AND ka.action_type = 6
+			  AND ka.submitted_at IS NOT NULL
+			  AND oe.status IS DISTINCT FROM 'FAILED'
+		)`, credentialID).Scan(&revoked)
+	if err != nil {
+		return fmt.Errorf("signedops.LockSigner: %w", err)
+	}
+	if revoked {
 		return fmt.Errorf("signedops.LockSigner: %w", ErrSignerNotActive)
 	}
 	return nil
