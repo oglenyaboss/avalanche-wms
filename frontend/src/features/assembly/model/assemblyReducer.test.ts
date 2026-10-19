@@ -69,6 +69,7 @@ function bufferResult(
     bufferBinId: 'buf-1',
     productsPlaced: 2,
     ordersAssembled: 2,
+    operationId: 'op-1',
     ...overrides,
   }
 }
@@ -293,6 +294,8 @@ describe('assemblyReducer / BUFFER_SCANNED (multi-trip)', () => {
     expect(state.tasks).toEqual([])
     expect(state.destinations).toEqual(destinations)
     expect(state.successMessage).toContain('Размещено товаров: 2')
+    // The unload result is kept for the chain-status panel.
+    expect(state.lastBufferResult).toEqual(bufferResult({ productsPlaced: 2, ordersAssembled: 0 }))
   })
 
   it('lets the operator pick the remaining tasks for the same store without re-selecting (independent cycle)', () => {

@@ -154,6 +154,7 @@ export function assemblyReducer(
         drafterOpen: false,
         errorMessage: null,
         successMessage: null,
+        lastBufferResult: null,
       }
     }
 
@@ -228,6 +229,8 @@ export function assemblyReducer(
         destinations: state.destinations,
         selectedDestination: state.selectedDestination,
         successMessage: buildBufferMessage(action.result),
+        // Drives the chain-status panel under the success message.
+        lastBufferResult: action.result,
       }
     }
 
@@ -261,6 +264,7 @@ export function assemblyReducer(
         errorMessage: action.message,
         confirmFinishOpen: false,
         successMessage: null,
+        lastBufferResult: null,
       }
     }
 
