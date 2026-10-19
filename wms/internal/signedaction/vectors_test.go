@@ -42,6 +42,7 @@ type vectorAction struct {
 		QY           hexBytes `json:"qy"`
 		Salt         hexBytes `json:"salt"`
 		CargoplaceID string   `json:"cargoplaceId"`
+		StorageBinID string   `json:"storageBinId"`
 		OperatorID   string   `json:"operatorId"`
 		OccurredAtMs uint64   `json:"occurredAtMs"`
 	} `json:"details"`
@@ -198,6 +199,26 @@ func TestVectors_ReceiveDetailsHash(t *testing.T) {
 	got := signedaction.ReceiveDetailsHash([32]byte(receive.Details.Salt), cargoplaceID, operatorID, receive.Details.OccurredAtMs)
 	if got != [32]byte(receive.DetailsHash) {
 		t.Errorf("ReceiveDetailsHash = %x, want %x", got, receive.DetailsHash)
+	}
+}
+
+func TestVectors_PutAwayDetailsHash(t *testing.T) {
+	v := loadVectors(t)
+	putAway := findAction(v, "putAway")
+	if putAway == nil {
+		t.Fatal("no putAway action in vectors")
+	}
+	storageBinID, err := uuid.Parse(putAway.Details.StorageBinID)
+	if err != nil {
+		t.Fatalf("parse storageBinId: %v", err)
+	}
+	operatorID, err := uuid.Parse(putAway.Details.OperatorID)
+	if err != nil {
+		t.Fatalf("parse operatorId: %v", err)
+	}
+	got := signedaction.PutAwayDetailsHash([32]byte(putAway.Details.Salt), storageBinID, operatorID, putAway.Details.OccurredAtMs)
+	if got != [32]byte(putAway.DetailsHash) {
+		t.Errorf("PutAwayDetailsHash = %x, want %x", got, putAway.DetailsHash)
 	}
 }
 

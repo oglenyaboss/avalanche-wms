@@ -9,6 +9,8 @@ import (
 
 	"wms/internal/domain"
 	"wms/internal/ledger"
+	"wms/internal/signedaction"
+	"wms/internal/signedops"
 )
 
 type mockPutawayRepo struct {
@@ -44,10 +46,14 @@ type mockPutawayRepo struct {
 	insertPutawayErr error
 	insertedPutaways []*InsertPutawayParams
 
-	// InsertOutboxEvents
-	insertOutboxErr  error
-	outboxCalls      int
-	lastOutboxParams *OutboxEventsParams
+	// LockOperation/LockSigner/WriteActions — tx-методы подписанного submit
+	lockedOperation          *signedops.Operation
+	lockOperationErr         error
+	lockSignerErr            error
+	writeActionsErr          error
+	writeActionsCalls        int
+	lastWriteActionsOp       *signedops.Operation
+	lastWriteActionsPayloads [][]byte
 
 	// WithTx tracking
 	withTxCalls int
@@ -77,14 +83,21 @@ func (m *mockPutawayRepo) CountReceivedInBuffer(_ context.Context, _ uuid.UUID) 
 	return m.receivedInBuffer, nil
 }
 
-// TestPlaceProductsToStorageBin_ChainEventRejected verifies the #45 gate: when a
-// product's receiving event is FAILED on-chain, placement is rejected with
-// ErrChainEventRejected BEFORE the transaction opens (no state is mutated).
-func TestPlaceProductsToStorageBin_ChainEventRejected(t *testing.T) {
-	mockRepo := &mockPutawayRepo{checkChainErr: ledger.ErrChainEventRejected}
-	svc := NewService(mockRepo)
+// TestDraftPlaceToStorageBin_GateRejected verifies the #45 gate: when a
+// product's receiving event is FAILED on-chain, the draft is rejected with
+// ErrChainEventRejected — no operation is stored, no transaction opens.
+func TestDraftPlaceToStorageBin_GateRejected(t *testing.T) {
+	bufferBinID := uuid.New()
+	productID := uuid.New()
+	mockRepo := &mockPutawayRepo{
+		checkChainErr: ledger.ErrChainEventRejected,
+		productsMap: map[uuid.UUID]*domain.Product{
+			productID: {ProductID: productID, Status: "RECEIVED", BinID: &bufferBinID},
+		},
+	}
+	svc := newTestService(mockRepo)
 
-	_, err := svc.PlaceProductsToStorageBin(context.Background(), uuid.New(), []uuid.UUID{uuid.New()}, uuid.New())
+	_, _, err := svc.DraftPlaceToStorageBin(context.Background(), uuid.New(), []uuid.UUID{productID}, uuid.New())
 	if !errors.Is(err, ledger.ErrChainEventRejected) {
 		t.Fatalf("expected ErrChainEventRejected, got %v", err)
 	}
@@ -92,7 +105,7 @@ func TestPlaceProductsToStorageBin_ChainEventRejected(t *testing.T) {
 		t.Fatalf("gate must reject before the transaction; withTxCalls=%d", mockRepo.withTxCalls)
 	}
 	if mockRepo.checkChainAgg != ledger.AggregateReceiving {
-		t.Fatalf("PlaceProductsToStorageBin must gate on the receiving stage; CheckChainStatus aggregateType=%q, want %q", mockRepo.checkChainAgg, ledger.AggregateReceiving)
+		t.Fatalf("DraftPlaceToStorageBin must gate on the receiving stage; CheckChainStatus aggregateType=%q, want %q", mockRepo.checkChainAgg, ledger.AggregateReceiving)
 	}
 }
 
@@ -175,13 +188,28 @@ func (m *mockPutawayRepo) InsertPutaway(_ context.Context, params *InsertPutaway
 	return nil
 }
 
-func (m *mockPutawayRepo) InsertOutboxEvents(_ context.Context, params *OutboxEventsParams) error {
-	m.outboxCalls++
-	m.lastOutboxParams = params
-	if m.insertOutboxErr != nil {
-		return m.insertOutboxErr
+func (m *mockPutawayRepo) LockOperation(_ context.Context, _, _ uuid.UUID) (*signedops.Operation, error) {
+	if m.lockOperationErr != nil {
+		return nil, m.lockOperationErr
 	}
-	return nil
+	return m.lockedOperation, nil
+}
+
+func (m *mockPutawayRepo) LockSigner(_ context.Context, _ []byte) error {
+	return m.lockSignerErr
+}
+
+func (m *mockPutawayRepo) WriteActions(_ context.Context, op *signedops.Operation, payloads [][]byte) error {
+	m.writeActionsCalls++
+	m.lastWriteActionsOp = op
+	m.lastWriteActionsPayloads = payloads
+	return m.writeActionsErr
+}
+
+// newTestService собирает Service с пустыми signed-моками для сценариев, где
+// операция не участвует (buffer scan, cart scan).
+func newTestService(repo *mockPutawayRepo) *Service {
+	return NewService(repo, &mockOperationStore{operations: map[uuid.UUID]*signedops.Operation{}}, &mockSignerSource{})
 }
 
 // TestGetBufferProductsSuccess - успешное получение товаров из буфера
@@ -210,7 +238,7 @@ func TestGetBufferProductsSuccess(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := newTestService(mockRepo)
 	result, err := svc.GetBufferProducts(context.Background(), operatorID, bufferBinID)
 
 	if err != nil {
@@ -239,7 +267,7 @@ func TestGetBufferProductsBufferNotFound(t *testing.T) {
 		bufferBinErr: ErrBufferBinNotFound,
 	}
 
-	svc := NewService(mockRepo)
+	svc := newTestService(mockRepo)
 	_, err := svc.GetBufferProducts(context.Background(), operatorID, bufferBinID)
 
 	if !errors.Is(err, ErrBufferBinNotFound) {
@@ -249,7 +277,7 @@ func TestGetBufferProductsBufferNotFound(t *testing.T) {
 
 // TestGetBufferProductsInvalidInput - невалидные входные данные
 func TestGetBufferProductsInvalidInput(t *testing.T) {
-	svc := NewService(&mockPutawayRepo{})
+	svc := newTestService(&mockPutawayRepo{})
 
 	_, err := svc.GetBufferProducts(context.Background(), uuid.Nil, uuid.New())
 	if !errors.Is(err, ErrInvalidInput) {
@@ -286,7 +314,7 @@ func TestAddToPutawayCartSuccess(t *testing.T) {
 		receivedInBuffer: 1,
 	}
 
-	svc := NewService(mockRepo)
+	svc := newTestService(mockRepo)
 
 	result, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
 	if err != nil {
@@ -328,7 +356,7 @@ func TestAddToPutawayCartDuplicateProduct(t *testing.T) {
 		receivedInBuffer: 1,
 	}
 
-	svc := NewService(mockRepo)
+	svc := newTestService(mockRepo)
 
 	result1, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
 	if err != nil {
@@ -365,7 +393,7 @@ func TestAddToPutawayCartProductNotInBuffer(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := newTestService(mockRepo)
 	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
 
 	if !errors.Is(err, ErrProductNotInBuffer) {
@@ -391,7 +419,7 @@ func TestAddToPutawayCartProductNotReceived(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := newTestService(mockRepo)
 	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
 
 	if !errors.Is(err, ErrProductNotReceived) {
@@ -409,7 +437,7 @@ func TestAddToPutawayCartProductNotFound(t *testing.T) {
 		productErr: ErrProductNotFound,
 	}
 
-	svc := NewService(mockRepo)
+	svc := newTestService(mockRepo)
 	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
 
 	if !errors.Is(err, ErrProductNotFound) {
@@ -419,7 +447,7 @@ func TestAddToPutawayCartProductNotFound(t *testing.T) {
 
 // TestAddToPutawayCartInvalidInput - невалидные входные данные
 func TestAddToPutawayCartInvalidInput(t *testing.T) {
-	svc := NewService(&mockPutawayRepo{})
+	svc := newTestService(&mockPutawayRepo{})
 
 	_, err := svc.AddToPutawayCart(context.Background(), uuid.Nil, uuid.New(), uuid.New())
 	if !errors.Is(err, ErrInvalidInput) {
@@ -437,432 +465,13 @@ func TestAddToPutawayCartInvalidInput(t *testing.T) {
 	}
 }
 
-// TestPlaceProductsToStorageBinSuccess - успешное размещение товаров
-func TestPlaceProductsToStorageBinSuccess(t *testing.T) {
-	operatorID := uuid.New()
-	storageBinID := uuid.New()
-	bufferBinID := uuid.New()
-	productID1 := uuid.New()
-	productID2 := uuid.New()
-	productIDs := []uuid.UUID{productID1, productID2}
-
-	mockRepo := &mockPutawayRepo{
-		storageBin: &domain.Bin{
-			BinID: storageBinID,
-			Code:  "M2-A-03",
-		},
-		productsMap: map[uuid.UUID]*domain.Product{
-			productID1: {
-				ProductID: productID1,
-				Status:    "RECEIVED",
-				BinID:     &bufferBinID,
-			},
-			productID2: {
-				ProductID: productID2,
-				Status:    "RECEIVED",
-				BinID:     &bufferBinID,
-			},
-		},
-		sku: &domain.SKU{
-			SKUID: uuid.New(),
-			Name:  "Ноутбук Lenovo X1",
-		},
-	}
-
-	svc := NewService(mockRepo)
-
-	// Добавляем товары в корзину
-	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID1, bufferBinID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	_, err = svc.AddToPutawayCart(context.Background(), operatorID, productID2, bufferBinID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	result, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	if result.StorageBinID != storageBinID.String() {
-		t.Fatalf("expected StorageBinID %s, got %s", storageBinID.String(), result.StorageBinID)
-	}
-	if result.StorageBinCode != "M2-A-03" {
-		t.Fatalf("expected StorageBinCode M2-A-03, got %s", result.StorageBinCode)
-	}
-	if result.ProductsPlaced != 2 {
-		t.Fatalf("expected ProductsPlaced 2, got %d", result.ProductsPlaced)
-	}
-	if result.OutboxEventsCreated != 2 {
-		t.Fatalf("expected OutboxEventsCreated 2, got %d", result.OutboxEventsCreated)
-	}
-	if mockRepo.withTxCalls != 1 {
-		t.Fatalf("expected WithTx to be called, got %d calls", mockRepo.withTxCalls)
-	}
-	if len(mockRepo.updatedProductIDs) != 2 {
-		t.Fatalf("expected 2 products updated, got %d", len(mockRepo.updatedProductIDs))
-	}
-	if len(mockRepo.insertedPutaways) != 2 {
-		t.Fatalf("expected 2 putaway records, got %d", len(mockRepo.insertedPutaways))
-	}
-
-	// Проверяем, что from_bin_id заполнен
-	for _, putaway := range mockRepo.insertedPutaways {
-		if putaway.FromBinID == uuid.Nil {
-			t.Fatalf("expected FromBinID to be set, got nil")
-		}
-		if putaway.FromBinID != bufferBinID {
-			t.Fatalf("expected FromBinID %s, got %s", bufferBinID.String(), putaway.FromBinID.String())
-		}
-	}
-
-	if mockRepo.outboxCalls != 1 {
-		t.Fatalf("expected 1 outbox call, got %d", mockRepo.outboxCalls)
-	}
-
-}
-
-func TestPlaceProductsEventIDSharing(t *testing.T) {
-	operatorID := uuid.New()
-	storageBinID := uuid.New()
-	bufferBinID := uuid.New()
-	productID1 := uuid.New()
-	productID2 := uuid.New()
-
-	mockRepo := &mockPutawayRepo{
-		storageBin: &domain.Bin{BinID: storageBinID, Code: "M2-A-03"},
-		productsMap: map[uuid.UUID]*domain.Product{
-			productID1: {ProductID: productID1, Status: "RECEIVED", BinID: &bufferBinID},
-			productID2: {ProductID: productID2, Status: "RECEIVED", BinID: &bufferBinID},
-		},
-	}
-
-	svc := NewService(mockRepo)
-	_, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, []uuid.UUID{productID1, productID2}, storageBinID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(mockRepo.insertedPutaways) != 2 {
-		t.Fatalf("expected 2 putaway records, got %d", len(mockRepo.insertedPutaways))
-	}
-	if mockRepo.lastOutboxParams == nil {
-		t.Fatal("expected outbox params to be captured")
-	}
-	if len(mockRepo.lastOutboxParams.EventIDs) != 2 {
-		t.Fatalf("expected 2 outbox event IDs, got %d", len(mockRepo.lastOutboxParams.EventIDs))
-	}
-
-	for i, putaway := range mockRepo.insertedPutaways {
-		if putaway.EventID != mockRepo.lastOutboxParams.EventIDs[i] {
-			t.Fatalf("putaway[%d].EventID=%s != outbox.EventIDs[%d]=%s",
-				i, putaway.EventID, i, mockRepo.lastOutboxParams.EventIDs[i])
-		}
-	}
-}
-
-// TestPlaceProductsToStorageBinClearsCart - проверка очистки корзины
-func TestPlaceProductsToStorageBinClearsCart(t *testing.T) {
-	operatorID := uuid.New()
-	storageBinID := uuid.New()
-	bufferBinID := uuid.New()
-	productID := uuid.New()
-	productIDs := []uuid.UUID{productID}
-
-	mockRepo := &mockPutawayRepo{
-		storageBin: &domain.Bin{
-			BinID: storageBinID,
-			Code:  "M2-A-03",
-		},
-		productsMap: map[uuid.UUID]*domain.Product{
-			productID: {
-				ProductID: productID,
-				Status:    "RECEIVED",
-				BinID:     &bufferBinID,
-			},
-		},
-		sku: &domain.SKU{
-			SKUID: uuid.New(),
-			Name:  "Ноутбук Lenovo X1",
-		},
-	}
-
-	svc := NewService(mockRepo)
-
-	// Добавляем товар в корзину
-	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	// Размещаем товар
-	_, err = svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-}
-
-// TestPlaceProductsToStorageBinStorageNotFound - ячейка хранения не найдена
-func TestPlaceProductsToStorageBinStorageNotFound(t *testing.T) {
-	operatorID := uuid.New()
-	storageBinID := uuid.New()
-	productIDs := []uuid.UUID{uuid.New()}
-
-	mockRepo := &mockPutawayRepo{
-		storageBinErr: ErrStorageBinNotFound,
-	}
-
-	svc := NewService(mockRepo)
-	_, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
-
-	if !errors.Is(err, ErrStorageBinNotFound) {
-		t.Fatalf("expected ErrStorageBinNotFound, got %v", err)
-	}
-}
-
-// TestPlaceProductsToStorageBinRejectsProductNotInBuffer проверяет защиту от drift:
-// если у продукта в БД bin_id указывает на storage-ячейку (а не buffer) — раскладка
-// не должна выполняться, иначе получим лишний putaway outbox event и FSM revert на чейне.
-func TestPlaceProductsToStorageBinRejectsProductNotInBuffer(t *testing.T) {
-	operatorID := uuid.New()
-	storageBinID := uuid.New()
-	driftedFromBinID := uuid.New() // указывает на storage-ячейку, не buffer
-	productID := uuid.New()
-	productIDs := []uuid.UUID{productID}
-
-	mockRepo := &mockPutawayRepo{
-		storageBin: &domain.Bin{
-			BinID: storageBinID,
-			Code:  "M2-A-03",
-		},
-		bufferBinErr: ErrBufferBinNotFound, // bin не буферный → запрос вернёт NotFound
-		productsMap: map[uuid.UUID]*domain.Product{
-			productID: {
-				ProductID: productID,
-				Status:    "RECEIVED",
-				BinID:     &driftedFromBinID,
-			},
-		},
-	}
-
-	svc := NewService(mockRepo)
-	_, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
-
-	if !errors.Is(err, ErrProductNotInBuffer) {
-		t.Fatalf("expected ErrProductNotInBuffer, got %v", err)
-	}
-	if len(mockRepo.updatedProductIDs) != 0 {
-		t.Fatalf("expected zero product updates on buffer drift, got %d", len(mockRepo.updatedProductIDs))
-	}
-	if len(mockRepo.insertedPutaways) != 0 {
-		t.Fatalf("expected zero putaway records on buffer drift, got %d", len(mockRepo.insertedPutaways))
-	}
-	if mockRepo.outboxCalls != 0 {
-		t.Fatalf("expected zero outbox events on buffer drift, got %d", mockRepo.outboxCalls)
-	}
-}
-
-// TestPlaceProductsToStorageBinProductNotReceived - товар не в статусе RECEIVED
-func TestPlaceProductsToStorageBinProductNotReceived(t *testing.T) {
-	operatorID := uuid.New()
-	storageBinID := uuid.New()
-	bufferBinID := uuid.New()
-	productID := uuid.New()
-	productIDs := []uuid.UUID{productID}
-
-	mockRepo := &mockPutawayRepo{
-		storageBin: &domain.Bin{
-			BinID: storageBinID,
-			Code:  "M2-A-03",
-		},
-		productsMap: map[uuid.UUID]*domain.Product{
-			productID: {
-				ProductID: productID,
-				Status:    "STORED",
-				BinID:     &bufferBinID,
-			},
-		},
-		updateProductErr: ErrProductNotReceived,
-	}
-
-	svc := NewService(mockRepo)
-	_, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
-
-	if !errors.Is(err, ErrProductNotReceived) {
-		t.Fatalf("expected ErrProductNotReceived, got %v", err)
-	}
-}
-
-// TestPlaceProductsToStorageBinInvalidInput - невалидные входные данные
-func TestPlaceProductsToStorageBinInvalidInput(t *testing.T) {
-	svc := NewService(&mockPutawayRepo{})
-
-	_, err := svc.PlaceProductsToStorageBin(context.Background(), uuid.Nil, []uuid.UUID{uuid.New()}, uuid.New())
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput for nil operatorID, got %v", err)
-	}
-
-	_, err = svc.PlaceProductsToStorageBin(context.Background(), uuid.New(), []uuid.UUID{}, uuid.New())
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput for empty productIDs, got %v", err)
-	}
-
-	_, err = svc.PlaceProductsToStorageBin(context.Background(), uuid.New(), []uuid.UUID{uuid.New()}, uuid.Nil)
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput for nil storageBinID, got %v", err)
-	}
-}
-
-// TestPlaceProductsToStorageBinMultipleProductsTransaction - проверка транзакционности
-func TestPlaceProductsToStorageBinMultipleProductsTransaction(t *testing.T) {
-	operatorID := uuid.New()
-	storageBinID := uuid.New()
-	bufferBinID := uuid.New()
-	productID1 := uuid.New()
-	productID2 := uuid.New()
-	productIDs := []uuid.UUID{productID1, productID2}
-
-	mockRepo := &mockPutawayRepo{
-		storageBin: &domain.Bin{
-			BinID: storageBinID,
-			Code:  "M2-A-03",
-		},
-		productsMap: map[uuid.UUID]*domain.Product{
-			productID1: {
-				ProductID: productID1,
-				Status:    "RECEIVED",
-				BinID:     &bufferBinID,
-			},
-			productID2: {
-				ProductID: productID2,
-				Status:    "RECEIVED",
-				BinID:     &bufferBinID,
-			},
-		},
-		sku:              &domain.SKU{SKUID: uuid.New(), Name: "Product"},
-		failOnUpdateCall: 2,
-	}
-
-	svc := NewService(mockRepo)
-
-	// Добавляем товары в корзину
-	_, _ = svc.AddToPutawayCart(context.Background(), operatorID, productID1, bufferBinID)
-	_, _ = svc.AddToPutawayCart(context.Background(), operatorID, productID2, bufferBinID)
-
-	// Пытаемся разместить (должно упасть на втором товаре)
-	_, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
-
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-
-	if len(mockRepo.updatedProductIDs) != 2 {
-		t.Fatalf("expected 2 update attempts, got %d", len(mockRepo.updatedProductIDs))
-	}
-
-	if mockRepo.outboxCalls > 0 {
-		t.Fatalf("expected outbox not to be called on error, got %d calls", mockRepo.outboxCalls)
-	}
-
-}
-
-// TestPlaceProductsToStorageBinShippingBufferRejected - попытка разместить товар в SHIPPING_BUFFER
-func TestPlaceProductsToStorageBinShippingBufferRejected(t *testing.T) {
-	operatorID := uuid.New()
-	shippingBufferID := uuid.New()
-	bufferBinID := uuid.New()
-	productID := uuid.New()
-	productIDs := []uuid.UUID{productID}
-
-	mockRepo := &mockPutawayRepo{
-		storageBinErr: ErrStorageBinNotFound, // SHIPPING_BUFFER не должен быть найден как storage bin
-		productsMap: map[uuid.UUID]*domain.Product{
-			productID: {
-				ProductID: productID,
-				Status:    "RECEIVED",
-				BinID:     &bufferBinID,
-			},
-		},
-		sku: &domain.SKU{
-			SKUID: uuid.New(),
-			Name:  "Ноутбук Lenovo X1",
-		},
-	}
-
-	svc := NewService(mockRepo)
-
-	// Добавляем товар в корзину
-	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	// Пытаемся разместить в SHIPPING_BUFFER
-	_, err = svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, shippingBufferID)
-
-	if !errors.Is(err, ErrStorageBinNotFound) {
-		t.Fatalf("expected ErrStorageBinNotFound for SHIPPING_BUFFER, got %v", err)
-	}
-}
-
-// TestPlaceProductsToStorageBinRegularSectionAllowed - попытка разместить товар в обычной зоне (A, B и т.д.)
-func TestPlaceProductsToStorageBinRegularSectionAllowed(t *testing.T) {
-	operatorID := uuid.New()
-	storageBinID := uuid.New()
-	bufferBinID := uuid.New()
-	productID := uuid.New()
-	productIDs := []uuid.UUID{productID}
-
-	mockRepo := &mockPutawayRepo{
-		storageBin: &domain.Bin{
-			BinID:   storageBinID,
-			Code:    "A-01-01",
-			Section: func() *string { s := "A"; return &s }(),
-		},
-		productsMap: map[uuid.UUID]*domain.Product{
-			productID: {
-				ProductID: productID,
-				Status:    "RECEIVED",
-				BinID:     &bufferBinID,
-			},
-		},
-		sku: &domain.SKU{
-			SKUID: uuid.New(),
-			Name:  "Ноутбук Lenovo X1",
-		},
-	}
-
-	svc := NewService(mockRepo)
-
-	// Добавляем товар в корзину
-	_, err := svc.AddToPutawayCart(context.Background(), operatorID, productID, bufferBinID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	// Размещаем в обычной зоне
-	result, err := svc.PlaceProductsToStorageBin(context.Background(), operatorID, productIDs, storageBinID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	if result.ProductsPlaced != 1 {
-		t.Fatalf("expected ProductsPlaced 1, got %d", result.ProductsPlaced)
-	}
-	if result.OutboxEventsCreated != 1 {
-		t.Fatalf("expected OutboxEventsCreated 1, got %d", result.OutboxEventsCreated)
-	}
-}
-
 // TestServiceImplementsInterface - проверка что Service реализует интерфейс
 func TestServiceImplementsInterface(_ *testing.T) {
 	var _ interface {
 		GetBufferProducts(context.Context, uuid.UUID, uuid.UUID) (*ScanBufferResponse, error)
 		AddToPutawayCart(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*ScanProductResponse, error)
-		PlaceProductsToStorageBin(context.Context, uuid.UUID, []uuid.UUID, uuid.UUID) (*ScanStorageBinResponse, error)
+		DraftPlaceToStorageBin(context.Context, uuid.UUID, []uuid.UUID, uuid.UUID) (*signedops.Operation, string, error)
+		SubmitPlaceToStorageBin(context.Context, uuid.UUID, uuid.UUID, map[uuid.UUID]signedaction.Assertion) (*ScanStorageBinResponse, error)
 	} = (*Service)(nil)
 }
 
@@ -881,7 +490,7 @@ func BenchmarkGetBufferProducts(b *testing.B) {
 			{ProductID: uuid.New(), QRCode: "QR-003", Status: "RECEIVED", SKUName: "Product 3"},
 		},
 	}
-	svc := NewService(mockRepo)
+	svc := newTestService(mockRepo)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

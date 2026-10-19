@@ -66,8 +66,9 @@ func main() {
 	}
 
 	// Module wiring: repositories → services → handlers.
-	// passkeys и signedops строятся раньше receiving: закрытие грузоместа подписывается
-	// активным ключом оператора (passkeys.Service.ActiveSigner) и пишет части операции в signedops.
+	// passkeys и signedops строятся раньше receiving и putaway: закрытие грузоместа и
+	// размещение корзины подписываются активным ключом оператора (passkeys.Service.ActiveSigner)
+	// и пишут части операции в signedops.
 	waAuth, err := webauthn.New(&webauthn.Config{
 		RPID:          cfg.WebAuthnRPID,
 		RPDisplayName: cfg.WebAuthnRPName,
@@ -97,7 +98,7 @@ func main() {
 	assemblyHandler := assembly.NewHandler(assemblySvc)
 
 	putawayRepo := putaway.NewRepository(dbPool)
-	putawaySvc := putaway.NewService(putawayRepo)
+	putawaySvc := putaway.NewService(putawayRepo, signedopsRepo, passkeysSvc)
 	putawayHandler := putaway.NewHandler(putawaySvc)
 
 	shippingRepo := shipping.NewRepository(dbPool)

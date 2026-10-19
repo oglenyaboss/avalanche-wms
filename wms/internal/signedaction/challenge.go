@@ -79,14 +79,28 @@ func ItemsHash(sorted []uuid.UUID) [32]byte {
 func ReceiveDetailsHash(salt [32]byte, cargoplaceID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
 	var cargo [32]byte
 	copy(cargo[:16], cargoplaceID[:])
+	return entityDetailsHash(salt, cargo, operatorID, occurredAtMs)
+}
 
+// PutAwayDetailsHash is keccak256(abi.encode(bytes32 salt, bytes16 storageBinId,
+// bytes16 operatorId, uint64 occurredAtMs)).
+func PutAwayDetailsHash(salt [32]byte, storageBinID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	var bin [32]byte
+	copy(bin[:16], storageBinID[:])
+	return entityDetailsHash(salt, bin, operatorID, occurredAtMs)
+}
+
+// entityDetailsHash is the shared body of the single-entity details hashes
+// (receive, putaway): keccak256(abi.encode(bytes32 salt, bytes16 entity,
+// bytes16 operatorId, uint64 occurredAtMs)).
+func entityDetailsHash(salt, entity [32]byte, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
 	var operator [32]byte
 	copy(operator[:16], operatorID[:])
 
 	var ms [32]byte
 	binary.BigEndian.PutUint64(ms[24:], occurredAtMs)
 
-	return keccak256(salt[:], cargo[:], operator[:], ms[:])
+	return keccak256(salt[:], entity[:], operator[:], ms[:])
 }
 
 // KeyDetailsHash is keccak256(qx || qy), the details hash of key actions.

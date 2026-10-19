@@ -2,9 +2,6 @@ package putaway
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -15,6 +12,7 @@ import (
 
 	"wms/internal/domain"
 	"wms/internal/ledger"
+	"wms/internal/signedops"
 )
 
 type dbTX interface {
@@ -26,6 +24,9 @@ type dbTX interface {
 type Repository struct {
 	db *pgxpool.Pool
 	q  dbTX
+	// tx заполнен только у tx-репозитория из WithTx: tx-методы (LockOperation,
+	// LockSigner, WriteActions) делегируют в signedops с транзакцией вызываемого.
+	tx pgx.Tx
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
@@ -67,7 +68,7 @@ func (r *Repository) WithTx(ctx context.Context, fn func(putawayRepository) erro
 		}
 	}()
 
-	if err := fn(&Repository{db: r.db, q: tx}); err != nil {
+	if err := fn(&Repository{db: r.db, q: tx, tx: tx}); err != nil {
 		return err
 	}
 
@@ -77,6 +78,24 @@ func (r *Repository) WithTx(ctx context.Context, fn func(putawayRepository) erro
 
 	committed = true
 	return nil
+}
+
+// LockOperation блокирует все части операции FOR UPDATE (в порядке part_index)
+// в текущей транзакции. Вызывать только на tx-репозитории из WithTx.
+func (r *Repository) LockOperation(ctx context.Context, operationID, createdBy uuid.UUID) (*signedops.Operation, error) {
+	return signedops.LockOperation(ctx, r.tx, operationID, createdBy)
+}
+
+// LockSigner берёт FOR SHARE на строку ключа подписанта в текущей транзакции,
+// сериализуясь с отзывом ключа (ADR §7). Вызывать только на tx-репозитории из WithTx.
+func (r *Repository) LockSigner(ctx context.Context, credentialID []byte) error {
+	return signedops.LockSigner(ctx, r.tx, credentialID)
+}
+
+// WriteActions пишет по одной outbox-строке на часть и помечает операцию отправленной.
+// Вызывать только на tx-репозитории из WithTx.
+func (r *Repository) WriteActions(ctx context.Context, op *signedops.Operation, payloads [][]byte) error {
+	return signedops.WriteActions(ctx, r.tx, op, payloads)
 }
 
 // GetBufferBinID возвращает буферную ячейку по ID (именно буферную!)
@@ -233,71 +252,13 @@ func (r *Repository) UpdateProductStorage(ctx context.Context, productID, binID 
 // InsertPutaway создает запись о размещении в wms_ops.putaway
 func (r *Repository) InsertPutaway(ctx context.Context, params *InsertPutawayParams) error {
 	const query = `
-		INSERT INTO wms_ops.putaways(event_id, product_id, from_bin_id, bin_id, operator_id, occurred_at)
-		VALUES($1, $2, $3, $4, $5, $6)`
+		INSERT INTO wms_ops.putaways(event_id, product_id, from_bin_id, bin_id, operator_id, occurred_at, action_id)
+		VALUES($1, $2, $3, $4, $5, $6, $7)`
 
-	_, err := r.q.Exec(ctx, query, params.EventID, params.ProductID, params.FromBinID, params.BinID, params.OperatorID, params.OccurredAt)
+	_, err := r.q.Exec(ctx, query, params.EventID, params.ProductID, params.FromBinID, params.BinID, params.OperatorID, params.OccurredAt, params.ActionID)
 	if err != nil {
 		return fmt.Errorf("putaway.Repository.InsertPutaway exec: %w", err)
 	}
 
 	return nil
-}
-
-// InsertOutboxEvents создает outbox события для размещенных товаров
-func (r *Repository) InsertOutboxEvents(ctx context.Context, params *OutboxEventsParams) error {
-	if len(params.ProductIDs) == 0 {
-		return nil
-	}
-	if len(params.EventIDs) != len(params.ProductIDs) {
-		return fmt.Errorf("putaway.Repository.InsertOutboxEvents: EventIDs/ProductIDs length mismatch: %d != %d",
-			len(params.EventIDs), len(params.ProductIDs))
-	}
-
-	aggregateIDs := make([]uuid.UUID, 0, len(params.ProductIDs))
-	payloadHashes := make([]string, 0, len(params.ProductIDs))
-
-	for _, productID := range params.ProductIDs {
-		payloadHash, err := payloadHashForPutaway(productID, params.StorageBinID)
-		if err != nil {
-			return fmt.Errorf("putaway.Repository.InsertOutboxEvents build payload hash: %w", err)
-		}
-
-		aggregateIDs = append(aggregateIDs, productID)
-		payloadHashes = append(payloadHashes, payloadHash)
-	}
-
-	const query = `
-		INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
-		SELECT event_id, aggregate_id, $4::text, 'wms.putaway.v1', payload_hash
-		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
-
-	if _, err := r.q.Exec(ctx, query, params.EventIDs, aggregateIDs, payloadHashes, ledger.AggregatePutaway); err != nil {
-		return fmt.Errorf("putaway.Repository.InsertOutboxEvents exec: %w", err)
-	}
-
-	return nil
-}
-
-// payloadHashForPutaway создает хеш для outbox события
-func payloadHashForPutaway(productID, storageBinID uuid.UUID) (string, error) {
-	payload := struct {
-		ProductID     uuid.UUID `json:"product_id"`
-		StorageBinID  uuid.UUID `json:"storage_bin_id"`
-		AggregateType string    `json:"aggregate_type"`
-		EventType     string    `json:"event_type"`
-	}{
-		ProductID:     productID,
-		StorageBinID:  storageBinID,
-		AggregateType: ledger.AggregatePutaway,
-		EventType:     "wms.putaway.v1",
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("putaway.payloadHashForPutaway marshal: %w", err)
-	}
-
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
 }

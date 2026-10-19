@@ -8,5 +8,6 @@ var (
 	ErrProductNotFound    = errors.New("PRODUCT_NOT_FOUND")
 	ErrProductNotInBuffer = errors.New("PRODUCT_NOT_IN_BUFFER")
 	ErrProductNotReceived = errors.New("PRODUCT_NOT_RECEIVED")
+	ErrDraftStale         = errors.New("DRAFT_STALE")
 	ErrInvalidInput       = errors.New("INVALID_INPUT")
 )
