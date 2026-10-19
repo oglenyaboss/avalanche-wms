@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,10 @@ type dbTX interface {
 type Repository struct {
 	db *pgxpool.Pool
 	q  dbTX
+	// tx заполнен только у tx-репозитория из WithTx: tx-методы (LockProductsForShip,
+	// LockOperation, LockSigner, WriteActions) делегируют в подписанный механизм
+	// с транзакцией вызываемого.
+	tx pgx.Tx
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
@@ -39,7 +44,7 @@ func (r *Repository) WithTx(ctx context.Context, fn func(shippingRepository) err
 		}
 	}()
 
-	if err := fn(&Repository{db: r.db, q: tx}); err != nil {
+	if err := fn(&Repository{db: r.db, q: tx, tx: tx}); err != nil {
 		return err
 	}
 
@@ -216,43 +221,6 @@ func (r *Repository) scanDispatch(ctx context.Context, query string, args ...any
 	return &dispatch, nil
 }
 
-func (r *Repository) SelectProductsForShip(
-	ctx context.Context,
-	binID uuid.UUID,
-	productIDs []uuid.UUID,
-) ([]ProductForShip, error) {
-	query := `
-		SELECT product_id, order_id
-		FROM wms_inventory.products
-		WHERE bin_id = $1 AND status = 'READY_TO_SHIP'`
-	args := []any{binID}
-	if len(productIDs) > 0 {
-		query += ` AND product_id = ANY($2::uuid[])`
-		args = append(args, productIDs)
-	}
-	query += ` ORDER BY created_at FOR UPDATE`
-
-	rows, err := r.q.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("shipping.Repository.SelectProductsForShip query: %w", err)
-	}
-	defer rows.Close()
-
-	products := make([]ProductForShip, 0)
-	for rows.Next() {
-		var p ProductForShip
-		if err := rows.Scan(&p.ProductID, &p.OrderID); err != nil {
-			return nil, fmt.Errorf("shipping.Repository.SelectProductsForShip scan: %w", err)
-		}
-		products = append(products, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("shipping.Repository.SelectProductsForShip rows: %w", err)
-	}
-
-	return products, nil
-}
-
 func (r *Repository) BatchUpdateProductsShipped(ctx context.Context, productIDs []uuid.UUID) error {
 	if len(productIDs) == 0 {
 		return nil
@@ -280,6 +248,8 @@ func (r *Repository) BatchInsertShippings(
 	events []shippingEvent,
 	dispatchID uuid.UUID,
 	operatorID uuid.UUID,
+	occurredAt time.Time,
+	actionID uuid.UUID,
 ) error {
 	if len(events) == 0 {
 		return nil
@@ -292,6 +262,8 @@ func (r *Repository) BatchInsertShippings(
 		productIDs = append(productIDs, event.ProductID)
 	}
 
+	// #15: время берётся из деталей подписанного действия (иначе detailsHash не
+	// воспроизвести из БД, ADR-0001 §4), а action_id связывает строку с частью операции.
 	const query = `
 		INSERT INTO wms_ops.shippings (
 			event_id,
@@ -299,57 +271,24 @@ func (r *Repository) BatchInsertShippings(
 			dispatch_id,
 			operator_id,
 			shipped_at,
-			occurred_at
+			occurred_at,
+			action_id
 		)
 		SELECT
 			event_id,
 			product_id,
 			$3,
 			$4,
-			NOW(),
-			NOW()
+			$5,
+			$6,
+			$7
 		FROM unnest($1::uuid[], $2::uuid[]) AS events(event_id, product_id)`
 
-	if _, err := r.q.Exec(ctx, query, eventIDs, productIDs, dispatchID, operatorID); err != nil {
+	if _, err := r.q.Exec(ctx, query, eventIDs, productIDs, dispatchID, operatorID, occurredAt, actionID); err != nil {
 		return fmt.Errorf("shipping.Repository.BatchInsertShippings exec: %w", err)
 	}
 
 	return nil
-}
-
-func (r *Repository) BatchInsertShippingOutbox(
-	ctx context.Context,
-	events []shippingEvent,
-	dispatchID uuid.UUID,
-) (int, error) {
-	if len(events) == 0 {
-		return 0, nil
-	}
-
-	eventIDs := make([]uuid.UUID, 0, len(events))
-	aggregateIDs := make([]uuid.UUID, 0, len(events))
-	payloadHashes := make([]string, 0, len(events))
-	for _, event := range events {
-		payloadHash, err := payloadHashForShipping(event.ProductID, dispatchID)
-		if err != nil {
-			return 0, fmt.Errorf("shipping.Repository.BatchInsertShippingOutbox build payload hash: %w", err)
-		}
-		eventIDs = append(eventIDs, event.EventID)
-		aggregateIDs = append(aggregateIDs, event.ProductID)
-		payloadHashes = append(payloadHashes, payloadHash)
-	}
-
-	const query = `
-		INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
-		SELECT event_id, aggregate_id, 'shipping', 'wms.shipping.v1', payload_hash
-		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
-
-	tag, err := r.q.Exec(ctx, query, eventIDs, aggregateIDs, payloadHashes)
-	if err != nil {
-		return 0, fmt.Errorf("shipping.Repository.BatchInsertShippingOutbox exec: %w", err)
-	}
-
-	return int(tag.RowsAffected()), nil
 }
 
 // UpdateOrdersShippedConditional advances every affected order that now has at least

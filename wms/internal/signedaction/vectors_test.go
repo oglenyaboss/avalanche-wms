@@ -43,6 +43,7 @@ type vectorAction struct {
 		Salt                hexBytes `json:"salt"`
 		CargoplaceID        string   `json:"cargoplaceId"`
 		StorageBinID        string   `json:"storageBinId"`
+		DispatchID          string   `json:"dispatchId"`
 		ShippingBufferBinID string   `json:"shippingBufferBinId"`
 		OrderIDs            []string `json:"orderIds"`
 		OperatorID          string   `json:"operatorId"`
@@ -261,6 +262,38 @@ func TestVectors_PickDetailsHash(t *testing.T) {
 	}
 	if !slices.Equal(messy, wantMessy) {
 		t.Errorf("PickDetailsHash mutated its input")
+	}
+}
+
+func TestVectors_ShipDetailsHash(t *testing.T) {
+	v := loadVectors(t)
+	ship := findAction(v, "ship")
+	if ship == nil {
+		t.Fatal("no ship action in vectors")
+	}
+	dispatchID, err := uuid.Parse(ship.Details.DispatchID)
+	if err != nil {
+		t.Fatalf("parse dispatchId: %v", err)
+	}
+	binID, err := uuid.Parse(ship.Details.ShippingBufferBinID)
+	if err != nil {
+		t.Fatalf("parse shippingBufferBinId: %v", err)
+	}
+	operatorID, err := uuid.Parse(ship.Details.OperatorID)
+	if err != nil {
+		t.Fatalf("parse operatorId: %v", err)
+	}
+	orders := make([]uuid.UUID, 0, len(ship.Details.OrderIDs))
+	for _, s := range ship.Details.OrderIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			t.Fatalf("parse orderId %s: %v", s, err)
+		}
+		orders = append(orders, id)
+	}
+	got := signedaction.ShipDetailsHash([32]byte(ship.Details.Salt), dispatchID, binID, orders, operatorID, ship.Details.OccurredAtMs)
+	if got != [32]byte(ship.DetailsHash) {
+		t.Errorf("ShipDetailsHash = %x, want %x", got, ship.DetailsHash)
 	}
 }
 

@@ -102,7 +102,9 @@ func main() {
 	putawayHandler := putaway.NewHandler(putawaySvc)
 
 	shippingRepo := shipping.NewRepository(dbPool)
-	shippingSvc := shipping.NewService(shippingRepo)
+	// Отгрузка подписана: операция режется на части в signedops, подписывается активным
+	// ключом оператора (passkeys.Service.ActiveSigner) — как закрытие грузоместа и выгрузка корзины.
+	shippingSvc := shipping.NewService(shippingRepo, signedopsRepo, passkeysSvc)
 	shippingHandler := shipping.NewHandler(shippingSvc)
 
 	authRepo := auth.NewRepository(dbPool)

@@ -91,25 +91,43 @@ func PutAwayDetailsHash(salt [32]byte, storageBinID, operatorID uuid.UUID, occur
 }
 
 // PickDetailsHash is keccak256(abi.encode(bytes32 salt, bytes16 shippingBufferBinId,
-// bytes16[] orderIds, bytes16 operatorId, uint64 occurredAtMs)): head = salt,
-// bin, offset 0xa0, operator, occurredAtMs; tail = length, one left-aligned
-// bytes16 per orderId. orderIds go ascending by raw bytes without duplicates;
-// the input is not mutated.
+// bytes16[] orderIds, bytes16 operatorId, uint64 occurredAtMs)).
 func PickDetailsHash(salt [32]byte, shippingBufferBinID uuid.UUID, orderIDs []uuid.UUID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	return orderedListDetailsHash(salt, []uuid.UUID{shippingBufferBinID}, orderIDs, operatorID, occurredAtMs)
+}
+
+// ShipDetailsHash is keccak256(abi.encode(bytes32 salt, bytes16 dispatchId,
+// bytes16 shippingBufferBinId, bytes16[] orderIds, bytes16 operatorId,
+// uint64 occurredAtMs)).
+func ShipDetailsHash(salt [32]byte, dispatchID, shippingBufferBinID uuid.UUID, orderIDs []uuid.UUID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	return orderedListDetailsHash(salt, []uuid.UUID{dispatchID, shippingBufferBinID}, orderIDs, operatorID, occurredAtMs)
+}
+
+// orderedListDetailsHash is the shared body of the order-list details hashes
+// (pick, ship): keccak256(abi.encode(bytes32 salt, bytes16... entities,
+// bytes16[] orderIds, bytes16 operatorId, uint64 occurredAtMs)). Head = salt,
+// one word per entity, the array's offset word, operator, occurredAtMs; tail =
+// length, one left-aligned bytes16 per orderId. orderIds go ascending by raw
+// bytes without duplicates; no input is mutated.
+func orderedListDetailsHash(salt [32]byte, entities []uuid.UUID, orderIDs []uuid.UUID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
 	orders := sortedUniqueOrderIDs(orderIDs)
 
-	var bin, operator [32]byte
-	copy(bin[:16], shippingBufferBinID[:])
+	var operator [32]byte
 	copy(operator[:16], operatorID[:])
 
 	var ms, offset, length [32]byte
 	binary.BigEndian.PutUint64(ms[24:], occurredAtMs)
-	binary.BigEndian.PutUint64(offset[24:], 0xa0) // заголовок из 5 статических слов
+	// заголовок из len(entities)+4 статических слов: соль, сущности, offset, оператор, время
+	binary.BigEndian.PutUint64(offset[24:], uint64(32*(len(entities)+4)))
 	binary.BigEndian.PutUint64(length[24:], uint64(len(orders)))
 
-	buf := make([]byte, 0, 32*(6+len(orders)))
+	buf := make([]byte, 0, 32*(len(entities)+5+len(orders)))
 	buf = append(buf, salt[:]...)
-	buf = append(buf, bin[:]...)
+	for _, entity := range entities {
+		var word [32]byte
+		copy(word[:16], entity[:])
+		buf = append(buf, word[:]...)
+	}
 	buf = append(buf, offset[:]...)
 	buf = append(buf, operator[:]...)
 	buf = append(buf, ms[:]...)

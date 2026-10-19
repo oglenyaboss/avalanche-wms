@@ -1,9 +1,11 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -29,6 +31,12 @@ var ErrChainEventRejected = errors.New("CHAIN_EVENT_REJECTED")
 // *pgxpool.Pool and a pgx.Tx.
 type RowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// RowsQuerier is the subset of pgx needed by UnconfirmedProducts (multi-row
+// result); satisfied by both a *pgxpool.Pool and a pgx.Tx.
+type RowsQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // actionTypeByAggregate maps the aggregate type of each stage to the signed
@@ -87,4 +95,58 @@ func CheckChainStatus(ctx context.Context, q RowQuerier, productIDs []uuid.UUID,
 		return ErrChainEventRejected
 	}
 	return nil
+}
+
+// UnconfirmedProducts returns the subset of productIDs whose stage event (the
+// aggregate's stage, e.g. picking) has NO COMMITTED mirror on chain, in either
+// write path: a legacy per-product outbox event or a signed multi-product action
+// of that stage (issue #15 gates Ship on confirmed picking). The result is
+// sorted; confirmed or not-yet-written products are not returned.
+func UnconfirmedProducts(ctx context.Context, q RowsQuerier, productIDs []uuid.UUID, aggregate string) ([]uuid.UUID, error) {
+	// No products to check: nothing is unconfirmed.
+	if len(productIDs) == 0 {
+		return nil, nil
+	}
+
+	const query = `
+		SELECT p.product_id
+		FROM unnest($1::uuid[]) AS p(product_id)
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM public.outbox_events ob
+			JOIN public.onchain_events oe USING (event_id)
+			WHERE ob.aggregate_id = p.product_id
+			  AND ob.aggregate_type = $2
+			  AND oe.status = 'COMMITTED'
+		) AND NOT EXISTS (
+			SELECT 1
+			FROM public.warehouse_actions wa
+			JOIN public.onchain_events oe ON oe.event_id = wa.action_id
+			WHERE wa.item_ids @> ARRAY[p.product_id]::uuid[]
+			  AND wa.action_type = $3
+			  AND wa.submitted_at IS NOT NULL
+			  AND oe.status = 'COMMITTED'
+		)`
+
+	rows, err := q.Query(ctx, query, productIDs, aggregate, actionTypeByAggregate[aggregate])
+	if err != nil {
+		return nil, fmt.Errorf("ledger.UnconfirmedProducts: %w", err)
+	}
+	defer rows.Close()
+
+	unconfirmed := make([]uuid.UUID, 0, len(productIDs))
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("ledger.UnconfirmedProducts scan: %w", err)
+		}
+		unconfirmed = append(unconfirmed, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ledger.UnconfirmedProducts rows: %w", err)
+	}
+
+	// Сортировка в Go: результат детерминирован независимо от плана запроса.
+	slices.SortFunc(unconfirmed, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+	return unconfirmed, nil
 }
