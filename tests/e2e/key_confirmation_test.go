@@ -544,3 +544,70 @@ func TestKeyConfirmation_EndToEnd(t *testing.T) {
 	require.Equal(t, roleNone, op2Key.Role, "op2 must stay unregistered")
 	require.False(t, op2Key.Active, "op2 must stay inactive")
 }
+
+// TestKeyConfirmation_SecondDraftRejectedAfterSubmit checks the double-submit
+// guard: two drafts for the same pending operator key coexist while nothing is
+// submitted, but once the first draft is submitted, submitting the second fails
+// with ACTION_IN_PROGRESS instead of creating a second in-flight action.
+func TestKeyConfirmation_SecondDraftRejectedAfterSubmit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	env := testEnv
+	require.NotNil(t, env)
+
+	fx := newKeyActionFixture(t, ctx, env)
+	owner := ownerKeyForTest(t, ctx)
+	registryHex, err := readSharedStateFile(ctx, "registry_addr.txt")
+	require.NoError(t, err)
+	registryAddr := common.HexToAddress(registryHex)
+
+	// The admin's own passkey must be ACTIVE (via registry status sync) before
+	// the submit repository transaction accepts the signer.
+	registerOrgOnChain(t, ctx, env, owner, registryAddr, fx)
+	recreateAdapterWithEnv(t, ctx, env, nil)
+
+	adminToken := loginAs(t, env, fx.adminUser, fx.password)
+	waitForOrganization(t, ctx, env, adminToken, 60*time.Second, func(org organizationDTO) bool {
+		m, ok := memberByUsername(org, fx.adminUser)
+		return ok && m.Passkey != nil && m.Passkey.Status == "ACTIVE"
+	})
+
+	// 1. Two drafts for the same pending operator key both succeed: nothing is
+	//    submitted yet, so no confirmation is in flight.
+	targetKeyID := "0x" + hex.EncodeToString(fx.op1KeyID[:])
+	var draft1, draft2 keyActionDraftDTO
+	postJSON(t, env, adminToken, "/passkeys/actions/key-register/draft", map[string]string{
+		"target_key_id": targetKeyID,
+	}, &draft1)
+	postJSON(t, env, adminToken, "/passkeys/actions/key-register/draft", map[string]string{
+		"target_key_id": targetKeyID,
+	}, &draft2)
+	require.NotEqual(t, draft1.ActionID, draft2.ActionID)
+
+	// submitBody signs the draft's challenge with the software admin key and
+	// builds the submit request body.
+	submitBody := func(t *testing.T, draft keyActionDraftDTO) map[string]string {
+		t.Helper()
+		challengeBytes, err := base64.RawURLEncoding.DecodeString(draft.Challenge)
+		require.NoError(t, err)
+		var challenge [32]byte
+		copy(challenge[:], challengeBytes)
+		assertion := softSign(fx.adminKey, challenge)
+		return map[string]string{
+			"credential_id":      base64.RawURLEncoding.EncodeToString(fx.adminCred),
+			"authenticator_data": base64.RawURLEncoding.EncodeToString(assertion.AuthenticatorData),
+			"client_data_json":   base64.RawURLEncoding.EncodeToString(assertion.ClientDataJSON),
+			"signature":          base64.RawURLEncoding.EncodeToString(assertion.Signature),
+		}
+	}
+
+	// 2. Submitting the first draft succeeds.
+	var sent confirmationDTO
+	postJSON(t, env, adminToken, "/passkeys/actions/"+draft1.ActionID+"/submit", submitBody(t, draft1), &sent)
+	require.Equal(t, "SENT", sent.State)
+
+	// 3. Submitting the second draft is rejected: the first action is in flight.
+	status, code, message := postExpectError(t, env, adminToken, "/passkeys/actions/"+draft2.ActionID+"/submit", submitBody(t, draft2))
+	require.Equal(t, http.StatusConflict, status, "second submit: %s", message)
+	require.Equal(t, "ACTION_IN_PROGRESS", code)
+}
