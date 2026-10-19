@@ -32,9 +32,11 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	// One operator for both orders: carts are keyed per-operator in-memory,
-	// so both orders' picks accumulate in the same cart.
+	// One operator for both orders: both orders' picks accumulate in the same
+	// operator basket (assembly_tasks keyed by operator_id). The unload is a
+	// signed action, so the picking operator is a signed one.
 	token := operatorToken(t, env)
+	op := newSignedOperator(t, ctx, env)
 
 	// Two independent fixtures for SHOP-7, each with 1 pre-STORED product and
 	// an order line of qty=1. Each fixture creates its own SKU, order, and
@@ -81,7 +83,7 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 	allProductIDs := append(order1Products, order2Products...)
 	for i, pid := range allProductIDs {
 		var picked pickData
-		postJSON(t, env, token, "/assembly/pick", map[string]string{
+		postJSON(t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, &picked)
 		require.Equal(t, pid, picked.ProductID)
@@ -90,10 +92,7 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 
 	// 4. Flush the cart into the SHOP-7 shipping buffer; both orders become ASSEMBLED.
 	// fx1.ShippingBinID == fx2.ShippingBinID (single bin per destination).
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx1.ShippingBinID.String(),
-	}, &placed)
+	placed := unloadToShippingBufferSigned(t, env, op, fx1.ShippingBinID.String())
 	require.Equal(t, 2, placed.ProductsPlaced)
 	require.GreaterOrEqual(t, placed.OrdersAssembled, 2)
 	requireOrderStatus(t, ctx, env, fx1.OrderID, "ASSEMBLED")

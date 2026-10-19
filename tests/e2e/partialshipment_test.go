@@ -34,6 +34,8 @@ func TestPartialShipment_MofN(t *testing.T) {
 
 	const productCount = 3
 	token := operatorToken(t, env)
+	// #14: the unload is a signed action, so the picking operator is a signed one.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", productCount, productCount)
 
 	// Allocate the order, then pick every product (DB-level: ASSEMBLED + task DONE).
@@ -47,13 +49,10 @@ func TestPartialShipment_MofN(t *testing.T) {
 	require.Len(t, orderProductIDs, productCount)
 	for _, pid := range orderProductIDs {
 		var picked pickData
-		postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": pid}, &picked)
+		postJSON(t, env, op.token, "/assembly/pick", map[string]string{"product_id": pid}, &picked)
 	}
 
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 	require.Equal(t, productCount, placed.ProductsPlaced)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 

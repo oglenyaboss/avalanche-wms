@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -398,4 +400,112 @@ func warehouseActionsContainingProduct(t *testing.T, ctx context.Context, env *e
 // bigIntFromWord reads a 32-byte ABI word as a big-endian uint256.
 func bigIntFromWord(word []byte) *big.Int {
 	return new(big.Int).SetBytes(word)
+}
+
+// ── signed assembly unload (shipping-buffer scan) DTOs and helpers ───────────
+
+// shippingBufferData models the submit response of the signed unload: the old
+// shipping-buffer response plus the operation id.
+type shippingBufferData struct {
+	BufferBinID     string `json:"buffer_bin_id"`
+	ProductsPlaced  int    `json:"products_placed"`
+	OrdersAssembled int    `json:"orders_assembled"`
+	OperationID     string `json:"operation_id"`
+}
+
+// draftUnloadToShippingBuffer POSTs the draft endpoint of the signed unload.
+func draftUnloadToShippingBuffer(t *testing.T, env *env, op *signedOperator, bufferBinID string) closeDraftDTO {
+	t.Helper()
+	var draft closeDraftDTO
+	postJSON(t, env, op.token, "/assembly/scan-shipping-buffer/draft", map[string]string{
+		"buffer_bin_id": bufferBinID,
+	}, &draft)
+	return draft
+}
+
+// draftUnloadToShippingBufferRaw POSTs the draft endpoint and returns the raw
+// error envelope (status + code) instead of failing the test.
+func draftUnloadToShippingBufferRaw(t *testing.T, env *env, token, bufferBinID string) (int, string) {
+	t.Helper()
+	status, code, _ := postExpectError(t, env, token, "/assembly/scan-shipping-buffer/draft", map[string]string{
+		"buffer_bin_id": bufferBinID,
+	})
+	return status, code
+}
+
+// submitUnloadToShippingBuffer POSTs the submit endpoint and requires 200.
+func submitUnloadToShippingBuffer(t *testing.T, env *env, token, operationID string, assertions []map[string]string) shippingBufferData {
+	t.Helper()
+	var result shippingBufferData
+	postJSON(t, env, token, "/assembly/scan-shipping-buffer/submit", map[string]any{
+		"operation_id": operationID,
+		"assertions":   assertions,
+	}, &result)
+	return result
+}
+
+// submitUnloadToShippingBufferRaw POSTs the submit endpoint and returns the raw
+// error envelope (status + code) instead of failing the test.
+func submitUnloadToShippingBufferRaw(t *testing.T, env *env, token, operationID string, assertions []map[string]string) (int, string) {
+	t.Helper()
+	status, code, _ := postExpectError(t, env, token, "/assembly/scan-shipping-buffer/submit", map[string]any{
+		"operation_id": operationID,
+		"assertions":   assertions,
+	})
+	return status, code
+}
+
+// unloadToShippingBufferSigned runs the whole signed unload: draft → sign → submit.
+func unloadToShippingBufferSigned(t *testing.T, env *env, op *signedOperator, bufferBinID string) shippingBufferData {
+	t.Helper()
+	draft := draftUnloadToShippingBuffer(t, env, op, bufferBinID)
+	assertions := signDraft(t, op, draft)
+	return submitUnloadToShippingBuffer(t, env, op.token, draft.OperationID, assertions)
+}
+
+// softPickDetailsHash is an independent re-implementation of ADR-0001 §4 for
+// Pick: keccak256(abi.encode(bytes32 salt, bytes16 shippingBufferBinId,
+// bytes16[] orderIds, bytes16 operatorId, uint64 occurredAtMs)). Head: salt,
+// bin (left-aligned), offset 0xa0, operator (left-aligned), uint64 (right-aligned);
+// tail: length, one left-aligned bytes16 per orderId. orderIds go ascending by
+// raw bytes without duplicates.
+func softPickDetailsHash(salt [32]byte, binID uuid.UUID, orderIDs []uuid.UUID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	orders := sortedUniqueUUIDs(orderIDs)
+
+	buf := make([]byte, 0, 32*(6+len(orders)))
+	buf = append(buf, salt[:]...)
+	var bin [32]byte
+	copy(bin[:16], binID[:])
+	buf = append(buf, bin[:]...)
+	var offset [32]byte
+	binary.BigEndian.PutUint64(offset[24:], 0xa0) // 5 static head words
+	buf = append(buf, offset[:]...)
+	var operator [32]byte
+	copy(operator[:16], operatorID[:])
+	buf = append(buf, operator[:]...)
+	var ms [32]byte
+	binary.BigEndian.PutUint64(ms[24:], occurredAtMs)
+	buf = append(buf, ms[:]...)
+	var length [32]byte
+	binary.BigEndian.PutUint64(length[24:], uint64(len(orders)))
+	buf = append(buf, length[:]...)
+	for _, id := range orders {
+		var word [32]byte
+		copy(word[:16], id[:])
+		buf = append(buf, word[:]...)
+	}
+
+	var out [32]byte
+	copy(out[:], crypto.Keccak256(buf))
+	return out
+}
+
+// sortedUniqueUUIDs returns a fresh slice sorted ascending by raw uuid bytes
+// with duplicates removed; the input is not mutated.
+func sortedUniqueUUIDs(ids []uuid.UUID) []uuid.UUID {
+	out := slices.Clone(ids)
+	slices.SortFunc(out, func(a, b uuid.UUID) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	return slices.Compact(out)
 }

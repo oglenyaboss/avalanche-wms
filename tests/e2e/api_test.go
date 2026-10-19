@@ -91,8 +91,9 @@ type pickData struct {
 }
 
 type scanShippingBufferData struct {
-	ProductsPlaced  int `json:"products_placed"`
-	OrdersAssembled int `json:"orders_assembled"`
+	ProductsPlaced  int    `json:"products_placed"`
+	OrdersAssembled int    `json:"orders_assembled"`
+	OperationID     string `json:"operation_id"`
 }
 
 type scanDriverData struct {

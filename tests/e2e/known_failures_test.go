@@ -232,12 +232,14 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	token := operatorToken(t, env)
+	// #14: the operator who picks must be the signed operator who unloads —
+	// the basket is keyed by assembly_tasks.operator_id.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 1, 1)
 
 	// Allocate and pick the single product (-> ASSEMBLED, task DONE by this operator).
 	var allocated allocateData
-	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+	postJSON(t, env, op.token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
 	}, &allocated)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
@@ -248,7 +250,7 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 	require.NoError(t, err)
 
 	var picked pickData
-	postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": productID.String()}, &picked)
+	postJSON(t, env, op.token, "/assembly/pick", map[string]string{"product_id": productID.String()}, &picked)
 	requireProductStatus(t, ctx, env, productID, "ASSEMBLED")
 
 	// Restart the WMS: any in-memory cart is dropped here.
@@ -261,14 +263,11 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 
 	// Confirm the WMS serves authed traffic before the assertion under test, so a warming
 	// WMS never surfaces as a misleading CART_EMPTY.
-	waitWMSServingAuthed(t, ctx, env, token, fx.DestinationID)
+	waitWMSServingAuthed(t, ctx, env, op.token, fx.DestinationID)
 
-	// The fix: scan-shipping-buffer reconstructs the cart from DB, so the picked product is
+	// The fix: the signed unload reconstructs the cart from DB, so the picked product is
 	// placed (products_placed=1) instead of being stranded with 409 CART_EMPTY.
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 	require.Equal(t, 1, placed.ProductsPlaced, "picked product must survive a WMS restart (cart derived from DB)")
 
 	requireProductStatus(t, ctx, env, productID, "READY_TO_SHIP")
@@ -348,12 +347,13 @@ func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	token := operatorToken(t, env)
+	// #14: the operator who picks must be the signed operator who unloads.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 2, 2)
 
 	// Allocate: NEW -> ALLOCATED, two PENDING tasks.
 	var allocated allocateData
-	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+	postJSON(t, env, op.token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
 	}, &allocated)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
@@ -367,31 +367,28 @@ func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 
 	// Pick ONLY P1; P2 stays ALLOCATED with a PENDING task.
 	var picked pickData
-	postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": p1.String()}, &picked)
+	postJSON(t, env, op.token, "/assembly/pick", map[string]string{"product_id": p1.String()}, &picked)
 
-	// Scan the shipping buffer: P1 -> READY_TO_SHIP. The order does NOT reach ASSEMBLED
+	// Unload the basket: P1 -> READY_TO_SHIP. The order does NOT reach ASSEMBLED
 	// because P2 is still ALLOCATED (UpdateOrdersToAssembled needs every product ready).
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 	require.Equal(t, 1, placed.ProductsPlaced)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
 	requireProductStatus(t, ctx, env, p1, "READY_TO_SHIP")
 	requireProductStatus(t, ctx, env, p2, "ALLOCATED")
 
 	// Bring the dispatch to the gate and ship P1 only.
-	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 	}, nil)
 	var driver scanDriverData
-	postJSON(t, env, token, "/shipping/scan-driver", map[string]string{
+	postJSON(t, env, op.token, "/shipping/scan-driver", map[string]string{
 		"dispatch_code": fx.DispatchCode,
 	}, &driver)
 	require.Equal(t, "AT_GATE", driver.Status)
 
 	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
+	postJSON(t, env, op.token, "/shipping/ship", map[string]any{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 		"dispatch_id":   fx.DispatchID.String(),
 		"product_ids":   []string{p1.String()},

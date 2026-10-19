@@ -405,6 +405,20 @@ func TestFullChain_MultiProduct(t *testing.T) {
 		requireProductStatus(t, ctx, env, parsed, "ASSEMBLED")
 		requireTaskStatus(t, ctx, env, parsed, "DONE")
 
+		// #14: the pick itself writes no picking event — the on-chain Picked state
+		// comes from the signed unload action and is asserted after it.
+	}
+
+	// ── Unload the basket into the shipping buffer (signed Pick) → order ASSEMBLED ──
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
+	require.Equal(t, productCount, placed.ProductsPlaced)
+	require.GreaterOrEqual(t, placed.OrdersAssembled, 1)
+
+	// The signed unload action is the picking event: wait for it to commit and
+	// prove every product reached Picked(3) on-chain.
+	for _, pid := range orderProductIDs {
+		parsed, err := uuid.Parse(pid)
+		require.NoError(t, err)
 		pickingEventID := eventIDForAggregate(t, ctx, env, parsed, "picking")
 		waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
 		stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
@@ -413,13 +427,6 @@ func TestFullChain_MultiProduct(t *testing.T) {
 			"product %s on-chain status should be Picked(3)", pid)
 	}
 
-	// ── Scan shipping buffer → order ASSEMBLED ──
-	var placed scanShippingBufferData
-	postJSON(t, env, op.token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
-	require.Equal(t, productCount, placed.ProductsPlaced)
-	require.GreaterOrEqual(t, placed.OrdersAssembled, 1)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 	for _, pid := range orderProductIDs {
 		parsed, err := uuid.Parse(pid)
@@ -506,15 +513,25 @@ func TestFullChain_PartialShip(t *testing.T) {
 	require.Len(t, orderProductIDs, productCount)
 
 	for i, pid := range orderProductIDs {
-		parsed, err := uuid.Parse(pid)
-		require.NoError(t, err)
-
 		var picked pickData
 		postJSON(t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, &picked)
 		require.Equal(t, i+1, picked.CartSize)
 
+		// #14: the pick itself writes no picking event — the on-chain Picked state
+		// comes from the signed unload action and is asserted after it.
+	}
+
+	// ── Unload the basket into the shipping buffer (signed Pick) → order ASSEMBLED ──
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
+	require.Equal(t, productCount, placed.ProductsPlaced)
+
+	// The signed unload action is the picking event: wait for it to commit and
+	// prove every product reached Picked(3) on-chain.
+	for _, pid := range orderProductIDs {
+		parsed, err := uuid.Parse(pid)
+		require.NoError(t, err)
 		pickingEventID := eventIDForAggregate(t, ctx, env, parsed, "picking")
 		waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
 		stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
@@ -523,12 +540,6 @@ func TestFullChain_PartialShip(t *testing.T) {
 			"product %s on-chain status should be Picked(3)", pid)
 	}
 
-	// ── Scan shipping buffer → order ASSEMBLED ──
-	var placed scanShippingBufferData
-	postJSON(t, env, op.token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
-	require.Equal(t, productCount, placed.ProductsPlaced)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 
 	// ── Partial ship: ship P1 and P2 only ──
