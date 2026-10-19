@@ -31,12 +31,24 @@ type RowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// actionTypeByAggregate maps the aggregate type of each stage to the signed
+// action type stored in public.warehouse_actions (ADR-0001 §3).
+var actionTypeByAggregate = map[string]int16{
+	AggregateReceiving: 1,
+	AggregatePutaway:   2,
+	AggregatePicking:   3,
+	AggregateShipping:  4,
+}
+
 // CheckChainStatus is the WMS->chain status gate (issue #45). It returns
 // ErrChainEventRejected if any of productIDs has a FAILED on-chain event for
-// aggregateType, letting the caller reject the next FSM step before mutating state.
+// aggregateType, or is contained in a FAILED signed action of that stage's type
+// (legacy per-product events and multi-product signed actions), letting the
+// caller reject the next FSM step before mutating state.
 //
 // public.onchain_events has no product_id, so the lookup joins through
-// public.outbox_events (aggregate_id = product_id). A missing event or any non-FAILED
+// public.outbox_events (aggregate_id = product_id); signed actions are matched
+// through warehouse_actions.item_ids. A missing event or any non-FAILED
 // status passes (nil): a product whose previous stage has not yet been mirrored
 // on-chain, or is still PENDING/SENT/COMMITTED, is on the happy path. Only a confirmed
 // FAILED blocks — transient stuck PENDING/SENT rows are pulled forward by the
@@ -58,10 +70,17 @@ func CheckChainStatus(ctx context.Context, q RowQuerier, productIDs []uuid.UUID,
 			WHERE ob.aggregate_id = ANY($1::uuid[])
 			  AND ob.aggregate_type = $2
 			  AND oe.status = 'FAILED'
+		) OR EXISTS (
+			SELECT 1
+			FROM public.warehouse_actions wa
+			JOIN public.onchain_events oe ON oe.event_id = wa.action_id
+			WHERE wa.item_ids && $1::uuid[]
+			  AND wa.action_type = $3
+			  AND oe.status = 'FAILED'
 		)`
 
 	var rejected bool
-	if err := q.QueryRow(ctx, query, productIDs, aggregateType).Scan(&rejected); err != nil {
+	if err := q.QueryRow(ctx, query, productIDs, aggregateType, actionTypeByAggregate[aggregateType]).Scan(&rejected); err != nil {
 		return fmt.Errorf("ledger.CheckChainStatus: %w", err)
 	}
 	if rejected {

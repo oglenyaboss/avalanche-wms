@@ -77,6 +77,9 @@ type mockReceivingRepo struct {
 	expectedItemsInCargoplaceErr error
 	closeCargoplaceTxResult      *CloseCargoplaceTxResult
 	closeCargoplaceOutboxErr     error
+	closeCargoplaceParams        *CloseCargoplaceParams
+	closableProductIDs           []uuid.UUID
+	listClosableProductErr       error
 	insertReceivingGateLogs      []GateLogParams
 	insertReceivingGateLogErr    error
 	insertReceivingTableLogs     []TableLogParams
@@ -409,10 +412,18 @@ func (m *mockReceivingRepo) CountExpectedItemsByCargoplace(_ context.Context, _ 
 	return m.expectedItemsInCargoplace, nil
 }
 
+func (m *mockReceivingRepo) ListClosableProductIDs(_ context.Context, _ uuid.UUID) ([]uuid.UUID, error) {
+	if m.listClosableProductErr != nil {
+		return nil, m.listClosableProductErr
+	}
+	return m.closableProductIDs, nil
+}
+
 func (m *mockReceivingRepo) CloseCargoplaceWithOutbox(
 	_ context.Context,
-	_ *CloseCargoplaceParams,
+	params *CloseCargoplaceParams,
 ) (*CloseCargoplaceTxResult, error) {
+	m.closeCargoplaceParams = params
 	if m.closeCargoplaceOutboxErr != nil {
 		return nil, m.closeCargoplaceOutboxErr
 	}
@@ -457,7 +468,7 @@ func TestServiceScanTTNTransitionsCreatedShipment(t *testing.T) {
 		},
 	}
 
-	result, err := NewService(repo).ScanTTN(context.Background(), operatorID, "TTN-001")
+	result, err := NewService(repo, nil, nil).ScanTTN(context.Background(), operatorID, "TTN-001")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -484,7 +495,7 @@ func TestServiceScanTTNRejectsClosedShipment(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanTTN(context.Background(), uuid.New(), "TTN-001")
+	_, err := NewService(repo, nil, nil).ScanTTN(context.Background(), uuid.New(), "TTN-001")
 	if !errors.Is(err, ErrShipmentAlreadyClosed) {
 		t.Fatalf("expected ErrShipmentAlreadyClosed, got %v", err)
 	}
@@ -512,7 +523,7 @@ func TestServiceScanCargoplaceSuccess(t *testing.T) {
 		},
 	}
 
-	result, err := NewService(repo).ScanCargoplace(context.Background(), operatorID, shipmentID, "CP-001")
+	result, err := NewService(repo, nil, nil).ScanCargoplace(context.Background(), operatorID, shipmentID, "CP-001")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -549,7 +560,7 @@ func TestServiceScanCargoplaceRejectsAlreadyReceived(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanCargoplace(context.Background(), uuid.New(), shipmentID, "CP-001")
+	_, err := NewService(repo, nil, nil).ScanCargoplace(context.Background(), uuid.New(), shipmentID, "CP-001")
 	if !errors.Is(err, ErrCargoplaceAlreadyReceived) {
 		t.Fatalf("expected ErrCargoplaceAlreadyReceived, got %v", err)
 	}
@@ -576,7 +587,7 @@ func TestServiceScanCargoplaceAutoClosesShipmentWhenAllReceived(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanCargoplace(context.Background(), operatorID, shipmentID, "CP-002")
+	_, err := NewService(repo, nil, nil).ScanCargoplace(context.Background(), operatorID, shipmentID, "CP-002")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -619,7 +630,7 @@ func TestServiceScanCargoplaceAutoCloseIdempotentOnRace(t *testing.T) {
 		simulateConcurrentClose: true,
 	}
 
-	_, err := NewService(repo).ScanCargoplace(context.Background(), operatorID, shipmentID, "CP-RACE")
+	_, err := NewService(repo, nil, nil).ScanCargoplace(context.Background(), operatorID, shipmentID, "CP-RACE")
 	if err != nil {
 		t.Fatalf("expected no error on concurrent close race, got %v", err)
 	}
@@ -652,7 +663,7 @@ func TestServiceAcceptShipmentMarksMissingAsNotReceived(t *testing.T) {
 		},
 	}
 
-	result, err := NewService(repo).AcceptShipment(context.Background(), operatorID, shipmentID)
+	result, err := NewService(repo, nil, nil).AcceptShipment(context.Background(), operatorID, shipmentID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -682,7 +693,7 @@ func TestServiceAcceptShipmentRejectsShipmentOutsideGateProgress(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).AcceptShipment(context.Background(), uuid.New(), repo.shipmentByID.ShipmentID)
+	_, err := NewService(repo, nil, nil).AcceptShipment(context.Background(), uuid.New(), repo.shipmentByID.ShipmentID)
 	if !errors.Is(err, ErrShipmentNotInProgress) {
 		t.Fatalf("expected ErrShipmentNotInProgress, got %v", err)
 	}
@@ -693,7 +704,7 @@ func TestServiceScanCargoplaceReturnsShipmentNotFound(t *testing.T) {
 		shipmentByIDErr: ErrShipmentNotFound,
 	}
 
-	_, err := NewService(repo).ScanCargoplace(context.Background(), uuid.New(), uuid.New(), "CP-001")
+	_, err := NewService(repo, nil, nil).ScanCargoplace(context.Background(), uuid.New(), uuid.New(), "CP-001")
 	if !errors.Is(err, ErrShipmentNotFound) {
 		t.Fatalf("expected ErrShipmentNotFound, got %v", err)
 	}
@@ -737,7 +748,7 @@ func TestServiceScanTableCargoplaceSuccess(t *testing.T) {
 		},
 	}
 
-	result, err := NewService(repo).ScanTableCargoplace(context.Background(), uuid.New(), cargoplaceID)
+	result, err := NewService(repo, nil, nil).ScanTableCargoplace(context.Background(), uuid.New(), cargoplaceID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -773,7 +784,7 @@ func TestServiceScanSKURejectsClosedBox(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanSKU(context.Background(), uuid.New(), cargoplaceID, boxID, "4607036430014")
+	_, err := NewService(repo, nil, nil).ScanSKU(context.Background(), uuid.New(), cargoplaceID, boxID, "4607036430014")
 	if !errors.Is(err, ErrBoxNotOpen) {
 		t.Fatalf("expected ErrBoxNotOpen, got %v", err)
 	}
@@ -796,7 +807,7 @@ func TestServiceScanBoxCreatesNewBox(t *testing.T) {
 		},
 	}
 
-	result, err := NewService(repo).ScanBox(context.Background(), uuid.New(), cargoplaceID, "BOX-TABLE-NEW")
+	result, err := NewService(repo, nil, nil).ScanBox(context.Background(), uuid.New(), cargoplaceID, "BOX-TABLE-NEW")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -829,7 +840,7 @@ func TestServiceScanBoxRejectsClosedExistingBox(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanBox(context.Background(), uuid.New(), cargoplaceID, "BOX-TABLE-001")
+	_, err := NewService(repo, nil, nil).ScanBox(context.Background(), uuid.New(), cargoplaceID, "BOX-TABLE-001")
 	if !errors.Is(err, ErrBoxNotOpen) {
 		t.Fatalf("expected ErrBoxNotOpen, got %v", err)
 	}
@@ -859,7 +870,7 @@ func TestServiceScanQRSuccess(t *testing.T) {
 		expectedItemsInCargoplace: 12,
 	}
 
-	result, err := NewService(repo).ScanQR(context.Background(), uuid.New(), cargoplaceID, boxID, skuID, "WMS-QR-001")
+	result, err := NewService(repo, nil, nil).ScanQR(context.Background(), uuid.New(), cargoplaceID, boxID, skuID, "WMS-QR-001")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -896,7 +907,7 @@ func TestServiceCloseBoxSuccess(t *testing.T) {
 		productsInBox: 3,
 	}
 
-	result, err := NewService(repo).CloseBox(context.Background(), uuid.New(), boxID)
+	result, err := NewService(repo, nil, nil).CloseBox(context.Background(), uuid.New(), boxID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -924,7 +935,7 @@ func TestServiceCloseBoxRejectsClosedBox(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).CloseBox(context.Background(), uuid.New(), boxID)
+	_, err := NewService(repo, nil, nil).CloseBox(context.Background(), uuid.New(), boxID)
 	if !errors.Is(err, ErrBoxNotOpen) {
 		t.Fatalf("expected ErrBoxNotOpen, got %v", err)
 	}
@@ -945,7 +956,7 @@ func TestServiceCloseBoxRejectsCargoplaceOutsideProgress(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).CloseBox(context.Background(), uuid.New(), boxID)
+	_, err := NewService(repo, nil, nil).CloseBox(context.Background(), uuid.New(), boxID)
 	if !errors.Is(err, ErrCargoplaceNotInProgress) {
 		t.Fatalf("expected ErrCargoplaceNotInProgress, got %v", err)
 	}
@@ -968,7 +979,7 @@ func TestServiceScanBufferSuccess(t *testing.T) {
 		scanBufferWithLogCount: 4,
 	}
 
-	result, err := NewService(repo).ScanBuffer(context.Background(), uuid.New(), cargoplaceID, bufferBinID)
+	result, err := NewService(repo, nil, nil).ScanBuffer(context.Background(), uuid.New(), cargoplaceID, bufferBinID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -998,63 +1009,8 @@ func TestServiceScanBufferRejectsNonBufferBin(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanBuffer(context.Background(), uuid.New(), cargoplaceID, repo.binByID.BinID)
+	_, err := NewService(repo, nil, nil).ScanBuffer(context.Background(), uuid.New(), cargoplaceID, repo.binByID.BinID)
 	if !errors.Is(err, ErrBinNotBuffer) {
 		t.Fatalf("expected ErrBinNotBuffer, got %v", err)
-	}
-}
-
-func TestServiceCloseCargoplaceSuccess(t *testing.T) {
-	cargoplaceID := uuid.New()
-	skuAID := uuid.New()
-	skuBID := uuid.New()
-	repo := &mockReceivingRepo{
-		cargoplaceByID: &domain.Cargoplace{
-			CargoplaceID: cargoplaceID,
-			Status:       cargoplaceStatusTableInProgress,
-		},
-		closeCargoplaceTxResult: &CloseCargoplaceTxResult{
-			ExpectedSKUs: []ExpectedSKU{
-				{SKUID: skuAID, SKUName: "SKU-A", ExpectedQty: 5},
-				{SKUID: skuBID, SKUName: "SKU-B", ExpectedQty: 3},
-			},
-			ReceivedSKUCounts: []ReceivedSKUCount{
-				{SKUID: skuAID, SKUName: "SKU-A", ReceivedQty: 4},
-				{SKUID: skuBID, SKUName: "SKU-B", ReceivedQty: 3},
-			},
-			OutboxEventsCreated: 7,
-		},
-	}
-
-	result, err := NewService(repo).CloseCargoplace(context.Background(), uuid.New(), cargoplaceID)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if result.Status != cargoplaceStatusTableClosed {
-		t.Fatalf("expected TABLE_CLOSED, got %s", result.Status)
-	}
-	if result.Summary.ProductsExpected != 8 || result.Summary.ProductsReceived != 7 || result.Summary.Shortage != 1 {
-		t.Fatalf("unexpected summary: %+v", result.Summary)
-	}
-	if len(result.Summary.ShortageBySKU) != 1 || result.Summary.ShortageBySKU[0].SKUName != "SKU-A" {
-		t.Fatalf("unexpected shortage breakdown: %+v", result.Summary.ShortageBySKU)
-	}
-	if result.OutboxEventsCreated != 7 {
-		t.Fatalf("expected 7 outbox events, got %d", result.OutboxEventsCreated)
-	}
-}
-
-func TestServiceCloseCargoplaceRejectsStatusOutsideProgress(t *testing.T) {
-	cargoplaceID := uuid.New()
-	repo := &mockReceivingRepo{
-		cargoplaceByID: &domain.Cargoplace{
-			CargoplaceID: cargoplaceID,
-			Status:       cargoplaceStatusTableClosed,
-		},
-	}
-
-	_, err := NewService(repo).CloseCargoplace(context.Background(), uuid.New(), cargoplaceID)
-	if !errors.Is(err, ErrCargoplaceNotInProgress) {
-		t.Fatalf("expected ErrCargoplaceNotInProgress, got %v", err)
 	}
 }

@@ -37,6 +37,8 @@ var (
 	ErrCargoplaceNotFound          = errors.New("CARGOPLACE_NOT_FOUND")
 	ErrCargoplaceNotReceivedAtGate = errors.New("CARGOPLACE_NOT_RECEIVED_AT_GATE")
 	ErrCargoplaceNotInProgress     = errors.New("CARGOPLACE_NOT_IN_PROGRESS")
+	ErrCargoplaceEmpty             = errors.New("CARGOPLACE_EMPTY")
+	ErrDraftStale                  = errors.New("DRAFT_STALE")
 	ErrBoxNotFound                 = errors.New("BOX_NOT_FOUND")
 	ErrBoxNotOpen                  = errors.New("BOX_NOT_OPEN")
 	ErrBoxNotInCargoplace          = errors.New("BOX_NOT_IN_CARGOPLACE")
@@ -48,7 +50,9 @@ var (
 )
 
 type Service struct {
-	repo receivingRepository
+	repo   receivingRepository
+	ops    operationStore
+	signer signerSource
 }
 
 type receivingRepository interface {
@@ -77,14 +81,15 @@ type receivingRepository interface {
 	GetBinByID(ctx context.Context, binID uuid.UUID) (*domain.Bin, error)
 	ScanBufferWithLog(ctx context.Context, cargoplaceID uuid.UUID, bufferBinID uuid.UUID, logParams *TableLogParams) (int, error)
 	CloseCargoplaceWithOutbox(ctx context.Context, params *CloseCargoplaceParams) (*CloseCargoplaceTxResult, error)
+	ListClosableProductIDs(ctx context.Context, cargoplaceID uuid.UUID) ([]uuid.UUID, error)
 	CountProductsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
 	CountExpectedItemsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
 	InsertReceivingGateLog(ctx context.Context, params *GateLogParams) error
 	InsertReceivingTableLog(ctx context.Context, params *TableLogParams) error
 }
 
-func NewService(repo receivingRepository) *Service {
-	return &Service{repo: repo}
+func NewService(repo receivingRepository, ops operationStore, signer signerSource) *Service {
+	return &Service{repo: repo, ops: ops, signer: signer}
 }
 
 func (s *Service) ScanTTN(ctx context.Context, operatorID uuid.UUID, ttnCode string) (*ScanTTNResult, error) {
@@ -728,35 +733,6 @@ func (s *Service) ScanBuffer(
 		BufferBinID:    bufferBinID,
 		BufferCode:     bufferBin.Code,
 		ProductsPlaced: productsPlaced,
-	}, nil
-}
-
-func (s *Service) CloseCargoplace(
-	ctx context.Context,
-	operatorID uuid.UUID,
-	cargoplaceID uuid.UUID,
-) (*CloseCargoplaceResult, error) {
-	if operatorID == uuid.Nil || cargoplaceID == uuid.Nil {
-		return nil, fmt.Errorf("receiving.Service.CloseCargoplace: %w", ErrInvalidInput)
-	}
-
-	occurredAt := time.Now().UTC()
-	txResult, err := s.repo.CloseCargoplaceWithOutbox(ctx, &CloseCargoplaceParams{
-		CargoplaceID: cargoplaceID,
-		OperatorID:   operatorID,
-		OccurredAt:   occurredAt,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Service.CloseCargoplace close cargoplace with outbox: %w", err)
-	}
-
-	summary := buildCloseCargoplaceSummary(txResult.ExpectedSKUs, txResult.ReceivedSKUCounts)
-
-	return &CloseCargoplaceResult{
-		CargoplaceID:        cargoplaceID,
-		Status:              cargoplaceStatusTableClosed,
-		Summary:             summary,
-		OutboxEventsCreated: txResult.OutboxEventsCreated,
 	}, nil
 }
 
