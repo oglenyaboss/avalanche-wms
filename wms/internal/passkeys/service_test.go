@@ -31,6 +31,7 @@ type mockRepo struct {
 	latestPasskeysByOrgFn   func(ctx context.Context, orgID uuid.UUID) (map[uuid.UUID]domain.Passkey, error)
 	insertPasskeyFn         func(ctx context.Context, p domain.Passkey) error
 	updatePasskeyStatusFn   func(ctx context.Context, credentialID []byte, status domain.PasskeyStatus) error
+	rejectPendingPasskeyFn  func(ctx context.Context, credentialID []byte) (bool, error)
 	passkeyByKeyIDFn        func(ctx context.Context, keyID [32]byte) (*domain.Passkey, error)
 	passkeyByCredentialIDFn func(ctx context.Context, id []byte) (*domain.Passkey, error)
 	insertKeyActionFn       func(ctx context.Context, a KeyAction) error
@@ -79,6 +80,23 @@ func (m *mockRepo) UpdatePasskeyStatus(ctx context.Context, credentialID []byte,
 		return m.updatePasskeyStatusFn(ctx, credentialID, status)
 	}
 	panic("UpdatePasskeyStatus not configured")
+}
+
+func (m *mockRepo) RejectPendingPasskey(ctx context.Context, credentialID []byte) (bool, error) {
+	if m.rejectPendingPasskeyFn != nil {
+		return m.rejectPendingPasskeyFn(ctx, credentialID)
+	}
+	// Default honours the PENDING condition: only a currently PENDING key can
+	// be rejected, and the fake flips its status to REJECTED in place.
+	p, err := m.PasskeyByCredentialID(ctx, credentialID)
+	if err != nil {
+		return false, err
+	}
+	if p == nil || p.Status != domain.PasskeyStatusPending {
+		return false, nil
+	}
+	p.Status = domain.PasskeyStatusRejected
+	return true, nil
 }
 
 func (m *mockRepo) PasskeyByKeyID(ctx context.Context, keyID [32]byte) (*domain.Passkey, error) {

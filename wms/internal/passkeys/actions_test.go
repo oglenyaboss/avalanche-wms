@@ -229,6 +229,71 @@ func TestDraftKeyRegister_Errors(t *testing.T) {
 	})
 }
 
+func TestRejectKey_Success(t *testing.T) {
+	f := newActionFixture(t)
+
+	if err := f.svc.RejectKey(context.Background(), adminA, "0x"+hex.EncodeToString(f.target.KeyID[:])); err != nil {
+		t.Fatalf("RejectKey: %v", err)
+	}
+	if f.target.Status != domain.PasskeyStatusRejected {
+		t.Fatalf("target status = %s, want REJECTED", f.target.Status)
+	}
+}
+
+func TestRejectKey_Errors(t *testing.T) {
+	targetKeyID := func(target *domain.Passkey) string {
+		return "0x" + hex.EncodeToString(target.KeyID[:])
+	}
+
+	t.Run("unknown key", func(t *testing.T) {
+		f := newActionFixture(t)
+		if err := f.svc.RejectKey(context.Background(), adminA, "0x"+strings.Repeat("ab", 32)); !errors.Is(err, ErrPasskeyNotFound) {
+			t.Fatalf("err = %v, want ErrPasskeyNotFound", err)
+		}
+	})
+	t.Run("target of another org", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.target.OrgID = orgB
+		if err := f.svc.RejectKey(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrPasskeyNotFound) {
+			t.Fatalf("err = %v, want ErrPasskeyNotFound", err)
+		}
+	})
+	t.Run("target not pending", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.target.Status = domain.PasskeyStatusActive
+		if err := f.svc.RejectKey(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrTargetNotPending) {
+			t.Fatalf("err = %v, want ErrTargetNotPending", err)
+		}
+	})
+	t.Run("action in progress", func(t *testing.T) {
+		f := newActionFixture(t)
+		f.repo.latestConfirmationsFn = func(context.Context, uuid.UUID) (map[string]KeyConfirmation, error) {
+			return map[string]KeyConfirmation{
+				string(f.target.CredentialID): {State: ConfirmationSent},
+			}, nil
+		}
+		if err := f.svc.RejectKey(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrActionInProgress) {
+			t.Fatalf("err = %v, want ErrActionInProgress", err)
+		}
+	})
+	t.Run("invalid key id", func(t *testing.T) {
+		f := newActionFixture(t)
+		if err := f.svc.RejectKey(context.Background(), adminA, "0xzz"); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("err = %v, want ErrInvalidRequest", err)
+		}
+	})
+}
+
+func TestHandler_RejectKeyForbiddenForOperator(t *testing.T) {
+	f := newActionFixture(t)
+
+	rec := serveAsBody(t, f.svc, http.MethodPost, "/passkeys/organization/keys/reject",
+		strings.NewReader(`{"target_key_id":"0x00"}`), operatorA, domain.UserRoleOperator)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("reject status = %d, want 403", rec.Code)
+	}
+}
+
 func TestSubmitKeyAction_Success(t *testing.T) {
 	f := newActionFixture(t)
 	action := f.draft(t)

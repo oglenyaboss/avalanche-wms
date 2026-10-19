@@ -35,6 +35,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/me", h.MyPasskey).Methods(http.MethodGet)
 	router.HandleFunc("/organization", h.Organization).Methods(http.MethodGet)
 	router.HandleFunc("/organization/admin-key", h.AdminKeyExport).Methods(http.MethodGet)
+	router.HandleFunc("/organization/keys/reject", h.RejectKey).Methods(http.MethodPost)
 	router.HandleFunc("/actions/key-register/draft", h.DraftKeyRegister).Methods(http.MethodPost)
 	router.HandleFunc("/actions/{actionID}/submit", h.SubmitKeyAction).Methods(http.MethodPost)
 }
@@ -125,6 +126,23 @@ func (h *Handler) DraftKeyRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true, Data: toDraftView(draft)})
+}
+
+func (h *Handler) RejectKey(w http.ResponseWriter, r *http.Request) {
+	userID, ok := httputil.RequireAdmin(w, r)
+	if !ok {
+		return
+	}
+	var body draftKeyRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
+		return
+	}
+	if err := h.svc.RejectKey(r.Context(), userID, body.TargetKeyID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true})
 }
 
 type submitKeyActionRequest struct {

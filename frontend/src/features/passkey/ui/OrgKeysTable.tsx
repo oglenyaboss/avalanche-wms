@@ -8,12 +8,16 @@ interface OrgKeysTableProps {
   members: OrgMember[]
   onConfirm: (keyId: string) => void
   confirmingKeyId: string | null
+  onReject: (keyId: string) => void
+  rejectingKeyId: string | null
 }
 
 interface ConfirmationCellProps {
   member: OrgMember
   onConfirm: (keyId: string) => void
   confirmingKeyId: string | null
+  onReject: (keyId: string) => void
+  rejectingKeyId: string | null
 }
 
 const ROLE_LABELS: Record<OrgMember['role'], string> = {
@@ -21,7 +25,7 @@ const ROLE_LABELS: Record<OrgMember['role'], string> = {
   OPERATOR: 'Оператор',
 }
 
-function ConfirmationCell({ member, onConfirm, confirmingKeyId }: ConfirmationCellProps) {
+function ConfirmationCell({ member, onConfirm, confirmingKeyId, onReject, rejectingKeyId }: ConfirmationCellProps) {
   const passkey = member.passkey
   if (member.role !== 'OPERATOR' || passkey?.status !== 'PENDING') {
     return <span>—</span>
@@ -31,15 +35,25 @@ function ConfirmationCell({ member, onConfirm, confirmingKeyId }: ConfirmationCe
       <span className="text-muted-foreground">{confirmationText(member.confirmation)}</span>
     )
   }
+  const busy = confirmingKeyId === passkey.keyId || rejectingKeyId === passkey.keyId
   return (
     <div className="flex flex-col items-start gap-1">
-      <Button
-        className="self-start"
-        disabled={confirmingKeyId === passkey.keyId}
-        onClick={() => onConfirm(passkey.keyId)}
-      >
-        Подтвердить ключ
-      </Button>
+      <div className="flex gap-2">
+        <Button
+          className="self-start"
+          disabled={busy}
+          onClick={() => onConfirm(passkey.keyId)}
+        >
+          Подтвердить ключ
+        </Button>
+        <Button
+          variant="destructive"
+          disabled={busy}
+          onClick={() => onReject(passkey.keyId)}
+        >
+          Отклонить
+        </Button>
+      </div>
       {member.confirmation && (
         <span
           className={
@@ -55,7 +69,7 @@ function ConfirmationCell({ member, onConfirm, confirmingKeyId }: ConfirmationCe
   )
 }
 
-export function OrgKeysTable({ members, onConfirm, confirmingKeyId }: OrgKeysTableProps) {
+export function OrgKeysTable({ members, onConfirm, confirmingKeyId, onReject, rejectingKeyId }: OrgKeysTableProps) {
   if (members.length === 0) {
     return <p className="text-sm text-muted-foreground">В организации нет сотрудников.</p>
   }
@@ -88,7 +102,13 @@ export function OrgKeysTable({ members, onConfirm, confirmingKeyId }: OrgKeysTab
                 {m.passkey ? shortKeyId(m.passkey.keyId) : '—'}
               </td>
               <td className="px-4 py-3">
-                <ConfirmationCell member={m} onConfirm={onConfirm} confirmingKeyId={confirmingKeyId} />
+                <ConfirmationCell
+                  member={m}
+                  onConfirm={onConfirm}
+                  confirmingKeyId={confirmingKeyId}
+                  onReject={onReject}
+                  rejectingKeyId={rejectingKeyId}
+                />
               </td>
             </tr>
           ))}

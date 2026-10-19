@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { OrgKeysPage } from './OrgKeysPage'
@@ -11,6 +11,9 @@ const apiMocks = vi.hoisted(() => ({
   getAdminKeyExport: vi.fn(),
   getMyPasskey: vi.fn(),
   getOrganizationKeys: vi.fn(),
+  rejectKey: vi.fn(),
+  draftKeyConfirmation: vi.fn(),
+  submitKeyConfirmation: vi.fn(),
 }))
 
 vi.mock('@/features/passkey/api/passkeyApi', () => apiMocks)
@@ -99,5 +102,43 @@ describe('OrgKeysPage', () => {
 
     expect(await screen.findByText('Сервер недоступен')).toBeTruthy()
     expect(screen.queryByText('Скачать ключ админа')).toBeNull()
+  })
+
+  it('rejects a pending operator key', async () => {
+    apiMocks.getOrganizationKeys.mockResolvedValue({
+      organization: { orgId: 'org-1', name: 'Acme' },
+      members: [
+        {
+          userId: 'u2',
+          username: 'op',
+          role: 'OPERATOR',
+          passkey: {
+            credentialId: 'cred-op',
+            keyId: '0xfeed000000000000beef',
+            qx: '0x1',
+            qy: '0x2',
+            role: 'OPERATOR',
+            status: 'PENDING',
+            createdAt: '2026-10-01T10:00:00Z',
+          },
+          confirmation: null,
+        },
+      ],
+    })
+    apiMocks.rejectKey.mockResolvedValue(undefined)
+
+    renderPage()
+
+    expect(
+      await screen.findByRole('button', { name: 'Подтвердить ключ' })
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Отклонить' }))
+
+    await waitFor(() =>
+      expect(apiMocks.rejectKey).toHaveBeenCalledWith('0xfeed000000000000beef')
+    )
+    await waitFor(() =>
+      expect(apiMocks.getOrganizationKeys.mock.calls.length).toBeGreaterThanOrEqual(2)
+    )
   })
 })
