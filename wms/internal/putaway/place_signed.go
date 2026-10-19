@@ -102,7 +102,7 @@ func (s *Service) DraftPlaceToStorageBin(ctx context.Context, operatorID uuid.UU
 		return nil, "", fmt.Errorf("putaway.Service.DraftPlaceToStorageBin marshal details: %w", err)
 	}
 	op, err := signedops.NewOperation(signedaction.TypePutAway, operatorID, signer, details, items,
-		func(salt [32]byte) [32]byte {
+		func(salt [32]byte, _ []uuid.UUID) [32]byte {
 			return signedaction.PutAwayDetailsHash(salt, storageBinID, operatorID, uint64(occurredAt.UnixMilli()))
 		})
 	if err != nil {

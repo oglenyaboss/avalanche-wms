@@ -41,8 +41,9 @@ type Operation struct {
 
 // NewOperation sorts items by itemId (ADR §3), splits them into consecutive
 // parts of at most MaxItemsPerAction and derives a fresh action id, salt and
-// challenge for every part. Zero items yield a valid operation with zero parts.
-func NewOperation(actionType uint8, createdBy uuid.UUID, signer *domain.Passkey, details json.RawMessage, items []uuid.UUID, detailsHash func(salt [32]byte) [32]byte) (*Operation, error) {
+// challenge for every part. detailsHash receives the part's own sorted items.
+// Zero items yield a valid operation with zero parts.
+func NewOperation(actionType uint8, createdBy uuid.UUID, signer *domain.Passkey, details json.RawMessage, items []uuid.UUID, detailsHash func(salt [32]byte, items []uuid.UUID) [32]byte) (*Operation, error) {
 	operationID, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("signedops.NewOperation operation id: %w", err)
@@ -70,7 +71,7 @@ func NewOperation(actionType uint8, createdBy uuid.UUID, signer *domain.Passkey,
 	return op, nil
 }
 
-func newPart(actionType uint8, items []uuid.UUID, detailsHash func(salt [32]byte) [32]byte) (*Part, error) {
+func newPart(actionType uint8, items []uuid.UUID, detailsHash func(salt [32]byte, items []uuid.UUID) [32]byte) (*Part, error) {
 	actionID, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("signedops.NewOperation action id: %w", err)
@@ -79,7 +80,7 @@ func newPart(actionType uint8, items []uuid.UUID, detailsHash func(salt [32]byte
 	if _, err := rand.Read(salt[:]); err != nil {
 		return nil, fmt.Errorf("signedops.NewOperation salt: %w", err)
 	}
-	details := detailsHash(salt)
+	details := detailsHash(salt, items)
 	return &Part{
 		ActionID:    actionID,
 		ItemIDs:     items,

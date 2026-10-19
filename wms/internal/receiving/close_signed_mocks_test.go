@@ -75,7 +75,7 @@ func newSignedOperation(t *testing.T, cargoplaceID, operatorID uuid.UUID, items 
 		t.Fatalf("marshal details: %v", err)
 	}
 	op, err := signedops.NewOperation(signedaction.TypeReceive, operatorID, signer, details, items,
-		func(salt [32]byte) [32]byte {
+		func(salt [32]byte, _ []uuid.UUID) [32]byte {
 			return signedaction.ReceiveDetailsHash(salt, cargoplaceID, operatorID, 1760781600000)
 		})
 	if err != nil {

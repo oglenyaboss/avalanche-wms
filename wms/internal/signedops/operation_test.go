@@ -28,7 +28,7 @@ func testSignerWithKey() (*domain.Passkey, *ecdsa.PrivateKey) {
 	}, key
 }
 
-func receiveDetailsHash(salt [32]byte) [32]byte {
+func receiveDetailsHash(salt [32]byte, _ []uuid.UUID) [32]byte {
 	return signedaction.ReceiveDetailsHash(salt,
 		uuid.MustParse("01929c5e-6f00-7000-8000-0000000000c1"),
 		uuid.MustParse("01929c5e-6f00-7000-8000-0000000000b1"), 1760781600000)
@@ -104,7 +104,7 @@ func TestNewOperation_SplitsLargeInput(t *testing.T) {
 	}
 
 	for _, p := range op.Parts {
-		if p.DetailsHash != receiveDetailsHash(p.Salt) {
+		if p.DetailsHash != receiveDetailsHash(p.Salt, p.ItemIDs) {
 			t.Errorf("part %s detailsHash mismatch", p.ActionID)
 		}
 		want := signedaction.Challenge(p.ActionID, signedaction.TypeReceive, signedaction.ItemsHash(p.ItemIDs), p.DetailsHash)

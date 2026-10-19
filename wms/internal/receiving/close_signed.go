@@ -71,7 +71,7 @@ func (s *Service) DraftCloseCargoplace(ctx context.Context, operatorID, cargopla
 		return nil, "", fmt.Errorf("receiving.Service.DraftCloseCargoplace marshal details: %w", err)
 	}
 	op, err := signedops.NewOperation(signedaction.TypeReceive, operatorID, signer, details, items,
-		func(salt [32]byte) [32]byte {
+		func(salt [32]byte, _ []uuid.UUID) [32]byte {
 			return signedaction.ReceiveDetailsHash(salt, cargoplaceID, operatorID, uint64(occurredAt.UnixMilli()))
 		})
 	if err != nil {

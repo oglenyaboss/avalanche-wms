@@ -90,6 +90,56 @@ func PutAwayDetailsHash(salt [32]byte, storageBinID, operatorID uuid.UUID, occur
 	return entityDetailsHash(salt, bin, operatorID, occurredAtMs)
 }
 
+// PickDetailsHash is keccak256(abi.encode(bytes32 salt, bytes16 shippingBufferBinId,
+// bytes16[] orderIds, bytes16 operatorId, uint64 occurredAtMs)): head = salt,
+// bin, offset 0xa0, operator, occurredAtMs; tail = length, one left-aligned
+// bytes16 per orderId. orderIds go ascending by raw bytes without duplicates;
+// the input is not mutated.
+func PickDetailsHash(salt [32]byte, shippingBufferBinID uuid.UUID, orderIDs []uuid.UUID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	orders := sortedUniqueOrderIDs(orderIDs)
+
+	var bin, operator [32]byte
+	copy(bin[:16], shippingBufferBinID[:])
+	copy(operator[:16], operatorID[:])
+
+	var ms, offset, length [32]byte
+	binary.BigEndian.PutUint64(ms[24:], occurredAtMs)
+	binary.BigEndian.PutUint64(offset[24:], 0xa0) // заголовок из 5 статических слов
+	binary.BigEndian.PutUint64(length[24:], uint64(len(orders)))
+
+	buf := make([]byte, 0, 32*(6+len(orders)))
+	buf = append(buf, salt[:]...)
+	buf = append(buf, bin[:]...)
+	buf = append(buf, offset[:]...)
+	buf = append(buf, operator[:]...)
+	buf = append(buf, ms[:]...)
+	buf = append(buf, length[:]...)
+	for _, id := range orders {
+		var word [32]byte
+		copy(word[:16], id[:])
+		buf = append(buf, word[:]...)
+	}
+	return keccak256(buf)
+}
+
+// sortedUniqueOrderIDs returns a fresh slice of the input sorted ascending by
+// raw bytes with duplicates removed; the input is not mutated.
+func sortedUniqueOrderIDs(ids []uuid.UUID) []uuid.UUID {
+	sorted := make([]uuid.UUID, len(ids))
+	copy(sorted, ids)
+	sort.Slice(sorted, func(i, j int) bool {
+		return bytes.Compare(sorted[i][:], sorted[j][:]) < 0
+	})
+	out := sorted[:0]
+	for i, id := range sorted {
+		if i > 0 && id == sorted[i-1] {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
 // entityDetailsHash is the shared body of the single-entity details hashes
 // (receive, putaway): keccak256(abi.encode(bytes32 salt, bytes16 entity,
 // bytes16 operatorId, uint64 occurredAtMs)).

@@ -38,13 +38,15 @@ type vectorAction struct {
 	ActionType      int      `json:"actionType"`
 	Challenge       hexBytes `json:"challenge"`
 	Details         struct {
-		QX           hexBytes `json:"qx"`
-		QY           hexBytes `json:"qy"`
-		Salt         hexBytes `json:"salt"`
-		CargoplaceID string   `json:"cargoplaceId"`
-		StorageBinID string   `json:"storageBinId"`
-		OperatorID   string   `json:"operatorId"`
-		OccurredAtMs uint64   `json:"occurredAtMs"`
+		QX                  hexBytes `json:"qx"`
+		QY                  hexBytes `json:"qy"`
+		Salt                hexBytes `json:"salt"`
+		CargoplaceID        string   `json:"cargoplaceId"`
+		StorageBinID        string   `json:"storageBinId"`
+		ShippingBufferBinID string   `json:"shippingBufferBinId"`
+		OrderIDs            []string `json:"orderIds"`
+		OperatorID          string   `json:"operatorId"`
+		OccurredAtMs        uint64   `json:"occurredAtMs"`
 	} `json:"details"`
 	DetailsHash hexBytes   `json:"detailsHash"`
 	ItemIDs     []hexBytes `json:"itemIds"`
@@ -219,6 +221,46 @@ func TestVectors_PutAwayDetailsHash(t *testing.T) {
 	got := signedaction.PutAwayDetailsHash([32]byte(putAway.Details.Salt), storageBinID, operatorID, putAway.Details.OccurredAtMs)
 	if got != [32]byte(putAway.DetailsHash) {
 		t.Errorf("PutAwayDetailsHash = %x, want %x", got, putAway.DetailsHash)
+	}
+}
+
+func TestVectors_PickDetailsHash(t *testing.T) {
+	v := loadVectors(t)
+	pick := findAction(v, "pick")
+	if pick == nil {
+		t.Fatal("no pick action in vectors")
+	}
+	binID, err := uuid.Parse(pick.Details.ShippingBufferBinID)
+	if err != nil {
+		t.Fatalf("parse shippingBufferBinId: %v", err)
+	}
+	operatorID, err := uuid.Parse(pick.Details.OperatorID)
+	if err != nil {
+		t.Fatalf("parse operatorId: %v", err)
+	}
+	orders := make([]uuid.UUID, 0, len(pick.Details.OrderIDs))
+	for _, s := range pick.Details.OrderIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			t.Fatalf("parse orderId %s: %v", s, err)
+		}
+		orders = append(orders, id)
+	}
+	got := signedaction.PickDetailsHash([32]byte(pick.Details.Salt), binID, orders, operatorID, pick.Details.OccurredAtMs)
+	if got != [32]byte(pick.DetailsHash) {
+		t.Errorf("PickDetailsHash = %x, want %x", got, pick.DetailsHash)
+	}
+
+	// Дубликаты и обратный порядок дают тот же хеш; вход не мутируется.
+	messy := slices.Clone(orders)
+	messy = append(messy, orders...)
+	slices.Reverse(messy)
+	wantMessy := slices.Clone(messy)
+	if got := signedaction.PickDetailsHash([32]byte(pick.Details.Salt), binID, messy, operatorID, pick.Details.OccurredAtMs); got != [32]byte(pick.DetailsHash) {
+		t.Errorf("PickDetailsHash(unsorted+dupes) = %x, want %x", got, pick.DetailsHash)
+	}
+	if !slices.Equal(messy, wantMessy) {
+		t.Errorf("PickDetailsHash mutated its input")
 	}
 }
 
