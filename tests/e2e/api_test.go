@@ -55,8 +55,9 @@ type scanQRData struct {
 }
 
 type scanStorageBinData struct {
-	OutboxEventsCreated int `json:"outbox_events_created"`
-	ProductsPlaced      int `json:"products_placed"`
+	OutboxEventsCreated int    `json:"outbox_events_created"`
+	ProductsPlaced      int    `json:"products_placed"`
+	OperationID         string `json:"operation_id"`
 }
 
 type allocateData struct {

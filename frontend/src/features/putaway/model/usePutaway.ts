@@ -1,8 +1,16 @@
 import { useReducer } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
-import { scanBuffer, scanProduct, scanStorageBin } from '../api/putawayApi'
-import { getPutawayErrorCode, getPutawayErrorMessage } from './errors'
+import { signOperation } from '@/entities/signed-action'
+import { webauthnSignErrorText } from '@/shared/lib'
+
+import {
+  draftPlaceToStorageBin,
+  scanBuffer,
+  scanProduct,
+  submitPlaceToStorageBin,
+} from '../api/putawayApi'
+import { getPutawayErrorMessage } from './errors'
 import { initialPutawayState, putawayReducer } from './putawayReducer'
 
 export function usePutaway() {
@@ -18,9 +26,16 @@ export function usePutaway() {
     mutationFn: scanProduct,
     retry: false,
   })
-  const scanStorageBinMutation = useMutation({
-    mutationKey: ['putaway', 'scan-storage-bin'],
-    mutationFn: scanStorageBin,
+  // Scanning the storage bin signs one operation for the whole unplaced cart:
+  // draft the batch against the bin, one passkey touch per part, then submit
+  // the assertions.
+  const placeMutation = useMutation({
+    mutationKey: ['putaway', 'place-to-storage-bin'],
+    mutationFn: async (input: { productIds: string[]; storageBinId: string }) => {
+      const draft = await draftPlaceToStorageBin(input)
+      const assertions = await signOperation(draft)
+      return submitPlaceToStorageBin(draft.operationId, assertions)
+    },
     retry: false,
   })
 
@@ -70,49 +85,35 @@ export function usePutaway() {
 
   const goToStorage = () => dispatch({ type: 'GO_TO_STORAGE' })
 
-  // No "resolve bin" endpoint exists: the scanned storage-bin UUID is held
-  // client-side and validated when the first product is placed (scan-storage-bin
-  // returns STORAGE_BIN_NOT_FOUND for a bad bin).
-  const submitStorageBin = (storageBinId: string) =>
-    dispatch({ type: 'STORAGE_BIN_SCANNED', storageBinId })
-
-  const changeBin = () => dispatch({ type: 'CHANGE_BIN' })
-
-  const submitPlace = async (qrCode: string) => {
-    if (
-      !state.buffer ||
-      !state.activeBin ||
-      scanStorageBinMutation.isPending
-    ) {
+  // The scanned bin triggers the whole placement: every cart product not yet
+  // placed goes into it as one signed action. A bad bin (STORAGE_BIN_NOT_FOUND)
+  // leaves the operator at the bin scan to re-scan.
+  const submitStorageBin = async (storageBinId: string) => {
+    if (!state.buffer || placeMutation.isPending) {
       return
     }
 
-    const product = resolveQr(qrCode)
-    if (!product) {
-      showError('Этот товар отсутствует в буфере приёмки.')
-      return
-    }
-    if (!state.cart.some((item) => item.productId === product.productId)) {
-      showError('Этот товар не был добавлен в задачу раскладки.')
-      return
-    }
-    if (state.placedProductIds.includes(product.productId)) {
-      showError('Этот товар уже размещён в ячейке.')
+    const productIds = state.cart
+      .filter((item) => !state.placedProductIds.includes(item.productId))
+      .map((item) => item.productId)
+    if (productIds.length === 0) {
       return
     }
 
     try {
-      const result = await scanStorageBinMutation.mutateAsync({
-        productIds: [product.productId],
-        storageBinId: state.activeBin.storageBinId,
-      })
-      dispatch({ type: 'PRODUCT_PLACED', productId: product.productId, result })
+      const result = await placeMutation.mutateAsync({ productIds, storageBinId })
+      dispatch({ type: 'PRODUCTS_PLACED', productIds, result })
     } catch (error) {
-      // A bad storage bin invalidates the whole active bin, not just this
-      // product — drop back to the bin scan so retries don't hammer a dead bin.
-      if (getPutawayErrorCode(error) === 'STORAGE_BIN_NOT_FOUND') {
-        dispatch({ type: 'CHANGE_BIN' })
+      // A DOMException comes from the authenticator (dismissed prompt or
+      // timeout) — the placement may not even have been requested, so the
+      // putaway error classification does not apply; show the signing text
+      // instead.
+      const signError = webauthnSignErrorText(error)
+      if (signError) {
+        showError(signError)
+        return
       }
+
       showError(getPutawayErrorMessage(error))
     }
   }
@@ -123,8 +124,6 @@ export function usePutaway() {
     submitPick,
     goToStorage,
     submitStorageBin,
-    changeBin,
-    submitPlace,
     openDrafter: () => dispatch({ type: 'OPEN_DRAFTER' }),
     closeDrafter: () => dispatch({ type: 'CLOSE_DRAFTER' }),
     openConfirmFinish: () => dispatch({ type: 'OPEN_CONFIRM_FINISH' }),
@@ -133,6 +132,6 @@ export function usePutaway() {
     dismissError: () => dispatch({ type: 'DISMISS_ERROR' }),
     isScanningBuffer: scanBufferMutation.isPending,
     isScanningProduct: scanProductMutation.isPending,
-    isPlacing: scanStorageBinMutation.isPending,
+    isPlacing: placeMutation.isPending,
   }
 }

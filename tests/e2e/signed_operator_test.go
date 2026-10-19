@@ -272,6 +272,69 @@ func closeCargoplaceSigned(t *testing.T, env *env, op *signedOperator, cargoplac
 	return submitCloseCargoplace(t, env, op.token, draft.OperationID, assertions)
 }
 
+// ── signed putaway (basket → storage bin) DTOs and helpers ─────────────────
+
+// draftPlaceToStorageBin POSTs the putaway draft endpoint: the draft response
+// has the same shape as the cargoplace close draft, so it reuses closeDraftDTO.
+func draftPlaceToStorageBin(t *testing.T, env *env, op *signedOperator, productIDs []uuid.UUID, binID uuid.UUID) closeDraftDTO {
+	t.Helper()
+	var draft closeDraftDTO
+	postJSON(t, env, op.token, "/putaway/scan-storage-bin/draft", map[string]any{
+		"product_ids":    uuidStrings(productIDs),
+		"storage_bin_id": binID.String(),
+	}, &draft)
+	return draft
+}
+
+// submitPlaceToStorageBin POSTs the putaway submit endpoint and requires 200.
+func submitPlaceToStorageBin(t *testing.T, env *env, token, operationID string, assertions []map[string]string) scanStorageBinData {
+	t.Helper()
+	var result scanStorageBinData
+	postJSON(t, env, token, "/putaway/scan-storage-bin/submit", map[string]any{
+		"operation_id": operationID,
+		"assertions":   assertions,
+	}, &result)
+	return result
+}
+
+// placeToStorageBinSigned runs the whole signed putaway: draft → sign → submit.
+func placeToStorageBinSigned(t *testing.T, env *env, op *signedOperator, productIDs []uuid.UUID, binID uuid.UUID) scanStorageBinData {
+	t.Helper()
+	draft := draftPlaceToStorageBin(t, env, op, productIDs, binID)
+	assertions := signDraft(t, op, draft)
+	return submitPlaceToStorageBin(t, env, op.token, draft.OperationID, assertions)
+}
+
+// draftPlaceToStorageBinRaw POSTs the putaway draft endpoint and returns the raw
+// status + error code + message without failing, for guard tests. Product ids stay
+// strings so a guard can pass a bogus (but well-formed) uuid.
+func draftPlaceToStorageBinRaw(t *testing.T, env *env, token string, productIDs []string, binID string) (int, string, string) {
+	t.Helper()
+	return postExpectError(t, env, token, "/putaway/scan-storage-bin/draft", map[string]any{
+		"product_ids":    productIDs,
+		"storage_bin_id": binID,
+	})
+}
+
+// submitPlaceToStorageBinRaw POSTs the putaway submit endpoint and returns the
+// raw status + error code + message without failing, for guard tests.
+func submitPlaceToStorageBinRaw(t *testing.T, env *env, token, operationID string, assertions []map[string]string) (int, string, string) {
+	t.Helper()
+	return postExpectError(t, env, token, "/putaway/scan-storage-bin/submit", map[string]any{
+		"operation_id": operationID,
+		"assertions":   assertions,
+	})
+}
+
+// uuidStrings renders uuids as their canonical strings.
+func uuidStrings(ids []uuid.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}
+
 // operationStatusDTO models GET /signed-actions/operations/{id}.
 type operationStatusDTO struct {
 	OperationID string `json:"operation_id"`
@@ -360,12 +423,29 @@ func waitForOperationState(t *testing.T, ctx context.Context, env *env, token, o
 
 // softReceiveDetailsHash is an independent re-implementation of ADR-0001 §4 for
 // Receive: keccak256(abi.encode(bytes32 salt, bytes16 cargoplaceId,
-// bytes16 operatorId, uint64 occurredAtMs)). bytes16 words are left-aligned
-// (zero tail), the uint64 is right-aligned big-endian in its word.
+// bytes16 operatorId, uint64 occurredAtMs)).
 func softReceiveDetailsHash(salt [32]byte, cargoplaceID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	var cargo [32]byte
+	copy(cargo[:16], cargoplaceID[:])
+	return softEntityDetailsHash(salt, cargo, operatorID, occurredAtMs)
+}
+
+// softPutAwayDetailsHash is an independent re-implementation of ADR-0001 §4 for
+// PutAway: keccak256(abi.encode(bytes32 salt, bytes16 storageBinId,
+// bytes16 operatorId, uint64 occurredAtMs)).
+func softPutAwayDetailsHash(salt [32]byte, storageBinID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
+	var bin [32]byte
+	copy(bin[:16], storageBinID[:])
+	return softEntityDetailsHash(salt, bin, operatorID, occurredAtMs)
+}
+
+// softEntityDetailsHash is the shared body of the single-entity details hashes
+// (receive, putaway): bytes16 words are left-aligned (zero tail), the uint64 is
+// right-aligned big-endian in its word.
+func softEntityDetailsHash(salt, entity [32]byte, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
 	var buf [128]byte
 	copy(buf[0:32], salt[:])
-	copy(buf[32:48], cargoplaceID[:])
+	copy(buf[32:48], entity[:])
 	copy(buf[64:80], operatorID[:])
 	binary.BigEndian.PutUint64(buf[120:128], occurredAtMs)
 	var out [32]byte

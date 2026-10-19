@@ -50,12 +50,8 @@ export function Putaway() {
           buffer={state.buffer}
           cart={state.cart}
           placedProductIds={state.placedProductIds}
-          storageStep={state.storageStep}
-          activeBin={state.activeBin}
           lastPlacement={state.lastPlacement}
           onScanBin={putaway.submitStorageBin}
-          onScanProduct={putaway.submitPlace}
-          onChangeBin={putaway.changeBin}
           onFinish={putaway.openConfirmFinish}
           isPlacing={putaway.isPlacing}
           isBlocked={isErrorOpen}

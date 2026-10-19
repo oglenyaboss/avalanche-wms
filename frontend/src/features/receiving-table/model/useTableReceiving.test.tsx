@@ -25,7 +25,7 @@ const signMocks = vi.hoisted(() => ({
   signOperation: vi.fn(),
 }))
 
-vi.mock('./signOperation', () => signMocks)
+vi.mock('@/entities/signed-action', () => signMocks)
 
 import { useTableReceiving } from './useTableReceiving'
 

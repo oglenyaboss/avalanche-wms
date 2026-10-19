@@ -98,11 +98,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
 
-	var putaway scanStorageBinData
-	postJSON(t, env, token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    []string{scannedProduct.ProductID.String()},
-		"storage_bin_id": fixture.StorageBinID.String(),
-	}, &putaway)
+	putaway := placeToStorageBinSigned(t, env, op, []uuid.UUID{scannedProduct.ProductID}, fixture.StorageBinID)
 	require.Equal(t, 1, putaway.ProductsPlaced)
 	require.Equal(t, 1, putaway.OutboxEventsCreated)
 	requireProductStatus(t, ctx, env, scannedProduct.ProductID, "STORED")
