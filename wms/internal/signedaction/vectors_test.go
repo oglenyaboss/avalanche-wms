@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,13 +38,18 @@ type vectorAction struct {
 	ActionType      int      `json:"actionType"`
 	Challenge       hexBytes `json:"challenge"`
 	Details         struct {
-		QX hexBytes `json:"qx"`
-		QY hexBytes `json:"qy"`
+		QX           hexBytes `json:"qx"`
+		QY           hexBytes `json:"qy"`
+		Salt         hexBytes `json:"salt"`
+		CargoplaceID string   `json:"cargoplaceId"`
+		OperatorID   string   `json:"operatorId"`
+		OccurredAtMs uint64   `json:"occurredAtMs"`
 	} `json:"details"`
-	DetailsHash hexBytes `json:"detailsHash"`
-	ItemsHash   hexBytes `json:"itemsHash"`
-	KeyID       hexBytes `json:"keyId"`
-	Name        string   `json:"name"`
+	DetailsHash hexBytes   `json:"detailsHash"`
+	ItemIDs     []hexBytes `json:"itemIds"`
+	ItemsHash   hexBytes   `json:"itemsHash"`
+	KeyID       hexBytes   `json:"keyId"`
+	Name        string     `json:"name"`
 	WebAuthn    struct {
 		AuthenticatorData hexBytes `json:"authenticatorData"`
 		ChallengeIndex    int      `json:"challengeIndex"`
@@ -52,6 +58,11 @@ type vectorAction struct {
 		S                 hexBytes `json:"s"`
 		TypeIndex         int      `json:"typeIndex"`
 	} `json:"webauthn"`
+}
+
+type vectorProduct struct {
+	ProductID string   `json:"productId"`
+	ItemID    hexBytes `json:"itemId"`
 }
 
 type vectorsFile struct {
@@ -63,7 +74,8 @@ type vectorsFile struct {
 		QX         hexBytes `json:"qx"`
 		QY         hexBytes `json:"qy"`
 	} `json:"signer"`
-	Actions []vectorAction `json:"actions"`
+	Products []vectorProduct `json:"products"`
+	Actions  []vectorAction  `json:"actions"`
 }
 
 func loadVectors(t *testing.T) vectorsFile {
@@ -109,6 +121,83 @@ func TestVectors_Challenge(t *testing.T) {
 				t.Errorf("%s: detailsHash = %x, want %x", a.Name, gotDetails, a.DetailsHash)
 			}
 		}
+	}
+}
+
+func findAction(v vectorsFile, name string) *vectorAction {
+	for i := range v.Actions {
+		if v.Actions[i].Name == name {
+			return &v.Actions[i]
+		}
+	}
+	return nil
+}
+
+func TestVectors_Items(t *testing.T) {
+	v := loadVectors(t)
+	receive := findAction(v, "receive")
+	if receive == nil {
+		t.Fatal("no receive action in vectors")
+	}
+
+	products := make([]uuid.UUID, len(v.Products))
+	for i, p := range v.Products {
+		id, err := uuid.Parse(p.ProductID)
+		if err != nil {
+			t.Fatalf("parse productId %s: %v", p.ProductID, err)
+		}
+		products[i] = id
+		if got := signedaction.ItemID(id); got != [32]byte(p.ItemID) {
+			t.Errorf("ItemID(%s) = %x, want %x", p.ProductID, got, p.ItemID)
+		}
+	}
+
+	before := slices.Clone(products)
+	sorted := signedaction.SortByItemID(products)
+	if !slices.Equal(products, before) {
+		t.Errorf("SortByItemID mutated its input")
+	}
+	if len(sorted) != len(receive.ItemIDs) {
+		t.Fatalf("sorted len = %d, want %d", len(sorted), len(receive.ItemIDs))
+	}
+	for i, want := range receive.ItemIDs {
+		if got := signedaction.ItemID(sorted[i]); got != [32]byte(want) {
+			t.Errorf("sorted[%d] = %x, want itemId %x", i, got, want)
+		}
+	}
+	if !slices.IsSortedFunc(sorted, func(a, b uuid.UUID) int {
+		aItem := signedaction.ItemID(a)
+		bItem := signedaction.ItemID(b)
+		return bytes.Compare(aItem[:], bItem[:])
+	}) {
+		t.Errorf("SortByItemID result is not ascending by ItemID")
+	}
+
+	if got := signedaction.ItemsHash(sorted); got != [32]byte(receive.ItemsHash) {
+		t.Errorf("ItemsHash = %x, want %x", got, receive.ItemsHash)
+	}
+	if got := signedaction.ItemsHash(nil); got != signedaction.NoItems {
+		t.Errorf("ItemsHash(nil) = %x, want NoItems %x", got, signedaction.NoItems)
+	}
+}
+
+func TestVectors_ReceiveDetailsHash(t *testing.T) {
+	v := loadVectors(t)
+	receive := findAction(v, "receive")
+	if receive == nil {
+		t.Fatal("no receive action in vectors")
+	}
+	cargoplaceID, err := uuid.Parse(receive.Details.CargoplaceID)
+	if err != nil {
+		t.Fatalf("parse cargoplaceId: %v", err)
+	}
+	operatorID, err := uuid.Parse(receive.Details.OperatorID)
+	if err != nil {
+		t.Fatalf("parse operatorId: %v", err)
+	}
+	got := signedaction.ReceiveDetailsHash([32]byte(receive.Details.Salt), cargoplaceID, operatorID, receive.Details.OccurredAtMs)
+	if got != [32]byte(receive.DetailsHash) {
+		t.Errorf("ReceiveDetailsHash = %x, want %x", got, receive.DetailsHash)
 	}
 }
 
