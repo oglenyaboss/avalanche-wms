@@ -59,7 +59,7 @@ test: test-wms test-ledger ## Run all tests
 e2e-test-outbound: ## Run full outbound WMS API -> DB -> Kafka -> chain e2e test
 	# RPC_URL снимаем (include .env ниже экспортирует его во все цели): TestMain
 	# резолвит динамический Subnet-EVM RPC (/ext/bc/<blockchainID>/rpc) из тома shared_state.
-	cd tests/e2e && env -u RPC_URL go test -tags=e2e -count=1 -timeout=15m ./...
+	cd tests/e2e && env -u RPC_URL go test -tags=e2e -count=1 -timeout=40m ./...
 
 tidy: tidy-wms tidy-ledger ## Tidy all go.mod
 

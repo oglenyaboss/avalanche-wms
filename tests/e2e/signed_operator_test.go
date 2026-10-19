@@ -40,10 +40,12 @@ type signedOperator struct {
 // consortiumOrg is the shared consortium created once per test binary: org +
 // ADMIN user + admin passkey registered on chain by the owner.
 type consortiumOrg struct {
-	orgID      uuid.UUID
-	adminToken string
-	adminKey   *ecdsa.PrivateKey
-	adminCred  []byte
+	orgID         uuid.UUID
+	adminUser     string
+	adminPassword string
+	adminToken    string
+	adminKey      *ecdsa.PrivateKey
+	adminCred     []byte
 }
 
 var (
@@ -66,7 +68,12 @@ func requireConsortium(t *testing.T, ctx context.Context, env *env) *consortiumO
 	})
 	require.NoError(t, consortiumSetupErr, "shared consortium org is not available")
 	require.NotNil(t, consortiumShared, "shared consortium org was not initialized")
-	return consortiumShared
+	// Fresh token per call: the shared one would expire (JWT_ACCESS_TTL) on
+	// suites longer than the TTL, and every later signed-action draft/submit
+	// would 401. The org itself is still created exactly once (sync.Once).
+	shared := *consortiumShared
+	shared.adminToken = loginAs(t, env, consortiumShared.adminUser, consortiumShared.adminPassword)
+	return &shared
 }
 
 // setupConsortium inserts the org + ADMIN user + PENDING admin passkey (same
@@ -112,10 +119,12 @@ func setupConsortium(t *testing.T, ctx context.Context, env *env) error {
 	})
 
 	consortiumShared = &consortiumOrg{
-		orgID:      fx.orgID,
-		adminToken: adminToken,
-		adminKey:   fx.adminKey,
-		adminCred:  fx.adminCred,
+		orgID:         fx.orgID,
+		adminUser:     fx.adminUser,
+		adminPassword: fx.password,
+		adminToken:    adminToken,
+		adminKey:      fx.adminKey,
+		adminCred:     fx.adminCred,
 	}
 	return nil
 }
