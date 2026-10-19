@@ -62,12 +62,14 @@ var ErrConfirmStalled = errors.New("confirm stalled")
 // для каждого sub-batch: idempotency-filter → InsertPending → chain.BatchCall →
 // MarkSent → WaitReceipt → MarkCommitted / MarkFailed+DLQ.
 // Подписанные действия (signed_action) идут в сегментах окна между legacy-стадиями
-// в Kafka-порядке через ConsortiumRegistry.applyKeyActions.
+// в Kafka-порядке: складские через SignedMappingWMS.applyActions, ключевые через
+// ConsortiumRegistry.applyKeyActions.
 type Flusher struct {
 	caller         ChainCaller // единственный signer-клиент; он же читает receipt'ы (node-global)
 	store          Store
 	dlq            DLQPublisher
-	registry       ActionResolver // nil = подписанные действия не отправляются (recordFailure)
+	warehouse      ActionResolver // nil = складские действия не отправляются (recordFailure)
+	registry       ActionResolver // nil = ключевые действия не отправляются (recordFailure)
 	receiptTimeout time.Duration
 	log            *slog.Logger
 }
@@ -116,9 +118,12 @@ func (f *Flusher) Send(ctx context.Context, msgs []*Message) ([]InflightTx, erro
 	var inflight []InflightTx
 	for _, seg := range splitSegments(msgs) {
 		var err error
-		if seg[0].Action != nil {
-			inflight, err = f.sendKeyActions(ctx, seg, inflight)
-		} else {
+		switch segmentOf(seg[0]) {
+		case segmentWarehouse:
+			inflight, err = f.sendActions(ctx, seg, inflight, f.warehouseTarget())
+		case segmentKey:
+			inflight, err = f.sendActions(ctx, seg, inflight, f.keyTarget())
+		default:
 			inflight, err = f.sendLegacy(ctx, seg, inflight)
 		}
 		if err != nil {
@@ -126,22 +131,6 @@ func (f *Flusher) Send(ctx context.Context, msgs []*Message) ([]InflightTx, erro
 		}
 	}
 	return inflight, nil
-}
-
-// splitSegments режет batch на подряд идущие сегменты: действия (Action != nil)
-// и legacy-сообщения. Порядок сообщений внутри сегмента сохраняется.
-func splitSegments(msgs []*Message) [][]*Message {
-	segs := make([][]*Message, 0, 2)
-	start := 0
-	isAction := msgs[0].Action != nil
-	for i := 1; i < len(msgs); i++ {
-		if (msgs[i].Action != nil) != isAction {
-			segs = append(segs, msgs[start:i])
-			start = i
-			isAction = msgs[i].Action != nil
-		}
-	}
-	return append(segs, msgs[start:])
 }
 
 // sendLegacy — прежнее тело Send для FSM-агрегатов (receiving/putaway/picking/
@@ -193,6 +182,19 @@ func (f *Flusher) sendLegacy(ctx context.Context, msgs []*Message, inflight []In
 		}
 	}
 	return inflight, nil
+}
+
+// actionResolvers — резолверы исходов подписанных действий: складские
+// (SignedMappingWMS) первым, затем реестр; nil'ы отфильтрованы.
+func (f *Flusher) actionResolvers() []ActionResolver {
+	var resolvers []ActionResolver
+	if f.warehouse != nil {
+		resolvers = append(resolvers, f.warehouse)
+	}
+	if f.registry != nil {
+		resolvers = append(resolvers, f.registry)
+	}
+	return resolvers
 }
 
 func (f *Flusher) recordFailure(ctx context.Context, pending []*Message, ids []uuid.UUID, txHash, reason string) error {
@@ -253,7 +255,7 @@ func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]
 		case txHash != "":
 			// Уже broadcast'нуто (crash-recovery S2 / receipt-timeout N1). НЕ resubmit:
 			// reconcile существующую tx, tx_hash остаётся стабильным.
-			terminal, rerr := reconcileReceipt(ctx, f.caller, f.store, []uuid.UUID{m.EventID}, txHash, m.AggregateType, f.registry, f.log)
+			terminal, rerr := reconcileReceipt(ctx, f.caller, f.store, []uuid.UUID{m.EventID}, txHash, m.AggregateType, f.actionResolvers(), f.log)
 			if rerr != nil {
 				return nil, fmt.Errorf("reconcile %s: %w", m.EventID, rerr)
 			}

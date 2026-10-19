@@ -189,17 +189,16 @@ func leftTopic(id [16]byte) common.Hash {
 	return h
 }
 
-func TestActionOutcomes(t *testing.T) {
-	addr := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+func TestRegistry_LogOutcomes(t *testing.T) {
 	reg := newTestRegistry(t, &fakeCaller{})
 	a := reg.ABI()
 	keyReg := a.Events["KeyRegistered"]
 	rejected := a.Events["ActionRejected"]
 
-	idA, idB, idC, idD, idE := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	idA, idB, idC := uuid.New(), uuid.New(), uuid.New()
 
 	logA := &types.Log{
-		Address: addr,
+		Address: reg.Address(),
 		// KeyRegistered(keyId indexed, orgId indexed, role, qx, qy, actionId)
 		Topics: []common.Hash{keyReg.ID, common.HexToHash("0x11"), leftTopic([16]byte{})},
 		Data: mustPack(t, keyReg.Inputs.NonIndexed().Pack,
@@ -209,7 +208,7 @@ func TestActionOutcomes(t *testing.T) {
 			[16]byte(idA)),
 	}
 	logRejectedB := &types.Log{
-		Address: addr,
+		Address: reg.Address(),
 		Topics:  []common.Hash{rejected.ID, leftTopic([16]byte(idB))},
 		Data:    mustPack(t, rejected.Inputs.NonIndexed().Pack, uint8(6)),
 	}
@@ -219,37 +218,10 @@ func TestActionOutcomes(t *testing.T) {
 		Topics:  []common.Hash{rejected.ID, leftTopic([16]byte(idC))},
 		Data:    mustPack(t, rejected.Inputs.NonIndexed().Pack, uint8(9)),
 	}
-	logRejectedD := types.Log{
-		Address: addr,
-		Topics:  []common.Hash{rejected.ID, leftTopic([16]byte(idD))},
-		Data:    mustPack(t, rejected.Inputs.NonIndexed().Pack, uint8(5)),
-	}
 
-	fake := &fakeOutcomeCaller{
-		// actionState по порядку недостающих id: C→1 (Applied), D→2 (Rejected), E→0 (None).
-		states: [][]byte{actionStateOutput(t, 1), actionStateOutput(t, 2), actionStateOutput(t, 0)},
-		logs:   []types.Log{logRejectedD},
-	}
-	reg.eth = fake
-
-	receipt := &types.Receipt{Logs: []*types.Log{logA, logRejectedB, foreign}}
-
-	outcomes, err := reg.ActionOutcomes(context.Background(), receipt, []uuid.UUID{idA, idB, idC, idD, idE})
-	if err == nil {
-		t.Fatal("expected error for id E with actionState=None")
-	}
-	if !strings.Contains(err.Error(), "no outcome for action "+idE.String()) {
-		t.Errorf("err = %v, want no-outcome for %s", err, idE)
-	}
-	if outcomes != nil {
-		t.Errorf("outcomes on error = %v, want nil", outcomes)
-	}
-
-	// Перезапуск без E: все четыре исхода восстанавливаются.
-	fake.callN = 0
-	outcomes, err = reg.ActionOutcomes(context.Background(), receipt, []uuid.UUID{idA, idB, idC, idD})
+	outcomes, err := reg.LogOutcomes(&types.Receipt{Logs: []*types.Log{logA, logRejectedB, foreign}})
 	if err != nil {
-		t.Fatalf("ActionOutcomes: %v", err)
+		t.Fatalf("LogOutcomes: %v", err)
 	}
 	if !outcomes[idA].Applied {
 		t.Errorf("idA: want Applied from KeyRegistered log, got %+v", outcomes[idA])
@@ -257,19 +229,57 @@ func TestActionOutcomes(t *testing.T) {
 	if outcomes[idB] != (ActionOutcome{Reason: 6}) {
 		t.Errorf("idB: want Reason 6 from receipt log, got %+v", outcomes[idB])
 	}
-	if !outcomes[idC].Applied {
-		t.Errorf("idC: want Applied from actionState=1, got %+v", outcomes[idC])
+	if _, ok := outcomes[idC]; ok {
+		t.Errorf("foreign-address log must be ignored, got outcome for %s", idC)
 	}
-	if outcomes[idD] != (ActionOutcome{Reason: 5}) {
-		t.Errorf("idD: want Reason 5 from FilterLogs log, got %+v", outcomes[idD])
+}
+
+func TestRegistry_StateOutcome(t *testing.T) {
+	reg := newTestRegistry(t, &fakeCaller{})
+	rejected := reg.ABI().Events["ActionRejected"]
+	id := uuid.New()
+
+	// Applied: actionState=1.
+	fake := &fakeOutcomeCaller{states: [][]byte{actionStateOutput(t, 1)}}
+	reg.eth = fake
+	outcome, known, err := reg.StateOutcome(context.Background(), id)
+	if err != nil || !known || !outcome.Applied {
+		t.Fatalf("StateOutcome Applied: got (%+v, %v, %v)", outcome, known, err)
 	}
 
-	// Запрос FilterLogs: адрес реестра, topic0 = ActionRejected, topic1 = idD.
-	if len(fake.q.Addresses) != 1 || fake.q.Addresses[0] != addr {
-		t.Errorf("FilterLogs Addresses: got %v, want [%s]", fake.q.Addresses, addr)
+	// Rejected: actionState=2 → reason из ActionRejected-лога журнала реестра.
+	logRejected := types.Log{
+		Address: reg.Address(),
+		Topics:  []common.Hash{rejected.ID, leftTopic([16]byte(id))},
+		Data:    mustPack(t, rejected.Inputs.NonIndexed().Pack, uint8(5)),
 	}
-	if len(fake.q.Topics) != 2 || fake.q.Topics[0][0] != rejected.ID || fake.q.Topics[1][0] != leftTopic([16]byte(idD)) {
+	fake = &fakeOutcomeCaller{states: [][]byte{actionStateOutput(t, 2)}, logs: []types.Log{logRejected}}
+	reg.eth = fake
+	outcome, known, err = reg.StateOutcome(context.Background(), id)
+	if err != nil || !known {
+		t.Fatalf("StateOutcome Rejected: got (%+v, %v, %v)", outcome, known, err)
+	}
+	if outcome != (ActionOutcome{Reason: 5}) {
+		t.Errorf("StateOutcome Rejected: got %+v, want Reason 5", outcome)
+	}
+
+	// Запрос FilterLogs: адрес реестра, topic0 = ActionRejected, topic1 = id.
+	if len(fake.q.Addresses) != 1 || fake.q.Addresses[0] != reg.Address() {
+		t.Errorf("FilterLogs Addresses: got %v, want [%s]", fake.q.Addresses, reg.Address())
+	}
+	if len(fake.q.Topics) != 2 || fake.q.Topics[0][0] != rejected.ID || fake.q.Topics[1][0] != leftTopic([16]byte(id)) {
 		t.Errorf("FilterLogs Topics: got %v", fake.q.Topics)
+	}
+
+	// None: actionState=0 — контракт действие не знает.
+	fake = &fakeOutcomeCaller{states: [][]byte{actionStateOutput(t, 0)}}
+	reg.eth = fake
+	outcome, known, err = reg.StateOutcome(context.Background(), id)
+	if err != nil || known {
+		t.Fatalf("StateOutcome None: got (%+v, %v, %v), want (zero, false, nil)", outcome, known, err)
+	}
+	if outcome != (ActionOutcome{}) {
+		t.Errorf("StateOutcome None: got %+v, want zero outcome", outcome)
 	}
 }
 

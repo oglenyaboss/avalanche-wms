@@ -333,10 +333,10 @@ func TestParse_SignedAction_Errors(t *testing.T) {
 			want: "unsupported version",
 		},
 		{
-			name: "actionType 1",
-			env:  mutate(func(e map[string]any) { e["actionType"] = 1 }),
+			name: "actionType 7",
+			env:  mutate(func(e map[string]any) { e["actionType"] = 7 }),
 			id:   vec.ActionId,
-			want: "unsupported action type 1",
+			want: "unsupported action type 7",
 		},
 		{
 			name: "actionId != id header",
@@ -372,6 +372,126 @@ func TestParse_SignedAction_Errors(t *testing.T) {
 			}
 			m := makeKafkaMsg("wms.events.v1", id, key, "signed_action")
 			m.Value = value
+			_, err := Parse(&m)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// --- signed_action: складские действия (типы 1–4) ------------------------
+
+// warehouseEnvelope собирает конверт складского действия: подпись (keyId +
+// webauthn) берётся из вектора ключевого действия, детали — складские.
+// Возвращает конверт, hex keyId и webauthn-блок для проверок.
+func warehouseEnvelope(t *testing.T, actionID string, itemIDs []uuid.UUID) (map[string]any, string, map[string]any) {
+	t.Helper()
+	_, keyIDHex, keyEnv := loadKeyRegisterVector(t)
+	webauthn := keyEnv["webauthn"].(map[string]any)
+	items := make([]any, len(itemIDs))
+	for i, id := range itemIDs {
+		items[i] = id.String()
+	}
+	env := map[string]any{
+		"version":     1,
+		"actionId":    actionID,
+		"actionType":  1,
+		"itemIds":     items,
+		"detailsHash": "0x" + strings.Repeat("ab", 32),
+		"keyId":       keyIDHex,
+		"webauthn":    webauthn,
+	}
+	return env, keyIDHex, webauthn
+}
+
+func TestParse_SignedAction_WarehouseAction(t *testing.T) {
+	actionID := uuid.New()
+	item1, item2 := uuid.New(), uuid.New()
+	env, keyIDHex, webauthn := warehouseEnvelope(t, actionID.String(), []uuid.UUID{item1, item2})
+
+	m := signedActionKafkaMsg(t, actionID.String())
+	m.Value = encodeSignedActionValue(t, env)
+
+	got, err := Parse(&m)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.EventID != actionID {
+		t.Errorf("EventID: got %s, want %s", got.EventID, actionID)
+	}
+	if got.WarehouseAction == nil {
+		t.Fatal("WarehouseAction must be parsed for warehouse signed_action")
+	}
+	if got.Action != nil {
+		t.Errorf("key Action must stay nil, got %+v", got.Action)
+	}
+	w := got.WarehouseAction
+	if w.ActionId != [16]byte(actionID) {
+		t.Errorf("ActionId: got %x, want %x", w.ActionId, [16]byte(actionID))
+	}
+	if w.ActionType != 1 {
+		t.Errorf("ActionType: got %d, want 1", w.ActionType)
+	}
+	// Порядок itemIds сохранён, значения — UUIDToUint256 канонической строки UUID.
+	if len(w.ItemIds) != 2 {
+		t.Fatalf("ItemIds: got %d, want 2", len(w.ItemIds))
+	}
+	if w.ItemIds[0].Cmp(chain.UUIDToUint256(item1.String())) != 0 {
+		t.Errorf("ItemIds[0]: got %s, want %s", w.ItemIds[0], chain.UUIDToUint256(item1.String()))
+	}
+	if w.ItemIds[1].Cmp(chain.UUIDToUint256(item2.String())) != 0 {
+		t.Errorf("ItemIds[1]: got %s, want %s", w.ItemIds[1], chain.UUIDToUint256(item2.String()))
+	}
+	if w.DetailsHash != mustHex32(t, "0x"+strings.Repeat("ab", 32)) {
+		t.Errorf("DetailsHash: got %x", w.DetailsHash)
+	}
+	if w.KeyId != mustHex32(t, keyIDHex) {
+		t.Errorf("KeyId: got %x, want %x", w.KeyId, mustHex32(t, keyIDHex))
+	}
+	if w.Auth.R != mustHex32(t, webauthn["r"].(string)) || w.Auth.S != mustHex32(t, webauthn["s"].(string)) {
+		t.Errorf("Auth.R/S mismatch")
+	}
+	if w.Auth.ClientDataJSON != webauthn["clientDataJSON"].(string) {
+		t.Errorf("ClientDataJSON mismatch")
+	}
+}
+
+func TestParse_SignedAction_WarehouseErrors(t *testing.T) {
+	actionID := uuid.New()
+
+	cases := []struct {
+		name   string
+		mutate func(env map[string]any)
+		want   string
+	}{
+		{
+			name:   "missing detailsHash",
+			mutate: func(e map[string]any) { delete(e, "detailsHash") },
+			want:   "detailsHash",
+		},
+		{
+			name:   "invalid detailsHash hex",
+			mutate: func(e map[string]any) { e["detailsHash"] = "0xzz" },
+			want:   "detailsHash",
+		},
+		{
+			name: "invalid item uuid",
+			mutate: func(e map[string]any) {
+				e["itemIds"] = []any{uuid.New().String(), "not-a-uuid"}
+			},
+			want: "itemIds[1]",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, _, _ := warehouseEnvelope(t, actionID.String(), []uuid.UUID{uuid.New()})
+			tc.mutate(env)
+			m := signedActionKafkaMsg(t, actionID.String())
+			m.Value = encodeSignedActionValue(t, env)
 			_, err := Parse(&m)
 			if err == nil {
 				t.Fatal("expected error")

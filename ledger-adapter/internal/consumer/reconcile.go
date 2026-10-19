@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 
+	"ledger-adapter/internal/chain"
 	"ledger-adapter/internal/store"
 )
 
@@ -52,7 +53,7 @@ func reconcileReceipt(
 	ids []uuid.UUID,
 	txHash string,
 	aggregate string,
-	resolver ActionResolver,
+	resolvers []ActionResolver,
 	log *slog.Logger,
 ) (terminal bool, err error) {
 	receipt, err := ch.TransactionReceipt(ctx, common.HexToHash(txHash))
@@ -64,13 +65,13 @@ func reconcileReceipt(
 		return false, fmt.Errorf("reconcile receipt %s: %w", txHash, err)
 	}
 	if receipt.Status == types.ReceiptStatusSuccessful {
-		if aggregate == aggregateSignedAction && resolver != nil {
-			// Resolver-ошибка возвращается: строки остаются SENT, reconcile
+		if aggregate == aggregateSignedAction && len(resolvers) > 0 {
+			// Ошибка резолверов возвращается: строки остаются SENT, reconcile
 			// повторит их на следующем tick'е (не терминальный исход).
-			if err := applyActionOutcomes(ctx, resolver, st, receipt, ids, txHash); err != nil {
+			if err := applyActionOutcomes(ctx, resolvers, st, receipt, ids, txHash); err != nil {
 				return false, fmt.Errorf("reconcile action outcomes: %w", err)
 			}
-			log.Info("reconciled signed actions from registry", "tx", txHash, "n", len(ids))
+			log.Info("reconciled signed actions from contract", "tx", txHash, "n", len(ids))
 			return true, nil
 		}
 		if err := st.MarkCommitted(ctx, ids); err != nil {
@@ -90,19 +91,60 @@ func reconcileReceipt(
 	return true, nil
 }
 
-// applyActionOutcomes применяет исходы подписанных действий из receipt'а tx с
-// applyKeyActions: Applied → COMMITTED; отклонённые группируются по reason →
-// MarkRejected (FAILED + reject_reason, контракт §3). Ошибка resolver'а
-// возвращается наружу — строки остаются SENT, их подберёт следующий reconcile.
-func applyActionOutcomes(ctx context.Context, resolver ActionResolver, st terminalMarker, receipt *types.Receipt, ids []uuid.UUID, txHash string) error {
-	if resolver == nil {
-		// Достижимо: рестарт адаптера без REGISTRY_ADDR при живых SENT
-		// signed_action-строках — flusher их уже не отправит (без реестра действия
-		// терминально фейлятся), а reconcile дойдёт до их tx. Без этой проверки —
-		// panic на nil-интерфейсе в горутине; громкая ошибка вместо него.
-		return errors.New("apply action outcomes: registry not configured")
+// resolveActionOutcomes собирает исходы подписанных действий из receipt'а tx:
+// сначала логи всех контрактов-адресатов (reconcile знает только aggregate_type
+// 'signed_action', не то, в какой контракт ушла tx), затем для id без лога —
+// actionState каждого резолвера по порядку, первый найденный исход выигрывает
+// (ADR §6: повторная отправка застала действие уже занятым — лога в этом
+// receipt'е нет). id, который не знает ни один контракт, — ошибка: строки
+// остаются SENT, reconcile повторит их.
+func resolveActionOutcomes(ctx context.Context, resolvers []ActionResolver, receipt *types.Receipt, ids []uuid.UUID) (map[uuid.UUID]chain.ActionOutcome, error) {
+	outcomes := make(map[uuid.UUID]chain.ActionOutcome, len(ids))
+	for _, r := range resolvers {
+		fromLogs, err := r.LogOutcomes(receipt)
+		if err != nil {
+			return nil, err // резолвер уже даёт контекст (unpack/log source)
+		}
+		for id, o := range fromLogs {
+			if _, ok := outcomes[id]; !ok {
+				outcomes[id] = o
+			}
+		}
 	}
-	outcomes, err := resolver.ActionOutcomes(ctx, receipt, ids)
+	for _, id := range ids {
+		if _, ok := outcomes[id]; ok {
+			continue
+		}
+		for _, r := range resolvers {
+			o, known, err := r.StateOutcome(ctx, id)
+			if err != nil {
+				return nil, fmt.Errorf("action state %s: %w", id, err)
+			}
+			if known {
+				outcomes[id] = o
+				break
+			}
+		}
+		if _, ok := outcomes[id]; !ok {
+			return nil, fmt.Errorf("no on-chain outcome for action %s", id)
+		}
+	}
+	return outcomes, nil
+}
+
+// applyActionOutcomes применяет исходы подписанных действий из receipt'а tx:
+// Applied → COMMITTED; отклонённые группируются по reason → MarkRejected (FAILED +
+// reject_reason, контракт §3). Ошибка резолверов возвращается наружу — строки
+// остаются SENT, их подберёт следующий reconcile.
+func applyActionOutcomes(ctx context.Context, resolvers []ActionResolver, st terminalMarker, receipt *types.Receipt, ids []uuid.UUID, txHash string) error {
+	if len(resolvers) == 0 {
+		// Достижимо: рестарт адаптера без адресов контрактов действий при живых
+		// SENT signed_action-строках — flusher их уже не отправит (без контрактов
+		// действия терминально фейлятся), а reconcile дойдёт до их tx. Без этой
+		// проверки — panic на nil-интерфейсе в горутине; громкая ошибка вместо него.
+		return errors.New("apply action outcomes: action contracts not configured")
+	}
+	outcomes, err := resolveActionOutcomes(ctx, resolvers, receipt, ids)
 	if err != nil {
 		return fmt.Errorf("action outcomes: %w", err)
 	}
@@ -137,12 +179,15 @@ func applyActionOutcomes(ctx context.Context, resolver ActionResolver, st termin
 // результатом и подтягивается к нему. Только сверка-и-запись-вперёд: НИКОГДА не
 // переотправляет tx (это вернуло бы S2-поверхность, которую мы чиним).
 type Reconciler struct {
-	chain    receiptChecker
-	store    reconcileStore
-	registry ActionResolver // nil = signed_action-строки подтверждаются как COMMITTED без разбора
-	interval time.Duration
-	minAge   time.Duration
-	log      *slog.Logger
+	chain receiptChecker
+	store reconcileStore
+	// Резолверы исходов подписанных действий; оба nil = signed_action-строки
+	// подтверждаются как COMMITTED без разбора исходов.
+	warehouse ActionResolver
+	registry  ActionResolver
+	interval  time.Duration
+	minAge    time.Duration
+	log       *slog.Logger
 }
 
 // NewReconciler собирает фоновый reconciler. interval — период sweep'а; minAge —
@@ -155,10 +200,29 @@ func NewReconciler(ch receiptChecker, st reconcileStore, interval, minAge time.D
 	return &Reconciler{chain: ch, store: st, interval: interval, minAge: minAge, log: log}
 }
 
-// WithRegistry подключает разбор исходов подписанных действий. Возвращает r для цепочки.
+// WithRegistry подключает разбор исходов ключевых действий. Возвращает r для цепочки.
 func (r *Reconciler) WithRegistry(reg ActionResolver) *Reconciler {
 	r.registry = reg
 	return r
+}
+
+// WithWarehouseActions подключает разбор исходов складских действий. Возвращает r для цепочки.
+func (r *Reconciler) WithWarehouseActions(w ActionResolver) *Reconciler {
+	r.warehouse = w
+	return r
+}
+
+// actionResolvers — резолверы исходов подписанных действий: складские
+// (SignedMappingWMS) первым, затем реестр; nil'ы отфильтрованы.
+func (r *Reconciler) actionResolvers() []ActionResolver {
+	var resolvers []ActionResolver
+	if r.warehouse != nil {
+		resolvers = append(resolvers, r.warehouse)
+	}
+	if r.registry != nil {
+		resolvers = append(resolvers, r.registry)
+	}
+	return resolvers
 }
 
 // Run блокирует пока ctx не отменится, запуская sweep каждые interval.
@@ -203,7 +267,7 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	errCount := 0
 	for txHash, ids := range byTx {
 		// Один битый tx (например receipt RPC-блип) не должен останавливать sweep.
-		if _, err := reconcileReceipt(ctx, r.chain, r.store, ids, txHash, aggByTx[txHash], r.registry, r.log); err != nil {
+		if _, err := reconcileReceipt(ctx, r.chain, r.store, ids, txHash, aggByTx[txHash], r.actionResolvers(), r.log); err != nil {
 			errCount++
 			r.log.Error("reconcile tx failed", "tx", txHash, "err", err)
 		}
