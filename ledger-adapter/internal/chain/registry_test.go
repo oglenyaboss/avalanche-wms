@@ -37,7 +37,7 @@ func TestRegistry_GetKeyDecodes(t *testing.T) {
 		Qx:     [32]byte{1},
 		Qy:     [32]byte{2},
 		OrgId:  [16]byte{3},
-		Role:   2,
+		Role:   RoleOperator,
 		Active: false,
 	}
 	out, err := r.abi.Methods["getKey"].Outputs.Pack(want)
@@ -51,7 +51,7 @@ func TestRegistry_GetKeyDecodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetKey: %v", err)
 	}
-	if got.QX != want.Qx || got.QY != want.Qy || got.OrgID != want.OrgId || got.Role != 2 || got.Active {
+	if got.QX != want.Qx || got.QY != want.Qy || got.OrgID != want.OrgId || got.Role != RoleOperator || got.Active {
 		t.Fatalf("decoded = %+v", got)
 	}
 
