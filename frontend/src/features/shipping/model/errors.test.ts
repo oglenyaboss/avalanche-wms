@@ -44,4 +44,15 @@ describe('getShippingErrorMessage', () => {
       'Не удалось выполнить операцию',
     )
   })
+
+  it('maps the signed-ship codes to their texts when the message is missing', () => {
+    expect(
+      getShippingErrorMessage(axiosError(409, envelope('PICKING_NOT_CONFIRMED', ''))),
+    ).toBe(
+      'Сборка части товаров ещё не подтверждена в цепи. Повторите отгрузку чуть позже.',
+    )
+    expect(
+      getShippingErrorMessage(axiosError(409, envelope('DRAFT_STALE', ''))),
+    ).toBe('Состав буфера изменился, повторите отгрузку.')
+  })
 })
