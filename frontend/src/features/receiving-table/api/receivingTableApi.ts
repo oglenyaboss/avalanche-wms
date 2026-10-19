@@ -11,11 +11,14 @@ import type {
   ResolvedSku,
   ShortageBySku,
 } from '@/entities/cargoplace'
+import {
+  mapSignedOperationDraft,
+  toAssertionsBody,
+  type PartAssertion,
+  type SignedOperationDraft,
+  type SignedOperationDraftResponse,
+} from '@/entities/signed-action'
 import { apiClient } from '@/shared/api'
-
-import { mapSignedOperationDraft, toAssertionsBody } from './signedActionApi'
-import type { SignedOperationDraftResponse } from './signedActionApi'
-import type { PartAssertion, SignedOperationDraft } from '../model/types'
 
 // ── Wire shapes (snake_case, as returned by the WMS API) ────────────────────
 
