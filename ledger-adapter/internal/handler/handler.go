@@ -79,10 +79,11 @@ type txProofResponse struct {
 // TxProof does a single live receipt lookup (no polling) for an on-demand proof.
 //
 // SECURITY: this endpoint is intentionally UNAUTHENTICATED — the adapter has no
-// auth layer. It is safe only because the adapter port is container-internal
-// (private Docker network); the public-facing wms /onchain/tx/{hash} proxy is the
-// authenticated entry point (RequireAdminOrOperator). Do NOT expose this port
-// beyond the internal network without adding a shared-secret check.
+// auth layer. It is safe only because the adapter port is reachable only from
+// the private Docker network and the host loopback (compose publishes
+// 127.0.0.1:8085); the public-facing wms /onchain/tx/{hash} proxy is the
+// authenticated entry point (RequireAdminOrOperator). Do NOT publish this port
+// beyond loopback without adding a shared-secret check.
 func (h *Handler) TxProof(w http.ResponseWriter, r *http.Request) {
 	hash := r.PathValue("hash")
 	if !txHashRe.MatchString(hash) {
@@ -131,7 +132,7 @@ type registryKeyResponse struct {
 	Active bool   `json:"active"`
 }
 
-// RegistryKey — статус ключа в ConsortiumRegistry; без аутентификации, как TxProof (только внутренняя сеть).
+// RegistryKey — статус ключа в ConsortiumRegistry; без аутентификации, как TxProof (только внутренняя сеть и loopback хоста).
 func (h *Handler) RegistryKey(w http.ResponseWriter, r *http.Request) {
 	raw := r.PathValue("keyId")
 	if !keyIDRe.MatchString(raw) {
@@ -150,12 +151,12 @@ func (h *Handler) RegistryKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
 		return
 	}
-	if key.Role == 0 {
+	if key.Role == chain.RoleNone {
 		writeJSON(w, http.StatusOK, map[string]bool{"found": false})
 		return
 	}
 	role := "operator"
-	if key.Role == 1 {
+	if key.Role == chain.RoleAdmin {
 		role = "admin"
 	}
 	writeJSON(w, http.StatusOK, registryKeyResponse{

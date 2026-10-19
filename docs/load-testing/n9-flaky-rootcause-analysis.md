@@ -52,7 +52,7 @@ kafka-go v0.4.50 DEFAULTS (go.mod:9 pins v0.4.50; cache at
 - handler.go:24-33 `Health` always `WriteHeader(http.StatusOK)` (`// TODO(#50): add
   readiness probe checking pool/Kafka/RPC reachability`). Handler is `struct{}` (line 11),
   comment line 9-10 says readiness is a future extension.
-- main.go:78-86 launches the consumer goroutine; main.go:93 `srv := startHealthServer(...)`
+- main.go:78-86 launches the consumer goroutine; main.go:93 `srv := startHTTPServer(...)`
   is independent — the HTTP listener (main.go:120-125) comes up with no dependency on
   consumer group join. So /health 200 happens well before the partition is assigned.
 - The test only polls /health: onchain_helpers_test.go:197-198 `waitAdapterHealthy(...)`,

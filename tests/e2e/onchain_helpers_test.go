@@ -146,7 +146,7 @@ const adapterContainer = "ledger-adapter"
 // the sibling endpoints (kafka/wms/...) and leaves the adapter stopped+detached.
 const adapterNetwork = e2eProjectName + "_app_network"
 const adapterSharedVolume = e2eProjectName + "_shared_state"
-const adapterPortMap = "8085:8085"
+const adapterPortMap = "127.0.0.1:8085:8085"
 const adapterRestartPolicy = "on-failure"
 
 // adapterTimingVars are the four env knobs the scenarios tune. They are STRIPPED from

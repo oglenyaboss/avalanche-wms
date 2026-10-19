@@ -138,7 +138,7 @@ func TestRegistryKey_NotFound(t *testing.T) {
 
 func TestRegistryKey_ActiveAdmin(t *testing.T) {
 	orgID := uuid.MustParse("0190f2a0-0000-7000-8000-000000000a0a")
-	reg := stubRegistry{key: chain.RegistryKey{OrgID: orgID, Role: 1, Active: true}}
+	reg := stubRegistry{key: chain.RegistryKey{OrgID: orgID, Role: chain.RoleAdmin, Active: true}}
 	code, body := doRegistryKey(t, reg, validHash())
 	want := `{"found":true,"org_id":"0190f2a0-0000-7000-8000-000000000a0a","role":"admin","active":true}`
 	if code != http.StatusOK || body != want {
@@ -148,7 +148,7 @@ func TestRegistryKey_ActiveAdmin(t *testing.T) {
 
 func TestRegistryKey_RevokedOperator(t *testing.T) {
 	orgID := uuid.MustParse("0190f2a0-0000-7000-8000-000000000a0a")
-	reg := stubRegistry{key: chain.RegistryKey{OrgID: orgID, Role: 2, Active: false}}
+	reg := stubRegistry{key: chain.RegistryKey{OrgID: orgID, Role: chain.RoleOperator, Active: false}}
 	code, body := doRegistryKey(t, reg, validHash())
 	want := `{"found":true,"org_id":"0190f2a0-0000-7000-8000-000000000a0a","role":"operator","active":false}`
 	if code != http.StatusOK || body != want {
