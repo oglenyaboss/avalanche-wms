@@ -174,13 +174,13 @@ func TestSignedReceive_EndToEnd(t *testing.T) {
 	require.Equal(t, actionID, aggID, "event_id = aggregate_id = action_id")
 	require.Equal(t, "signed_action", aggType)
 
-	// Details from the CLOSE_CARGO log row: they must reproduce the on-chain detailsHash.
+	// Details from the CLOSE_CARGO log row and the action's salt: they must reproduce the on-chain detailsHash.
 	var saltBytes []byte
 	var detailsCargoplace string
 	var detailsOperator uuid.UUID
 	var occurredAt time.Time
 	err = env.db.QueryRow(ctx, `
-		SELECT wa.salt, rt.details->>'cargoplace_id', rt.operator_id, rt.occurred_at
+		SELECT wa.salt, rt.cargoplace_id::text, rt.operator_id, rt.occurred_at
 		FROM public.warehouse_actions wa
 		JOIN wms_ops.receiving_table rt ON rt.operation_id = wa.operation_id
 		WHERE wa.operation_id = $1 AND rt.action = 'CLOSE_CARGO'
@@ -222,7 +222,8 @@ func TestSignedReceive_EndToEnd(t *testing.T) {
 
 	actionAppliedTopic := crypto.Keccak256Hash([]byte("ActionApplied(bytes16,bytes32,bytes16,uint8,bytes32,uint256)"))
 	itemMovedTopic := crypto.Keccak256Hash([]byte("ItemMoved(uint256,bytes16,uint8)"))
-	actionIDTopic := common.BytesToHash(append(make([]byte, 16), actionID[:]...))
+	var actionIDTopic common.Hash
+	copy(actionIDTopic[:16], actionID[:])
 
 	appliedFound := false
 	movedByItem := map[uuid.UUID]bool{}
