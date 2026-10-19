@@ -52,7 +52,7 @@ func (f *Flusher) Confirm(ctx context.Context, tx *InflightTx) error {
 		return f.recordFailure(ctx, tx.Msgs, tx.IDs, tx.TxHash.Hex(), "execution reverted")
 	}
 	if tx.Aggregate == aggregateSignedAction {
-		if err := applyActionOutcomes(ctx, f.registry, f.store, receipt, tx.IDs, tx.TxHash.Hex()); err != nil {
+		if err := applyActionOutcomes(ctx, f.actionResolvers(), f.store, receipt, tx.IDs, tx.TxHash.Hex()); err != nil {
 			return fmt.Errorf("apply action outcomes: %w", err)
 		}
 		f.log.Info("signed actions resolved from receipt", "tx", tx.TxHash.Hex(), "size", len(tx.IDs))

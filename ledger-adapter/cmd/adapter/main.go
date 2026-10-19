@@ -88,32 +88,45 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	// Один ethclient для read-only резолверов подписанных действий: складские
+	// (SignedMappingWMS) всегда, реестр (ConsortiumRegistry) — при заданном
+	// REGISTRY_ADDR. Отдельно от signer-клиента: резолверам нужен только
+	// contractCaller (eth_call + чтение логов).
+	ec, err := ethclient.Dial(cfg.RpcURL)
+	if err != nil {
+		return fmt.Errorf("resolver dial: %w", err)
+	}
+	defer ec.Close()
+
+	// Складские действия уходят через applyActions на CONTRACT_ADDR — резолвер
+	// строится всегда, исходы разбираются из его receipt'ов.
+	warehouse := chain.NewWarehouseActions(ec, common.HexToAddress(cfg.ContractAddr))
+
 	// Интерфейсная переменная: при незаданном REGISTRY_ADDR реестр остаётся nil-интерфейсом
 	// (typed-nil указатель внутри интерфейса не равен nil и обошёл бы проверку в handler).
-	// Строится ДО flusher/reconciler: подписанные действия уходят через
+	// Строится ДО flusher/reconciler: ключевые действия уходят через
 	// applyKeyActions на этот адрес, исходы разбираются из его receipt'ов.
 	var registry handler.RegistryReader
-	var actionResolver consumer.ActionResolver
+	var registryResolver consumer.ActionResolver
 	if cfg.RegistryAddr != "" {
-		ec, err := ethclient.Dial(cfg.RpcURL)
-		if err != nil {
-			return fmt.Errorf("registry dial: %w", err)
-		}
-		defer ec.Close()
 		reg, err := chain.NewRegistry(ec, common.HexToAddress(cfg.RegistryAddr))
 		if err != nil {
 			return fmt.Errorf("registry: %w", err)
 		}
 		registry = reg
-		actionResolver = reg
+		registryResolver = reg
 	}
 
 	brokers := strings.Split(cfg.KafkaBrokers, ",")
 	prod := dlq.NewProducer(brokers, cfg.DLQTopic)
 	defer func() { _ = prod.Close() }()
 
-	flusher := consumer.NewFlusher(client, repo, prod, cfg.ReceiptPollTimeout, log).WithRegistry(actionResolver)
-	reconciler := consumer.NewReconciler(client, repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log).WithRegistry(actionResolver)
+	flusher := consumer.NewFlusher(client, repo, prod, cfg.ReceiptPollTimeout, log).
+		WithWarehouseActions(warehouse).
+		WithRegistry(registryResolver)
+	reconciler := consumer.NewReconciler(client, repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log).
+		WithWarehouseActions(warehouse).
+		WithRegistry(registryResolver)
 
 	g, gCtx := errgroup.WithContext(rootCtx)
 	g.Go(func() error {
