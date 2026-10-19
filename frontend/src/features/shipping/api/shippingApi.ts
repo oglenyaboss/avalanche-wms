@@ -6,6 +6,13 @@ import type {
   ShippingBufferProduct,
   ShippingDestination,
 } from '@/entities/shipping'
+import {
+  mapSignedOperationDraft,
+  toAssertionsBody,
+  type PartAssertion,
+  type SignedOperationDraft,
+  type SignedOperationDraftResponse,
+} from '@/entities/signed-action'
 import { apiClient } from '@/shared/api'
 
 // ── Wire shapes (snake_case, as returned by the WMS API) ────────────────────
@@ -71,6 +78,12 @@ interface ShipResponse {
   orders_partially_shipped: number
   dispatch_departed: boolean
   buffer_remaining: number
+}
+
+// ship/submit result: today's ship result plus the id of the signed operation
+// that performed it.
+interface ShipSubmitResponse extends ShipResponse {
+  operation_id: string
 }
 
 // ── Mappers ─────────────────────────────────────────────────────────────────
@@ -143,10 +156,13 @@ export interface ShipParams {
   productIds?: string[]
 }
 
-// Ship the buffer (bulk) or the listed products (spot): marks them SHIPPED,
-// writes shippings + outbox events, advances orders, and departs the dispatch if
-// the buffer emptied.
-export async function ship(params: ShipParams): Promise<ShipResult> {
+// Drafts the signed ship operation (bulk or spot, same semantics as the old
+// /shipping/ship). Errors: today's ship errors (BUFFER_EMPTY,
+// DESTINATION_MISMATCH, DISPATCH_NOT_AT_GATE, ...) plus PICKING_NOT_CONFIRMED
+// and SIGNER_KEY_NOT_ACTIVE.
+export async function draftShip(
+  params: ShipParams,
+): Promise<SignedOperationDraft> {
   const body: {
     buffer_bin_id: string
     dispatch_id: string
@@ -160,9 +176,25 @@ export async function ship(params: ShipParams): Promise<ShipResult> {
     body.product_ids = params.productIds
   }
 
-  const { data } = await apiClient.post<ApiEnvelope<ShipResponse>>(
-    '/shipping/ship',
-    body,
+  const { data } = await apiClient.post<
+    ApiEnvelope<SignedOperationDraftResponse>
+  >('/shipping/ship/draft', body)
+
+  return mapSignedOperationDraft(unwrap(data))
+}
+
+// Submits the per-part assertions produced by signOperation. Extra errors:
+// DRAFT_STALE, OPERATION_ALREADY_SUBMITTED, INVALID_ASSERTION.
+export async function submitShip(
+  operationId: string,
+  assertions: PartAssertion[],
+): Promise<ShipResult> {
+  const { data } = await apiClient.post<ApiEnvelope<ShipSubmitResponse>>(
+    '/shipping/ship/submit',
+    {
+      operation_id: operationId,
+      assertions: toAssertionsBody(assertions),
+    },
   )
 
   const result = unwrap(data)
@@ -174,5 +206,6 @@ export async function ship(params: ShipParams): Promise<ShipResult> {
     ordersPartiallyShipped: result.orders_partially_shipped,
     dispatchDeparted: result.dispatch_departed,
     bufferRemaining: result.buffer_remaining,
+    operationId: result.operation_id,
   }
 }

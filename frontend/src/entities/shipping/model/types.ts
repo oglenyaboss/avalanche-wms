@@ -63,6 +63,7 @@ export interface DispatchInfo {
 // ship result: how the buffer and orders moved after a bulk or spot ship.
 // dispatchDeparted is true when the buffer emptied and the dispatch became
 // DEPARTED; bufferRemaining is the count still READY_TO_SHIP in the buffer's zone.
+// operationId is the signed ship operation — it drives the chain-status panel.
 export interface ShipResult {
   productsShipped: number
   outboxEventsCreated: number
@@ -70,4 +71,5 @@ export interface ShipResult {
   ordersPartiallyShipped: number
   dispatchDeparted: boolean
   bufferRemaining: number
+  operationId: string
 }
