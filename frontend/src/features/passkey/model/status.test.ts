@@ -32,7 +32,7 @@ describe('rejectReasonText', () => {
   })
 
   it('falls back to the raw code for unknown reasons and to a neutral text for null', () => {
-    expect(rejectReasonText(12)).toBe('Код 12')
+    expect(rejectReasonText(99)).toBe('Код 99')
     expect(rejectReasonText(null)).toBe('Причина неизвестна')
   })
 })

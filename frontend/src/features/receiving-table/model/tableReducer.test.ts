@@ -188,7 +188,7 @@ describe('tableReducer / buffer and finish', () => {
     expect(state.summary).toBeNull()
   })
 
-  it('CARGOPLACE_CLOSED stores the summary without leaving the buffer phase', () => {
+  it('CARGOPLACE_CLOSED stores the summary and operation id without leaving the buffer phase', () => {
     const summary: CloseCargoplaceSummary = {
       productsReceived: 2,
       productsExpected: 3,
@@ -201,10 +201,12 @@ describe('tableReducer / buffer and finish', () => {
     const state = tableReducer(atBuffer, {
       type: 'CARGOPLACE_CLOSED',
       summary,
+      operationId: '01929c5e-op-1',
     })
 
     expect(state.phase).toBe('buffer')
     expect(state.summary?.shortage).toBe(1)
+    expect(state.operationId).toBe('01929c5e-op-1')
   })
 
   it('FINISH resets and reports the shortage summary message', () => {
@@ -215,7 +217,11 @@ describe('tableReducer / buffer and finish', () => {
       shortageBySku: [],
     }
     let state = tableReducer(openBox(), { type: 'GO_TO_BUFFER' })
-    state = tableReducer(state, { type: 'CARGOPLACE_CLOSED', summary })
+    state = tableReducer(state, {
+      type: 'CARGOPLACE_CLOSED',
+      summary,
+      operationId: '01929c5e-op-1',
+    })
     state = tableReducer(state, { type: 'FINISH' })
 
     expect(state.phase).toBe('cargoplace')
@@ -232,7 +238,11 @@ describe('tableReducer / buffer and finish', () => {
       shortageBySku: [],
     }
     let state = tableReducer(openBox(), { type: 'GO_TO_BUFFER' })
-    state = tableReducer(state, { type: 'CARGOPLACE_CLOSED', summary })
+    state = tableReducer(state, {
+      type: 'CARGOPLACE_CLOSED',
+      summary,
+      operationId: '01929c5e-op-2',
+    })
     state = tableReducer(state, { type: 'FINISH' })
 
     expect(state.successMessage).toContain('Принято 3 из 3')

@@ -1,19 +1,16 @@
-import type { AssertionJSON, KeyActionDraft } from './types'
+// WebAuthn browser-API glue for passkey registration. The assertion
+// (signing) half — base64url codecs, getRequest options, getAssertion — lives
+// in @/shared/lib because the signed-action flow signs with the same
+// primitives; those pieces are re-exported to keep this module's consumers
+// (usePasskey, tests) stable.
+import { base64urlToBuffer, bufferToBase64url } from '@/shared/lib'
 
-export function base64urlToBuffer(s: string): ArrayBuffer {
-  const base64 = s.replace(/-/g, '+').replace(/_/g, '/')
-  const binary = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return bytes.buffer
-}
-
-export function bufferToBase64url(b: ArrayBuffer | Uint8Array): string {
-  const bytes = b instanceof Uint8Array ? b : new Uint8Array(b)
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
+export {
+  base64urlToBuffer,
+  bufferToBase64url,
+  getAssertion,
+  toRequestOptions,
+} from '@/shared/lib'
 
 export interface CreationOptionsJSON
   extends Omit<PublicKeyCredentialCreationOptions, 'challenge' | 'user' | 'excludeCredentials'> {
@@ -47,19 +44,6 @@ export function toCreationOptions(json: CreationOptionsJSON): PublicKeyCredentia
   }
 }
 
-export function toRequestOptions(draft: KeyActionDraft): PublicKeyCredentialRequestOptions {
-  return {
-    challenge: base64urlToBuffer(draft.challenge),
-    rpId: draft.rpId,
-    allowCredentials: draft.allowCredentials.map((c) => ({
-      type: c.type,
-      id: base64urlToBuffer(c.id),
-    })),
-    userVerification: draft.userVerification,
-    timeout: draft.timeout,
-  }
-}
-
 export function credentialToJSON(cred: PublicKeyCredential): RegistrationResponseJSON {
   const response = cred.response as AuthenticatorAttestationResponse
   const json: RegistrationResponseJSON = {
@@ -85,22 +69,6 @@ export async function createPasskeyCredential(
     throw new Error('Браузер не вернул ключ')
   }
   return credentialToJSON(cred)
-}
-
-export async function getAssertion(
-  options: PublicKeyCredentialRequestOptions
-): Promise<AssertionJSON> {
-  const cred = await navigator.credentials.get({ publicKey: options })
-  if (!(cred instanceof PublicKeyCredential)) {
-    throw new Error('Браузер не вернул подпись')
-  }
-  const response = cred.response as AuthenticatorAssertionResponse
-  return {
-    credentialId: bufferToBase64url(cred.rawId),
-    authenticatorData: bufferToBase64url(response.authenticatorData),
-    clientDataJson: bufferToBase64url(response.clientDataJSON),
-    signature: bufferToBase64url(response.signature),
-  }
 }
 
 export function webauthnErrorText(e: unknown): string | null {
