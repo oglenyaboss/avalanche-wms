@@ -387,7 +387,7 @@ PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  
 8. `errgroup.WithContext(rootCtx)` — две goroutine:
    - **g1 (Consumer):** `consumer.NewConsumer(brokers, "wms.events.v1", cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, tlog).Run(gCtx)` — одна goroutine, один топик.
    - **g2 (Reconciler):** `reconciler.Run(gCtx)`.
-9. `startHealthServer(log, cfg.Port)` — `http.Server` на `:8085`, `ReadHeaderTimeout=5s`.
+9. `startHTTPServer(log, cfg.Port)` — `http.Server` на `:8085`, `ReadHeaderTimeout=5s`.
 10. На `SIGTERM`/`SIGINT`: отмена контекста → Consumer `finalFlush` (5s) → `g.Wait()` → `srv.Shutdown` (10s).
 
 ---

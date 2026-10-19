@@ -244,7 +244,7 @@ NNNN_<описание>_down.sql  # откат
 ## Docker
 
 - `Dockerfile` (с заглавной `D`) — стандартное имя
-- Multi-stage build: builder + runtime
+- Multi-stage build: builder + runtime. Исключение: runtime-образ без этапа сборки может быть одноэтапным (пример — `deploy/jmx/Dockerfile` на `eclipse-temurin`, собирать там нечего)
 - Runtime образ минимальный (alpine)
 - Не хранить секреты в Dockerfile
 - `.env` файлы — через `docker-compose.yaml` environment с фоллбеками
