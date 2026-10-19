@@ -109,6 +109,8 @@ type shipData struct {
 	OrdersPartiallyShipped int  `json:"orders_partially_shipped"`
 	DispatchDeparted       bool `json:"dispatch_departed"`
 	BufferRemaining        int  `json:"buffer_remaining"`
+	// #15: the signed operation id, echoed by /shipping/ship/submit.
+	OperationID string `json:"operation_id"`
 }
 
 // productIDsFromTasks extracts product ids from a task list response.

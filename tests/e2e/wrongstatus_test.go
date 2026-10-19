@@ -78,11 +78,7 @@ func TestWrongStatus_ShipDispatchNotAtGate(t *testing.T) {
 	fixture := newOutboundFixture(t, ctx, env) // dispatch is SCHEDULED
 	shipBinID := resolveBinID(t, ctx, env, "BIN-SHIP-7")
 
-	status, code, _ := postExpectError(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": shipBinID.String(),
-		"dispatch_id":   fixture.DispatchID.String(),
-		"product_ids":   []string{},
-	})
+	status, code := draftShipRaw(t, env, token, shipBinID.String(), fixture.DispatchID.String(), []string{})
 	require.Equal(t, http.StatusConflict, status)
 	require.Equal(t, "DISPATCH_NOT_AT_GATE", code)
 }

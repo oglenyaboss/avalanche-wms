@@ -337,8 +337,9 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 //
 // Pure-HTTP / DB-contract test: newMultiProductFixture inserts synthetic STORED products
 // with no chain history, so their picking/shipping events revert on-chain and never COMMIT.
-// The WMS commits its DB transaction before the chain is touched and the ship path is not
-// chain-gated, so the HTTP flow succeeds and every assertion is DB-only.
+// The WMS commits its DB transaction before the chain is touched; the strict ship gate
+// (#15) is primed with a committed legacy picking row (markPickingConfirmed), so the HTTP
+// flow succeeds and every assertion is DB-only.
 func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -376,7 +377,10 @@ func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 	requireProductStatus(t, ctx, env, p1, "READY_TO_SHIP")
 	requireProductStatus(t, ctx, env, p2, "ALLOCATED")
 
-	// Bring the dispatch to the gate and ship P1 only.
+	// Bring the dispatch to the gate and ship P1 only (signed spot action). The
+	// fixture product never gets a committed picking event on chain (see the
+	// header comment), so prime the strict ship gate (#15) first.
+	markPickingConfirmed(t, ctx, env, []uuid.UUID{p1})
 	postJSON[map[string]any](t, env, op.token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 	}, nil)
@@ -386,12 +390,7 @@ func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 	}, &driver)
 	require.Equal(t, "AT_GATE", driver.Status)
 
-	var shipped shipData
-	postJSON(t, env, op.token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   []string{p1.String()},
-	}, &shipped)
+	shipped, _ := shipSigned(t, env, op, fx.ShippingBinID.String(), fx.DispatchID.String(), []uuid.UUID{p1})
 	require.Equal(t, 1, shipped.ProductsShipped)
 	require.Equal(t, 0, shipped.OrdersCompleted, "order is not complete — P2 never shipped")
 	require.Equal(t, 1, shipped.OrdersPartiallyShipped, "order moves to PARTIALLY_SHIPPED, not stranded ALLOCATED")

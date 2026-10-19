@@ -56,6 +56,11 @@ func TestPartialShipment_MofN(t *testing.T) {
 	require.Equal(t, productCount, placed.ProductsPlaced)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 
+	// Fixture shortcut: these products never get a committed picking event on
+	// chain (see the header comment), so prime the strict ship gate (#15) with
+	// committed legacy picking rows before drafting the signed ship.
+	markPickingConfirmed(t, ctx, env, parseProductIDs(t, orderProductIDs))
+
 	// Bring the dispatch to the gate.
 	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
@@ -69,14 +74,9 @@ func TestPartialShipment_MofN(t *testing.T) {
 	firstBatch := orderProductIDs[:productCount-1] // M = N-1
 	remainder := orderProductIDs[productCount-1:]  // the last one
 
-	// 1) Ship the first M: the order must NOT complete and the dispatch must NOT depart
-	//    while the remainder is still staged.
-	var firstShip shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   firstBatch,
-	}, &firstShip)
+	// 1) Ship the first M as a signed spot action: the order must NOT complete and
+	//    the dispatch must NOT depart while the remainder is still staged.
+	firstShip, _ := shipSigned(t, env, op, fx.ShippingBinID.String(), fx.DispatchID.String(), parseProductIDs(t, firstBatch))
 	require.Equal(t, len(firstBatch), firstShip.ProductsShipped)
 	require.Equal(t, 0, firstShip.OrdersCompleted, "order must not complete while products remain")
 	require.Equal(t, 1, firstShip.OrdersPartiallyShipped, "order flips to PARTIALLY_SHIPPED after a partial ship (#48)")
@@ -98,13 +98,9 @@ func TestPartialShipment_MofN(t *testing.T) {
 		requireProductStatus(t, ctx, env, parsed, "READY_TO_SHIP")
 	}
 
-	// 2) Ship the remainder: now the order completes and the dispatch departs.
-	var finalShip shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   remainder,
-	}, &finalShip)
+	// 2) Ship the remainder as a signed spot action: now the order completes and
+	//    the dispatch departs.
+	finalShip, _ := shipSigned(t, env, op, fx.ShippingBinID.String(), fx.DispatchID.String(), parseProductIDs(t, remainder))
 	require.Equal(t, len(remainder), finalShip.ProductsShipped)
 	require.Equal(t, 1, finalShip.OrdersCompleted, "order completes once its last product ships")
 	require.True(t, finalShip.DispatchDeparted)

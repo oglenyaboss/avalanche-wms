@@ -440,14 +440,11 @@ func TestFullChain_MultiProduct(t *testing.T) {
 	require.Equal(t, fx.DispatchID, driver.DispatchID)
 	require.Equal(t, "AT_GATE", driver.Status)
 
-	var shipped shipData
-	postJSON(t, env, op.token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   orderProductIDs,
-	}, &shipped)
+	// Ship: a signed spot action of the order's products; <2000 products draft
+	// into one part.
+	shipped, _ := shipSigned(t, env, op, fx.ShippingBinID.String(), fx.DispatchID.String(), parseProductIDs(t, orderProductIDs))
 	require.Equal(t, productCount, shipped.ProductsShipped)
-	require.Equal(t, productCount, shipped.OutboxEventsCreated)
+	require.Equal(t, 1, shipped.OutboxEventsCreated, "a bin of <2000 products ships with exactly one signed part")
 	require.Equal(t, 1, shipped.OrdersCompleted)
 	require.True(t, shipped.DispatchDeparted)
 	require.Equal(t, 0, shipped.BufferRemaining)
@@ -550,12 +547,8 @@ func TestFullChain_PartialShip(t *testing.T) {
 	shippedBatch := orderProductIDs[:2]   // P1, P2
 	unshippedBatch := orderProductIDs[2:] // P3
 
-	var shipped shipData
-	postJSON(t, env, op.token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   shippedBatch,
-	}, &shipped)
+	// Ship a signed spot action of the first two products.
+	shipped, _ := shipSigned(t, env, op, fx.ShippingBinID.String(), fx.DispatchID.String(), parseProductIDs(t, shippedBatch))
 	require.Equal(t, 2, shipped.ProductsShipped)
 	require.Equal(t, 0, shipped.OrdersCompleted, "order must not complete while products remain")
 	require.Equal(t, 1, shipped.OrdersPartiallyShipped, "order flips to PARTIALLY_SHIPPED after a partial ship (#48)")

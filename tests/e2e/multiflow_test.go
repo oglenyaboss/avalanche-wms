@@ -103,6 +103,10 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 		requireProductStatus(t, ctx, env, parsed, "READY_TO_SHIP")
 	}
 
+	// Fixture shortcut: pre-STORED products never get a committed picking event
+	// on chain (see the header comment), so prime the strict ship gate (#15).
+	markPickingConfirmed(t, ctx, env, parseProductIDs(t, allProductIDs))
+
 	// 5. Scan buffer + driver: bring fx1's dispatch to AT_GATE.
 	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx1.ShippingBinID.String(),
@@ -116,13 +120,9 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 	require.Equal(t, "AT_GATE", driver.Status)
 	requireDispatchStatus(t, ctx, env, fx1.DispatchID, "AT_GATE")
 
-	// 6. Ship all products with fx1's dispatch. Both orders complete, dispatch departs.
-	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx1.ShippingBinID.String(),
-		"dispatch_id":   fx1.DispatchID.String(),
-		"product_ids":   allProductIDs,
-	}, &shipped)
+	// 6. Ship all products as a signed spot action with fx1's dispatch. Both orders
+	//    complete, dispatch departs.
+	shipped, _ := shipSigned(t, env, op, fx1.ShippingBinID.String(), fx1.DispatchID.String(), parseProductIDs(t, allProductIDs))
 	require.Equal(t, 2, shipped.ProductsShipped)
 	require.GreaterOrEqual(t, shipped.OrdersCompleted, 2)
 	require.True(t, shipped.DispatchDeparted)

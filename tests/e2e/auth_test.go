@@ -111,7 +111,8 @@ func TestAuth_OperatorOnlyEndpoints(t *testing.T) {
 		{"assembly scan-shipping-buffer submit", "/assembly/scan-shipping-buffer/submit", map[string]string{"operation_id": uuid.NewString()}},
 		{"shipping scan-buffer", "/shipping/scan-buffer", map[string]string{"buffer_bin_id": uuid.NewString()}},
 		{"shipping scan-driver", "/shipping/scan-driver", map[string]string{"dispatch_code": "DSP-AUTH-" + uuid.NewString()[:8]}},
-		{"shipping ship", "/shipping/ship", map[string]string{"buffer_bin_id": uuid.NewString(), "dispatch_id": uuid.NewString()}},
+		{"shipping ship draft", "/shipping/ship/draft", map[string]string{"buffer_bin_id": uuid.NewString(), "dispatch_id": uuid.NewString()}},
+		{"shipping ship submit", "/shipping/ship/submit", map[string]string{"operation_id": uuid.NewString()}},
 	}
 
 	for _, ep := range endpoints {

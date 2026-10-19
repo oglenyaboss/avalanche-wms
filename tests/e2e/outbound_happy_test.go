@@ -172,14 +172,11 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	require.Equal(t, "AT_GATE", driver.Status)
 	requireDispatchStatus(t, ctx, env, fixture.DispatchID, "AT_GATE")
 
-	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fixture.ShippingBinID.String(),
-		"dispatch_id":   fixture.DispatchID.String(),
-		"product_ids":   productIDs,
-	}, &shipped)
+	// Ship: a signed spot action by the signed operator (any active key may sign
+	// a warehouse action); the <2000-product bin drafts into one part.
+	shipped, _ := shipSigned(t, env, op, fixture.ShippingBinID.String(), fixture.DispatchID.String(), parseProductIDs(t, productIDs))
 	require.Equal(t, len(productIDs), shipped.ProductsShipped)
-	require.Equal(t, len(productIDs), shipped.OutboxEventsCreated)
+	require.Equal(t, 1, shipped.OutboxEventsCreated, "a bin of <2000 products ships with exactly one signed part")
 	require.GreaterOrEqual(t, shipped.OrdersCompleted, 1)
 	require.True(t, shipped.DispatchDeparted)
 	require.Equal(t, 0, shipped.BufferRemaining)
