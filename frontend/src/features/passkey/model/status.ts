@@ -10,7 +10,7 @@ const STATUS_LABELS: Record<PasskeyStatus, string> = {
   PENDING: 'Ожидает подтверждения',
   ACTIVE: 'Активен в цепи',
   REJECTED: 'Отклонён',
-  REVOKED: 'Отозван',
+  REVOKED: 'Отозван в цепи',
 }
 
 export function passkeyStatusLabel(status: PasskeyStatus): string {
@@ -26,16 +26,40 @@ export function pendingKeyHint(role: PasskeyRole): string {
   return PENDING_HINTS[role]
 }
 
+// Action-type-specific confirmation texts: 5 = KeyRegister, 6 = KeyRevoke.
+interface ConfirmationLabels {
+  SENT: string
+  APPLIED: string
+  rejectedPrefix: string
+  FAILED: string
+}
+
+const CONFIRMATION_LABELS: Record<number, ConfirmationLabels> = {
+  5: {
+    SENT: 'Отправлено в цепь',
+    APPLIED: 'Подтверждено в цепи',
+    rejectedPrefix: 'Отклонено',
+    FAILED: 'Не удалось записать в цепь',
+  },
+  6: {
+    SENT: 'Отзыв отправлен в цепь',
+    APPLIED: 'Отозван в цепи',
+    rejectedPrefix: 'Отзыв отклонён',
+    FAILED: 'Не удалось записать отзыв в цепь',
+  },
+}
+
 export function confirmationText(c: KeyConfirmation): string {
+  const labels = CONFIRMATION_LABELS[c.actionType] ?? CONFIRMATION_LABELS[5]
   switch (c.state) {
     case 'SENT':
-      return 'Отправлено в цепь'
+      return labels.SENT
     case 'APPLIED':
-      return 'Подтверждено в цепи'
+      return labels.APPLIED
     case 'REJECTED':
-      return `Отклонено: ${rejectReasonText(c.rejectReason)}`
+      return `${labels.rejectedPrefix}: ${rejectReasonText(c.rejectReason)}`
     case 'FAILED':
-      return 'Не удалось записать в цепь'
+      return labels.FAILED
   }
 }
 

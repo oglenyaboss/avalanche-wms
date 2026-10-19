@@ -4,6 +4,7 @@ import { isAxiosError } from 'axios'
 import {
   beginRegistration,
   draftKeyConfirmation,
+  draftKeyRevoke,
   finishRegistration,
   getAdminKeyExport,
   getMyPasskey,
@@ -14,6 +15,7 @@ import {
 import { createPasskeyCredential, getAssertion, toCreationOptions, toRequestOptions } from './webauthn'
 import { downloadAdminKey } from './exportFile'
 import { passkeyErrorText } from './errors'
+import type { KeyActionDraft } from './types'
 
 const COLD_LOAD_RETRIES = 2
 
@@ -60,15 +62,32 @@ export function useRegisterPasskey() {
   })
 }
 
+// Draft → passkey signature → submit, shared by key confirm and key revoke:
+// only the draft endpoint differs between the two actions.
+async function signKeyAction(
+  draftFn: (targetKeyId: string) => Promise<KeyActionDraft>,
+  targetKeyId: string
+) {
+  const draft = await draftFn(targetKeyId)
+  const assertion = await getAssertion(toRequestOptions(draft))
+  return submitKeyConfirmation(draft.actionId, assertion)
+}
+
 export function useConfirmKey() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationKey: ['passkey', 'confirmKey'],
-    mutationFn: async (keyId: string) => {
-      const draft = await draftKeyConfirmation(keyId)
-      const assertion = await getAssertion(toRequestOptions(draft))
-      return submitKeyConfirmation(draft.actionId, assertion)
-    },
+    mutationFn: (keyId: string) => signKeyAction(draftKeyConfirmation, keyId),
+    retry: false,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['passkey'] }),
+  })
+}
+
+export function useRevokeKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: ['passkey', 'revokeKey'],
+    mutationFn: (keyId: string) => signKeyAction(draftKeyRevoke, keyId),
     retry: false,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['passkey'] }),
   })
