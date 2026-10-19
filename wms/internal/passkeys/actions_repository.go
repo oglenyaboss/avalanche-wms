@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"wms/internal/domain"
+	"wms/internal/signedaction"
 )
 
 // InsertKeyAction stores a draft of a signed key action.
@@ -69,30 +70,13 @@ func (r *Repository) LatestConfirmations(ctx context.Context, orgID uuid.UUID) (
 		if err := rows.Scan(&credID, &c.ActionID, &status, &reason); err != nil {
 			return nil, fmt.Errorf("passkeys.Repository.LatestConfirmations scan: %w", err)
 		}
-		c.State, c.RejectReason = confirmationState(status, reason)
+		c.State, c.RejectReason = signedaction.ConfirmationStateOf(status, reason)
 		out[string(credID)] = c
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("passkeys.Repository.LatestConfirmations rows: %w", err)
 	}
 	return out, nil
-}
-
-func confirmationState(status *string, reason *int16) (ConfirmationState, *int16) {
-	if status == nil {
-		return ConfirmationSent, nil
-	}
-	switch *status {
-	case "COMMITTED":
-		return ConfirmationApplied, nil
-	case "FAILED":
-		if reason != nil {
-			return ConfirmationRejected, reason
-		}
-		return ConfirmationFailed, nil
-	default: // PENDING, SENT
-		return ConfirmationSent, nil
-	}
 }
 
 // keyActionInFlight reports whether the latest submitted key action for the
@@ -114,8 +98,8 @@ func keyActionInFlight(ctx context.Context, q pgx.Tx, targetCredentialID []byte)
 	if err != nil {
 		return false, fmt.Errorf("passkeys.Repository.keyActionInFlight: %w", err)
 	}
-	state, _ := confirmationState(status, reason)
-	return state == ConfirmationSent || state == ConfirmationApplied, nil
+	state, _ := signedaction.ConfirmationStateOf(status, reason)
+	return state == signedaction.ConfirmationSent || state == signedaction.ConfirmationApplied, nil
 }
 
 // SubmitKeyAction submits a drafted key action in one transaction: it locks the

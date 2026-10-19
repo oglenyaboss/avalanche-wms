@@ -28,20 +28,10 @@ type KeyAction struct {
 	SubmittedAt        *time.Time
 }
 
-// ConfirmationState is the derived chain confirmation of a submitted key action.
-type ConfirmationState string
-
-const (
-	ConfirmationSent     ConfirmationState = "SENT"
-	ConfirmationApplied  ConfirmationState = "APPLIED"
-	ConfirmationRejected ConfirmationState = "REJECTED"
-	ConfirmationFailed   ConfirmationState = "FAILED"
-)
-
 // KeyConfirmation is the confirmation state of the latest submitted action for a key.
 type KeyConfirmation struct {
 	ActionID     uuid.UUID
-	State        ConfirmationState
+	State        signedaction.ConfirmationState
 	RejectReason *int16
 }
 
@@ -73,16 +63,9 @@ func (s *Service) DraftKeyRegister(ctx context.Context, userID uuid.UUID, target
 	}
 	orgID := *member.OrgID
 
-	signer, err := s.repo.LatestPasskey(ctx, userID)
+	signer, err := s.ActiveSigner(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("passkeys.Service.DraftKeyRegister signer: %w", err)
-	}
-	if signer == nil {
-		return nil, ErrPasskeyNotFound
-	}
-	s.syncStatus(ctx, signer)
-	if signer.Status != domain.PasskeyStatusActive {
-		return nil, ErrSignerKeyNotActive
+		return nil, err
 	}
 
 	target, err := s.pendingOperatorTarget(ctx, orgID, targetKeyID)
@@ -164,7 +147,7 @@ func (s *Service) pendingOperatorTarget(ctx context.Context, orgID uuid.UUID, ta
 	if err != nil {
 		return nil, fmt.Errorf("passkeys.Service.pendingOperatorTarget confirmations: %w", err)
 	}
-	if c, ok := confirmations[string(target.CredentialID)]; ok && (c.State == ConfirmationSent || c.State == ConfirmationApplied) {
+	if c, ok := confirmations[string(target.CredentialID)]; ok && (c.State == signedaction.ConfirmationSent || c.State == signedaction.ConfirmationApplied) {
 		return nil, ErrActionInProgress
 	}
 	return target, nil
@@ -224,33 +207,46 @@ func (s *Service) SubmitKeyAction(ctx context.Context, userID, actionID uuid.UUI
 	}); err != nil {
 		return nil, fmt.Errorf("passkeys.Service.SubmitKeyAction submit: %w", err)
 	}
-	return &KeyConfirmation{ActionID: actionID, State: ConfirmationSent}, nil
+	return &KeyConfirmation{ActionID: actionID, State: signedaction.ConfirmationSent}, nil
+}
+
+// ActiveSigner returns the caller's latest passkey when it is ACTIVE in the
+// on-chain registry; it signs every draft this user creates.
+func (s *Service) ActiveSigner(ctx context.Context, userID uuid.UUID) (*domain.Passkey, error) {
+	signer, err := s.repo.LatestPasskey(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("passkeys.Service.ActiveSigner: %w", err)
+	}
+	if signer == nil {
+		return nil, ErrPasskeyNotFound
+	}
+	s.syncStatus(ctx, signer)
+	if signer.Status != domain.PasskeyStatusActive {
+		return nil, ErrSignerKeyNotActive
+	}
+	return signer, nil
+}
+
+// RelyingParty returns the WebAuthn RP ID and allowed origins of this service.
+func (s *Service) RelyingParty() (rpID string, origins []string) {
+	return s.wa.Config.RPID, s.wa.Config.RPOrigins
 }
 
 // keyActionEnvelope matches the exact JSON keys of the signed-action envelope
 // (contract §2) for a key action: no itemIds, no detailsHash.
 type keyActionEnvelopeDoc struct {
-	Version    int              `json:"version"`
-	ActionID   string           `json:"actionId"`
-	ActionType uint8            `json:"actionType"`
-	ItemIDs    []string         `json:"itemIds"`
-	SubjectKey subjectKeyJSON   `json:"subjectKey"`
-	KeyID      string           `json:"keyId"`
-	WebAuthn   webauthnAuthJSON `json:"webauthn"`
+	Version    int                           `json:"version"`
+	ActionID   string                        `json:"actionId"`
+	ActionType uint8                         `json:"actionType"`
+	ItemIDs    []string                      `json:"itemIds"`
+	SubjectKey subjectKeyJSON                `json:"subjectKey"`
+	KeyID      string                        `json:"keyId"`
+	WebAuthn   signedaction.EnvelopeWebAuthn `json:"webauthn"`
 }
 
 type subjectKeyJSON struct {
 	QX string `json:"qx"`
 	QY string `json:"qy"`
-}
-
-type webauthnAuthJSON struct {
-	AuthenticatorData string `json:"authenticatorData"`
-	ClientDataJSON    string `json:"clientDataJSON"`
-	ChallengeIndex    int    `json:"challengeIndex"`
-	TypeIndex         int    `json:"typeIndex"`
-	R                 string `json:"r"`
-	S                 string `json:"s"`
 }
 
 func keyActionEnvelope(action *KeyAction, target *domain.Passkey, signerKeyID [32]byte, wa signedaction.WebAuthn) keyActionEnvelopeDoc {
@@ -261,19 +257,12 @@ func keyActionEnvelope(action *KeyAction, target *domain.Passkey, signerKeyID [3
 		ItemIDs:    []string{},
 		SubjectKey: subjectKeyJSON{QX: hexCoordinate(target.QX), QY: hexCoordinate(target.QY)},
 		KeyID:      hexCoordinate(signerKeyID),
-		WebAuthn: webauthnAuthJSON{
-			AuthenticatorData: "0x" + hex.EncodeToString(wa.AuthenticatorData),
-			ClientDataJSON:    wa.ClientDataJSON,
-			ChallengeIndex:    wa.ChallengeIndex,
-			TypeIndex:         wa.TypeIndex,
-			R:                 "0x" + hex.EncodeToString(wa.R[:]),
-			S:                 "0x" + hex.EncodeToString(wa.S[:]),
-		},
+		WebAuthn:   signedaction.NewEnvelopeWebAuthn(wa),
 	}
 }
 
 func hexCoordinate(v [32]byte) string {
-	return "0x" + hex.EncodeToString(v[:])
+	return signedaction.Hex32(v)
 }
 
 // parseKeyID accepts "0x" followed by 64 hex characters.

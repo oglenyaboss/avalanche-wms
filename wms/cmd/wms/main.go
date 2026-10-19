@@ -27,6 +27,7 @@ import (
 	"wms/internal/putaway"
 	"wms/internal/receiving"
 	"wms/internal/shipping"
+	"wms/internal/signedops"
 )
 
 func main() {
@@ -128,6 +129,9 @@ func main() {
 	passkeysSvc := passkeys.NewService(passkeysRepo, waAuth, keyStatus)
 	passkeysHandler := passkeys.NewHandler(passkeysSvc)
 
+	signedopsRepo := signedops.NewRepository(dbPool)
+	signedopsHandler := signedops.NewHandler(signedopsRepo)
+
 	// Router
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
@@ -172,6 +176,10 @@ func main() {
 	passkeysRouter := r.PathPrefix("/passkeys").Subrouter()
 	passkeysRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	passkeysHandler.RegisterRoutes(passkeysRouter)
+
+	signedActionsRouter := r.PathPrefix("/signed-actions").Subrouter()
+	signedActionsRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	signedopsHandler.RegisterRoutes(signedActionsRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {

@@ -54,13 +54,6 @@ func (h *Handler) RejectKey(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true})
 }
 
-type submitKeyActionRequest struct {
-	CredentialID      string `json:"credential_id"`
-	AuthenticatorData string `json:"authenticator_data"`
-	ClientDataJSON    string `json:"client_data_json"`
-	Signature         string `json:"signature"`
-}
-
 func (h *Handler) SubmitKeyAction(w http.ResponseWriter, r *http.Request) {
 	userID, ok := httputil.RequireAdmin(w, r)
 	if !ok {
@@ -72,12 +65,12 @@ func (h *Handler) SubmitKeyAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxActionBodyBytes)
-	var body submitKeyActionRequest
+	var body signedaction.AssertionRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
 		return
 	}
-	assertion, err := decodeAssertion(body)
+	assertion, err := body.Decode()
 	if err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", msgInvalidRequest)
 		return
@@ -88,34 +81,6 @@ func (h *Handler) SubmitKeyAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, httputil.Envelope{Success: true, Data: toConfirmationView(confirmation)})
-}
-
-// decodeAssertion decodes the four base64url (no padding) body fields the way
-// navigator.credentials.get returns them.
-func decodeAssertion(body submitKeyActionRequest) (signedaction.Assertion, error) {
-	decode := base64.RawURLEncoding.DecodeString
-	credID, err := decode(body.CredentialID)
-	if err != nil {
-		return signedaction.Assertion{}, err
-	}
-	authData, err := decode(body.AuthenticatorData)
-	if err != nil {
-		return signedaction.Assertion{}, err
-	}
-	cdj, err := decode(body.ClientDataJSON)
-	if err != nil {
-		return signedaction.Assertion{}, err
-	}
-	sig, err := decode(body.Signature)
-	if err != nil {
-		return signedaction.Assertion{}, err
-	}
-	return signedaction.Assertion{
-		CredentialID:      credID,
-		AuthenticatorData: authData,
-		ClientDataJSON:    cdj,
-		Signature:         sig,
-	}, nil
 }
 
 type coordinateView struct {

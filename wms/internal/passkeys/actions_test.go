@@ -121,7 +121,7 @@ func (f *actionFixture) assertion(t *testing.T, action *KeyAction) signedaction.
 func submitRequestBody(t *testing.T, a signedaction.Assertion) string {
 	t.Helper()
 	enc := base64.RawURLEncoding.EncodeToString
-	raw, err := json.Marshal(submitKeyActionRequest{
+	raw, err := json.Marshal(signedaction.AssertionRequest{
 		CredentialID:      enc(a.CredentialID),
 		AuthenticatorData: enc(a.AuthenticatorData),
 		ClientDataJSON:    enc(a.ClientDataJSON),
@@ -214,7 +214,7 @@ func TestDraftKeyRegister_Errors(t *testing.T) {
 		f := newActionFixture(t)
 		f.repo.latestConfirmationsFn = func(context.Context, uuid.UUID) (map[string]KeyConfirmation, error) {
 			return map[string]KeyConfirmation{
-				string(f.target.CredentialID): {State: ConfirmationSent},
+				string(f.target.CredentialID): {State: signedaction.ConfirmationSent},
 			}, nil
 		}
 		if _, err := f.svc.DraftKeyRegister(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrActionInProgress) {
@@ -269,7 +269,7 @@ func TestRejectKey_Errors(t *testing.T) {
 		f := newActionFixture(t)
 		f.repo.latestConfirmationsFn = func(context.Context, uuid.UUID) (map[string]KeyConfirmation, error) {
 			return map[string]KeyConfirmation{
-				string(f.target.CredentialID): {State: ConfirmationSent},
+				string(f.target.CredentialID): {State: signedaction.ConfirmationSent},
 			}, nil
 		}
 		if err := f.svc.RejectKey(context.Background(), adminA, targetKeyID(f.target)); !errors.Is(err, ErrActionInProgress) {
@@ -335,7 +335,7 @@ func TestSubmitKeyAction_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitKeyAction: %v", err)
 	}
-	if confirmation.ActionID != action.ActionID || confirmation.State != ConfirmationSent {
+	if confirmation.ActionID != action.ActionID || confirmation.State != signedaction.ConfirmationSent {
 		t.Fatalf("confirmation = %+v, want SENT of %s", confirmation, action.ActionID)
 	}
 	if len(f.submissions) != 1 {
@@ -476,7 +476,7 @@ func TestOrganization_FillsConfirmation(t *testing.T) {
 	actionID := uuid.MustParse("01929c5e-6f00-7000-8000-000000001001")
 	repo.latestConfirmationsFn = func(context.Context, uuid.UUID) (map[string]KeyConfirmation, error) {
 		return map[string]KeyConfirmation{
-			string(target.CredentialID): {ActionID: actionID, State: ConfirmationRejected, RejectReason: int16Ptr(6)},
+			string(target.CredentialID): {ActionID: actionID, State: signedaction.ConfirmationRejected, RejectReason: int16Ptr(6)},
 		}, nil
 	}
 	svc := newTestService(t, repo, nil)
@@ -490,7 +490,7 @@ func TestOrganization_FillsConfirmation(t *testing.T) {
 		byUser[m.UserID] = m
 	}
 	operator := byUser[operatorA]
-	if operator.Confirmation == nil || operator.Confirmation.State != ConfirmationRejected || operator.Confirmation.RejectReason == nil || *operator.Confirmation.RejectReason != 6 || operator.Confirmation.ActionID != actionID {
+	if operator.Confirmation == nil || operator.Confirmation.State != signedaction.ConfirmationRejected || operator.Confirmation.RejectReason == nil || *operator.Confirmation.RejectReason != 6 || operator.Confirmation.ActionID != actionID {
 		t.Fatalf("operator confirmation = %+v, want REJECTED reason 6", operator.Confirmation)
 	}
 	if byUser[adminA].Confirmation != nil {
@@ -676,7 +676,7 @@ func TestHandler_NewErrorMapping(t *testing.T) {
 			name: "ACTION_IN_PROGRESS",
 			setup: func(f *actionFixture) {
 				f.repo.latestConfirmationsFn = func(context.Context, uuid.UUID) (map[string]KeyConfirmation, error) {
-					return map[string]KeyConfirmation{string(f.target.CredentialID): {State: ConfirmationSent}}, nil
+					return map[string]KeyConfirmation{string(f.target.CredentialID): {State: signedaction.ConfirmationSent}}, nil
 				}
 			},
 			run: func(f *actionFixture) *httptest.ResponseRecorder {
