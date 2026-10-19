@@ -26,8 +26,10 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	// 2. Log in to WMS and build a dedicated per-run fixture (shipment, cargoplace,
-	//    bins, SKU, NEW order, SCHEDULED dispatch) so re-runs stay deterministic.
+	// 2. Build a dedicated per-run fixture (shipment, cargoplace, bins, SKU, NEW
+	//    order, SCHEDULED dispatch) so re-runs stay deterministic, and provision a
+	//    signed operator for the receiving steps: the close is a signed action now.
+	op := newSignedOperator(t, ctx, env)
 	token := login(t, env)
 	fixture := newOutboundFixture(t, ctx, env)
 	requireOrderStatus(t, ctx, env, fixture.OrderID, "NEW")
@@ -38,20 +40,20 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	stageEventIDs := map[string][]uuid.UUID{}
 
 	// 3. Scan the cargoplace at the receiving table so it moves to TABLE_IN_PROGRESS.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 	}, nil)
 
 	// 4. Scan the box, SKU barcode, and QR code; scan-qr creates the product.
 	var box scanBoxData
-	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_barcode":   fixture.BoxBarcode,
 	}, &box)
 	require.Equal(t, "OPEN", box.Status)
 
 	var sku scanSKUData
-	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"barcode":       fixture.Barcode,
@@ -59,7 +61,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	require.Equal(t, fixture.SKUID, sku.SKUID)
 
 	var scannedProduct scanQRData
-	postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"sku_id":        sku.SKUID.String(),
@@ -69,21 +71,18 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	requireProductStatus(t, ctx, env, scannedProduct.ProductID, "RECEIVED")
 
 	// 5. Close box, move to receiving buffer, close cargoplace, wait for receiving on-chain.
-	postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
 		"box_id": box.BoxID.String(),
 	}, nil)
 
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
 
-	var closeCP closeCargoplaceData
-	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
-		"cargoplace_id": fixture.CargoplaceID.String(),
-	}, &closeCP)
+	closeCP := closeCargoplaceSigned(t, env, op, fixture.CargoplaceID.String())
 	require.Equal(t, "TABLE_CLOSED", closeCP.Status)
-	require.Equal(t, 1, closeCP.OutboxEventsCreated)
+	require.Equal(t, 1, closeCP.OutboxEventsCreated, "a cargoplace of <2000 products closes with exactly one signed part")
 	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "receiving"))
 
 	receivingEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "receiving")

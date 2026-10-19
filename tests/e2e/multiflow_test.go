@@ -163,6 +163,7 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 	require.NotNil(t, env)
 
 	token := operatorToken(t, env)
+	op := newSignedOperator(t, ctx, env)
 
 	// ── Fixture: CREATED shipment with 3 EXPECTED cargoplaces ────────────
 	suf := shortSuffix()
@@ -303,13 +304,13 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 	// ── Table phase: process CP1 only ────────────────────────────────────
 
 	// scan-cargoplace at the table: RECEIVED_AT_GATE -> TABLE_IN_PROGRESS.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 	}, nil)
 
 	// scan-box: create a box inside CP1.
 	var box scanBoxData
-	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 		"box_barcode":   boxBarcode,
 	}, &box)
@@ -317,7 +318,7 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 
 	// scan-sku: identify the SKU by its barcode.
 	var sku scanSKUData
-	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 		"box_id":        box.BoxID.String(),
 		"barcode":       outboundSeedBarcode,
@@ -325,7 +326,7 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 
 	// scan-qr: create the product inside the box.
 	var scannedProduct scanQRData
-	postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 		"box_id":        box.BoxID.String(),
 		"sku_id":        sku.SKUID.String(),
@@ -335,21 +336,18 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 	requireProductStatus(t, ctx, env, scannedProduct.ProductID, "RECEIVED")
 
 	// close-box -> scan-buffer -> close-cargoplace.
-	postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
 		"box_id": box.BoxID.String(),
 	}, nil)
 
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 		"buffer_bin_id": receivingBinID.String(),
 	}, nil)
 
-	var closeCP closeCargoplaceData
-	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
-		"cargoplace_id": cpIDs[0].String(),
-	}, &closeCP)
+	closeCP := closeCargoplaceSigned(t, env, op, cpIDs[0].String())
 	require.Equal(t, "TABLE_CLOSED", closeCP.Status)
-	require.Equal(t, 1, closeCP.OutboxEventsCreated)
+	require.Equal(t, 1, closeCP.OutboxEventsCreated, "a cargoplace of <2000 products closes with exactly one signed part")
 
 	// Per-product outbox assertion: the product created via scan-qr should have
 	// exactly 1 receiving outbox event.

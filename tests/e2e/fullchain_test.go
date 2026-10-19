@@ -30,16 +30,16 @@ const (
 // through the real receiving and putaway flows and verified on-chain at each
 // stage.
 type fullChainFixture struct {
-	OrderID       uuid.UUID
-	OrderNo       string
-	DispatchID    uuid.UUID
-	DispatchCode  string
-	DestinationID uuid.UUID
-	ShippingBinID uuid.UUID
-	StorageBinID  uuid.UUID
+	OrderID        uuid.UUID
+	OrderNo        string
+	DispatchID     uuid.UUID
+	DispatchCode   string
+	DestinationID  uuid.UUID
+	ShippingBinID  uuid.UUID
+	StorageBinID   uuid.UUID
 	ReceivingBinID uuid.UUID
-	SKUID         uuid.UUID
-	ProductIDs    []uuid.UUID
+	SKUID          uuid.UUID
+	ProductIDs     []uuid.UUID
 	// Per-product event IDs for chain ordering assertions; indices match ProductIDs.
 	ReceivingEventIDs []uuid.UUID
 	PutawayEventIDs   []uuid.UUID
@@ -130,7 +130,7 @@ func setupReceivingScaffold(t *testing.T, ctx context.Context, env *env, product
 // productCount products through the real receiving and putaway flows, verifying
 // on-chain state at each stage. The returned fixture has all products in STORED
 // status with PutAway(2) confirmed on-chain.
-func newFullChainFixture(t *testing.T, ctx context.Context, env *env, token string, productCount, orderQty int) fullChainFixture {
+func newFullChainFixture(t *testing.T, ctx context.Context, env *env, op *signedOperator, productCount, orderQty int) fullChainFixture {
 	t.Helper()
 
 	suf := shortSuffix()
@@ -189,13 +189,13 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, token stri
 	productIDs := make([]uuid.UUID, 0, productCount)
 
 	// Scan the cargoplace at the receiving table.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 	}, nil)
 
 	// Open a single box for all products (same SKU).
 	var box scanBoxData
-	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"box_barcode":   boxBarcode,
 	}, &box)
@@ -203,7 +203,7 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, token stri
 
 	// Scan SKU once (same barcode for all products).
 	var sku scanSKUData
-	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"barcode":       outboundSeedBarcode,
@@ -218,7 +218,7 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, token stri
 		// per product within the same box).
 		if i > 0 {
 			var skuAgain scanSKUData
-			postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+			postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 				"cargoplace_id": sc.CargoplaceID.String(),
 				"box_id":        box.BoxID.String(),
 				"barcode":       outboundSeedBarcode,
@@ -226,7 +226,7 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, token stri
 		}
 
 		var scanned scanQRData
-		postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+		postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 			"cargoplace_id": sc.CargoplaceID.String(),
 			"box_id":        box.BoxID.String(),
 			"sku_id":        sku.SKUID.String(),
@@ -238,21 +238,18 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, token stri
 	}
 
 	// Close box, scan buffer, close cargoplace.
-	postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
 		"box_id": box.BoxID.String(),
 	}, nil)
 
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
 
-	var closeCP closeCargoplaceData
-	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
-		"cargoplace_id": sc.CargoplaceID.String(),
-	}, &closeCP)
+	closeCP := closeCargoplaceSigned(t, env, op, sc.CargoplaceID.String())
 	require.Equal(t, "TABLE_CLOSED", closeCP.Status)
-	require.Equal(t, productCount, closeCP.OutboxEventsCreated, "close-cargoplace should create %d outbox events", productCount)
+	require.Equal(t, 1, closeCP.OutboxEventsCreated, "a cargoplace of <2000 products closes with exactly one signed part")
 
 	// 4. Wait for all receiving events on-chain.
 	receivingEventIDs := make([]uuid.UUID, productCount)
@@ -265,21 +262,21 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, token stri
 	}
 
 	// 5. Putaway all products: scan-buffer -> scan-product x N -> scan-storage-bin.
-	postJSON[map[string]any](t, env, token, "/putaway/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/putaway/scan-buffer", map[string]string{
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
 
 	pidStrings := make([]string, productCount)
 	for i, pid := range productIDs {
 		pidStrings[i] = pid.String()
-		postJSON[map[string]any](t, env, token, "/putaway/scan-product", map[string]string{
+		postJSON[map[string]any](t, env, op.token, "/putaway/scan-product", map[string]string{
 			"product_id":    pid.String(),
 			"buffer_bin_id": sc.ReceivingBinID.String(),
 		}, nil)
 	}
 
 	var putaway scanStorageBinData
-	postJSON(t, env, token, "/putaway/scan-storage-bin", map[string]any{
+	postJSON(t, env, op.token, "/putaway/scan-storage-bin", map[string]any{
 		"product_ids":    pidStrings,
 		"storage_bin_id": sc.StorageBinID.String(),
 	}, &putaway)
@@ -358,8 +355,8 @@ func TestFullChain_MultiProduct(t *testing.T) {
 	require.NotNil(t, env)
 
 	const productCount = 3
-	token := operatorToken(t, env)
-	fx := newFullChainFixture(t, ctx, env, token, productCount, productCount)
+	op := newSignedOperator(t, ctx, env)
+	fx := newFullChainFixture(t, ctx, env, op, productCount, productCount)
 
 	// At this point all products are STORED and PutAway(2) on-chain.
 	requireOrderStatus(t, ctx, env, fx.OrderID, "NEW")
@@ -372,7 +369,7 @@ func TestFullChain_MultiProduct(t *testing.T) {
 
 	// ── Allocate ──
 	var allocated allocateData
-	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+	postJSON(t, env, op.token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
 	}, &allocated)
 	require.GreaterOrEqual(t, allocated.AllocatedOrders, 1)
@@ -381,7 +378,7 @@ func TestFullChain_MultiProduct(t *testing.T) {
 
 	// Retrieve tasks and verify all fixture products are present.
 	var tasks taskListData
-	getJSON(t, env, token, "/assembly/tasks?destination_id="+url.QueryEscape(fx.DestinationID.String()), &tasks)
+	getJSON(t, env, op.token, "/assembly/tasks?destination_id="+url.QueryEscape(fx.DestinationID.String()), &tasks)
 	taskProductSet := map[string]struct{}{}
 	for _, task := range tasks.Tasks {
 		taskProductSet[task.ProductID] = struct{}{}
@@ -400,7 +397,7 @@ func TestFullChain_MultiProduct(t *testing.T) {
 		requireTaskStatus(t, ctx, env, parsed, "PENDING")
 
 		var picked pickData
-		postJSON(t, env, token, "/assembly/pick", map[string]string{
+		postJSON(t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, &picked)
 		require.Equal(t, pid, picked.ProductID)
@@ -418,7 +415,7 @@ func TestFullChain_MultiProduct(t *testing.T) {
 
 	// ── Scan shipping buffer → order ASSEMBLED ──
 	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
+	postJSON(t, env, op.token, "/assembly/scan-shipping-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 	}, &placed)
 	require.Equal(t, productCount, placed.ProductsPlaced)
@@ -431,19 +428,19 @@ func TestFullChain_MultiProduct(t *testing.T) {
 	}
 
 	// ── Ship ──
-	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 	}, nil)
 
 	var driver scanDriverData
-	postJSON(t, env, token, "/shipping/scan-driver", map[string]string{
+	postJSON(t, env, op.token, "/shipping/scan-driver", map[string]string{
 		"dispatch_code": fx.DispatchCode,
 	}, &driver)
 	require.Equal(t, fx.DispatchID, driver.DispatchID)
 	require.Equal(t, "AT_GATE", driver.Status)
 
 	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
+	postJSON(t, env, op.token, "/shipping/ship", map[string]any{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 		"dispatch_id":   fx.DispatchID.String(),
 		"product_ids":   orderProductIDs,
@@ -487,8 +484,8 @@ func TestFullChain_PartialShip(t *testing.T) {
 	require.NotNil(t, env)
 
 	const productCount = 3
-	token := operatorToken(t, env)
-	fx := newFullChainFixture(t, ctx, env, token, productCount, productCount)
+	op := newSignedOperator(t, ctx, env)
+	fx := newFullChainFixture(t, ctx, env, op, productCount, productCount)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "NEW")
 
 	stageEventIDs := map[string][]uuid.UUID{
@@ -498,7 +495,7 @@ func TestFullChain_PartialShip(t *testing.T) {
 
 	// ── Allocate ──
 	var allocated allocateData
-	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+	postJSON(t, env, op.token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
 	}, &allocated)
 	require.GreaterOrEqual(t, allocated.AllocatedOrders, 1)
@@ -513,7 +510,7 @@ func TestFullChain_PartialShip(t *testing.T) {
 		require.NoError(t, err)
 
 		var picked pickData
-		postJSON(t, env, token, "/assembly/pick", map[string]string{
+		postJSON(t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, &picked)
 		require.Equal(t, i+1, picked.CartSize)
@@ -528,19 +525,19 @@ func TestFullChain_PartialShip(t *testing.T) {
 
 	// ── Scan shipping buffer → order ASSEMBLED ──
 	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
+	postJSON(t, env, op.token, "/assembly/scan-shipping-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 	}, &placed)
 	require.Equal(t, productCount, placed.ProductsPlaced)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 
 	// ── Partial ship: ship P1 and P2 only ──
-	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 	}, nil)
 
 	var driver scanDriverData
-	postJSON(t, env, token, "/shipping/scan-driver", map[string]string{
+	postJSON(t, env, op.token, "/shipping/scan-driver", map[string]string{
 		"dispatch_code": fx.DispatchCode,
 	}, &driver)
 	require.Equal(t, "AT_GATE", driver.Status)
@@ -549,7 +546,7 @@ func TestFullChain_PartialShip(t *testing.T) {
 	unshippedBatch := orderProductIDs[2:] // P3
 
 	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
+	postJSON(t, env, op.token, "/shipping/ship", map[string]any{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 		"dispatch_id":   fx.DispatchID.String(),
 		"product_ids":   shippedBatch,
@@ -601,14 +598,14 @@ func TestFullChain_MultiBoxReceiving(t *testing.T) {
 	require.NotNil(t, env)
 
 	const productCount = 3
-	token := operatorToken(t, env)
+	op := newSignedOperator(t, ctx, env)
 	suf := shortSuffix()
 
 	// Create the scaffold with expected_qty = productCount.
 	sc := setupReceivingScaffold(t, ctx, env, productCount)
 
 	// Scan the cargoplace at the table.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 	}, nil)
 
@@ -619,21 +616,21 @@ func TestFullChain_MultiBoxReceiving(t *testing.T) {
 		qrCode := fmt.Sprintf("QR-R2-%s-%d", suf, i)
 
 		var box scanBoxData
-		postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+		postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 			"cargoplace_id": sc.CargoplaceID.String(),
 			"box_barcode":   boxBarcode,
 		}, &box)
 		require.Equal(t, "OPEN", box.Status, "box %d should be OPEN", i)
 
 		var sku scanSKUData
-		postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+		postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 			"cargoplace_id": sc.CargoplaceID.String(),
 			"box_id":        box.BoxID.String(),
 			"barcode":       outboundSeedBarcode,
 		}, &sku)
 
 		var scanned scanQRData
-		postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+		postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 			"cargoplace_id": sc.CargoplaceID.String(),
 			"box_id":        box.BoxID.String(),
 			"sku_id":        sku.SKUID.String(),
@@ -642,23 +639,20 @@ func TestFullChain_MultiBoxReceiving(t *testing.T) {
 		require.Equal(t, "RECEIVED", scanned.Status, "product %d should be RECEIVED", i)
 		productIDs = append(productIDs, scanned.ProductID)
 
-		postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
+		postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
 			"box_id": box.BoxID.String(),
 		}, nil)
 	}
 
 	// Scan buffer and close cargoplace.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
 
-	var closeCP closeCargoplaceData
-	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
-		"cargoplace_id": sc.CargoplaceID.String(),
-	}, &closeCP)
+	closeCP := closeCargoplaceSigned(t, env, op, sc.CargoplaceID.String())
 	require.Equal(t, "TABLE_CLOSED", closeCP.Status)
-	require.Equal(t, productCount, closeCP.OutboxEventsCreated, "should create %d outbox events", productCount)
+	require.Equal(t, 1, closeCP.OutboxEventsCreated, "a cargoplace of <2000 products closes with exactly one signed part")
 
 	// Wait for all receiving events on-chain → Accepted(1).
 	for i, pid := range productIDs {
@@ -705,25 +699,26 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 
 	const productCount = 3
 	token := operatorToken(t, env)
+	op := newSignedOperator(t, ctx, env)
 	suf := shortSuffix()
 
 	// Create the receiving scaffold.
 	sc := setupReceivingScaffold(t, ctx, env, productCount)
 
 	// Drive receiving: scan-cargoplace → (scan-box, scan-sku, scan-qr) × N → close-box → scan-buffer → close-cargoplace.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 	}, nil)
 
 	boxBarcode := "BOX-P2-" + suf
 	var box scanBoxData
-	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"box_barcode":   boxBarcode,
 	}, &box)
 
 	var sku scanSKUData
-	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"barcode":       outboundSeedBarcode,
@@ -735,7 +730,7 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 
 		if i > 0 {
 			var skuAgain scanSKUData
-			postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+			postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 				"cargoplace_id": sc.CargoplaceID.String(),
 				"box_id":        box.BoxID.String(),
 				"barcode":       outboundSeedBarcode,
@@ -743,7 +738,7 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 		}
 
 		var scanned scanQRData
-		postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+		postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 			"cargoplace_id": sc.CargoplaceID.String(),
 			"box_id":        box.BoxID.String(),
 			"sku_id":        sku.SKUID.String(),
@@ -753,21 +748,18 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 		productIDs = append(productIDs, scanned.ProductID)
 	}
 
-	postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
 		"box_id": box.BoxID.String(),
 	}, nil)
 
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
 
-	var closeCP closeCargoplaceData
-	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
-		"cargoplace_id": sc.CargoplaceID.String(),
-	}, &closeCP)
+	closeCP := closeCargoplaceSigned(t, env, op, sc.CargoplaceID.String())
 	require.Equal(t, "TABLE_CLOSED", closeCP.Status)
-	require.Equal(t, productCount, closeCP.OutboxEventsCreated)
+	require.Equal(t, 1, closeCP.OutboxEventsCreated, "a cargoplace of <2000 products closes with exactly one signed part")
 
 	// Wait for receiving events on-chain before proceeding to putaway.
 	for i, pid := range productIDs {

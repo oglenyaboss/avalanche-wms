@@ -54,11 +54,6 @@ type scanQRData struct {
 	Status    string    `json:"status"`
 }
 
-type closeCargoplaceData struct {
-	OutboxEventsCreated int    `json:"outbox_events_created"`
-	Status              string `json:"status"`
-}
-
 type scanStorageBinData struct {
 	OutboxEventsCreated int `json:"outbox_events_created"`
 	ProductsPlaced      int `json:"products_placed"`

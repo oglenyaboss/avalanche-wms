@@ -16,24 +16,28 @@ import (
 // outbound fixture: scan-cargoplace -> scan-box -> scan-sku -> scan-qr ->
 // close-box -> scan-buffer -> close-cargoplace. It returns the product ID of the
 // newly RECEIVED product sitting in BUFFER-01.
-func driveReceivingToBuffer(t *testing.T, env *env, token string, fixture e2eFixture) uuid.UUID {
+func driveReceivingToBuffer(t *testing.T, ctx context.Context, env *env, token string, fixture e2eFixture) uuid.UUID {
 	t.Helper()
 
+	// The close is a signed action now: this helper provisions its own signed
+	// operator and drives the whole receiving flow with its token.
+	op := newSignedOperator(t, ctx, env)
+
 	// scan cargoplace at table
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 	}, nil)
 
 	// scan box
 	var box scanBoxData
-	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_barcode":   fixture.BoxBarcode,
 	}, &box)
 
 	// scan sku
 	var sku scanSKUData
-	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"barcode":       fixture.Barcode,
@@ -41,7 +45,7 @@ func driveReceivingToBuffer(t *testing.T, env *env, token string, fixture e2eFix
 
 	// scan qr -> creates the product
 	var product scanQRData
-	postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"sku_id":        sku.SKUID.String(),
@@ -49,20 +53,18 @@ func driveReceivingToBuffer(t *testing.T, env *env, token string, fixture e2eFix
 	}, &product)
 
 	// close box
-	postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
 		"box_id": box.BoxID.String(),
 	}, nil)
 
 	// scan buffer
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
 
-	// close cargoplace
-	postJSON[map[string]any](t, env, token, "/receiving/table/close-cargoplace", map[string]string{
-		"cargoplace_id": fixture.CargoplaceID.String(),
-	}, nil)
+	// close cargoplace (signed)
+	closeCargoplaceSigned(t, env, op, fixture.CargoplaceID.String())
 
 	return product.ProductID
 }
@@ -82,7 +84,7 @@ func TestPutaway_DoublePlace_Conflict(t *testing.T) {
 	fixture := newOutboundFixture(t, ctx, env)
 
 	// Drive the product through the full receiving flow.
-	productID := driveReceivingToBuffer(t, env, token, fixture)
+	productID := driveReceivingToBuffer(t, ctx, env, token, fixture)
 	requireProductStatus(t, ctx, env, productID, "RECEIVED")
 
 	// Putaway: scan buffer, scan product, place into storage bin.
@@ -133,7 +135,7 @@ func TestPutaway_PlaceIntoBufferBin_Rejected(t *testing.T) {
 	fixture := newOutboundFixture(t, ctx, env)
 
 	// Drive the product through receiving so it is RECEIVED in BUFFER-01.
-	productID := driveReceivingToBuffer(t, env, token, fixture)
+	productID := driveReceivingToBuffer(t, ctx, env, token, fixture)
 	requireProductStatus(t, ctx, env, productID, "RECEIVED")
 
 	// Prepare the putaway session: scan buffer + scan product.
@@ -209,7 +211,7 @@ func TestPutaway_PlaceWithBogusProduct_Rollback(t *testing.T) {
 	fixture := newOutboundFixture(t, ctx, env)
 
 	// Drive P1 through receiving so it is RECEIVED in BUFFER-01.
-	productID := driveReceivingToBuffer(t, env, token, fixture)
+	productID := driveReceivingToBuffer(t, ctx, env, token, fixture)
 	requireProductStatus(t, ctx, env, productID, "RECEIVED")
 
 	// Putaway session: scan buffer + scan product.

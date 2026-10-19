@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestWrongStatus_CloseCargoplaceNotInProgress closes a cargoplace that is still
-// RECEIVED_AT_GATE (never scanned to TABLE_IN_PROGRESS). The FSM guard rejects
-// it with 409 CARGOPLACE_NOT_IN_PROGRESS.
+// TestWrongStatus_CloseCargoplaceNotInProgress drafts a signed close for a
+// cargoplace that is still RECEIVED_AT_GATE (never scanned to
+// TABLE_IN_PROGRESS). The FSM guard rejects it with 409 CARGOPLACE_NOT_IN_PROGRESS.
 func TestWrongStatus_CloseCargoplaceNotInProgress(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -22,10 +22,10 @@ func TestWrongStatus_CloseCargoplaceNotInProgress(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	token := operatorToken(t, env)
+	op := newSignedOperator(t, ctx, env)
 	fixture := newOutboundFixture(t, ctx, env) // cargoplace is RECEIVED_AT_GATE
 
-	status, code, _ := postExpectError(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
+	status, code, _ := postExpectError(t, env, op.token, "/receiving/table/close-cargoplace/draft", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 	})
 	require.Equal(t, http.StatusConflict, status)
