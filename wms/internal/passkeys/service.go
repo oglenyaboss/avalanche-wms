@@ -28,6 +28,7 @@ type repository interface {
 	LatestPasskeysByOrg(ctx context.Context, orgID uuid.UUID) (map[uuid.UUID]domain.Passkey, error)
 	InsertPasskey(ctx context.Context, p domain.Passkey) error
 	UpdatePasskeyStatus(ctx context.Context, credentialID []byte, status domain.PasskeyStatus) error
+	RejectPendingPasskey(ctx context.Context, credentialID []byte) (bool, error)
 	PasskeyByKeyID(ctx context.Context, keyID [32]byte) (*domain.Passkey, error)
 	PasskeyByCredentialID(ctx context.Context, id []byte) (*domain.Passkey, error)
 	InsertKeyAction(ctx context.Context, a KeyAction) error

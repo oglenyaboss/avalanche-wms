@@ -143,6 +143,17 @@ func (r *Repository) UpdatePasskeyStatus(ctx context.Context, credentialID []byt
 	return nil
 }
 
+// RejectPendingPasskey sets the passkey with the given credential id to
+// REJECTED, but only while it is still PENDING. It reports whether a pending
+// key was actually rejected.
+func (r *Repository) RejectPendingPasskey(ctx context.Context, credentialID []byte) (bool, error) {
+	tag, err := r.db.Exec(ctx, `UPDATE public.passkey_credentials SET status = 'REJECTED' WHERE credential_id = $1 AND status = 'PENDING'`, credentialID)
+	if err != nil {
+		return false, fmt.Errorf("passkeys.Repository.RejectPendingPasskey: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // PasskeyByKeyID returns the passkey with the given registry key id, nil when absent.
 func (r *Repository) PasskeyByKeyID(ctx context.Context, keyID [32]byte) (*domain.Passkey, error) {
 	return r.passkeyByColumn(ctx, "key_id", keyID[:], "PasskeyByKeyID")

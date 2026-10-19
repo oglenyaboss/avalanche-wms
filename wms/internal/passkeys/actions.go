@@ -84,28 +84,9 @@ func (s *Service) DraftKeyRegister(ctx context.Context, userID uuid.UUID, target
 		return nil, ErrSignerKeyNotActive
 	}
 
-	keyID, err := parseKeyID(targetKeyID)
+	target, err := s.pendingOperatorTarget(ctx, orgID, targetKeyID)
 	if err != nil {
-		return nil, ErrInvalidRequest
-	}
-	target, err := s.repo.PasskeyByKeyID(ctx, keyID)
-	if err != nil {
-		return nil, fmt.Errorf("passkeys.Service.DraftKeyRegister target: %w", err)
-	}
-	if target == nil || target.OrgID != orgID || target.Role != domain.UserRoleOperator {
-		return nil, ErrPasskeyNotFound
-	}
-	s.syncStatus(ctx, target)
-	if target.Status != domain.PasskeyStatusPending {
-		return nil, ErrTargetNotPending
-	}
-
-	confirmations, err := s.repo.LatestConfirmations(ctx, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("passkeys.Service.DraftKeyRegister confirmations: %w", err)
-	}
-	if c, ok := confirmations[string(target.CredentialID)]; ok && (c.State == ConfirmationSent || c.State == ConfirmationApplied) {
-		return nil, ErrActionInProgress
+		return nil, err
 	}
 
 	actionID, err := uuid.NewV7()
@@ -133,6 +114,60 @@ func (s *Service) DraftKeyRegister(ctx context.Context, userID uuid.UUID, target
 		SignerKeyID: signer.KeyID,
 		RPID:        s.wa.Config.RPID,
 	}, nil
+}
+
+// RejectKey immediately rejects a PENDING operator passkey belonging to the
+// caller's organization. Unlike key registration this is an administrative
+// action, so it requires no signed action, draft or on-chain confirmation.
+func (s *Service) RejectKey(ctx context.Context, userID uuid.UUID, targetKeyID string) error {
+	member, err := s.authorize(ctx, userID, domain.UserRoleAdmin)
+	if err != nil {
+		return err
+	}
+	orgID := *member.OrgID
+
+	target, err := s.pendingOperatorTarget(ctx, orgID, targetKeyID)
+	if err != nil {
+		return err
+	}
+
+	rejected, err := s.repo.RejectPendingPasskey(ctx, target.CredentialID)
+	if err != nil {
+		return fmt.Errorf("passkeys.Service.RejectKey reject: %w", err)
+	}
+	if !rejected {
+		return ErrTargetNotPending
+	}
+	return nil
+}
+
+// pendingOperatorTarget returns the PENDING operator passkey of org orgID with the given key id
+// that has no confirmation in flight.
+func (s *Service) pendingOperatorTarget(ctx context.Context, orgID uuid.UUID, targetKeyID string) (*domain.Passkey, error) {
+	keyID, err := parseKeyID(targetKeyID)
+	if err != nil {
+		return nil, ErrInvalidRequest
+	}
+	target, err := s.repo.PasskeyByKeyID(ctx, keyID)
+	if err != nil {
+		return nil, fmt.Errorf("passkeys.Service.pendingOperatorTarget target: %w", err)
+	}
+	if target == nil || target.OrgID != orgID || target.Role != domain.UserRoleOperator {
+		return nil, ErrPasskeyNotFound
+	}
+	s.syncStatus(ctx, target)
+	if target.Status != domain.PasskeyStatusPending {
+		return nil, ErrTargetNotPending
+	}
+
+	confirmations, err := s.repo.LatestConfirmations(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("passkeys.Service.pendingOperatorTarget confirmations: %w", err)
+	}
+	if c, ok := confirmations[string(target.CredentialID)]; ok && (c.State == ConfirmationSent || c.State == ConfirmationApplied) {
+		return nil, ErrActionInProgress
+	}
+	return target, nil
 }
 
 // SubmitKeyAction verifies the browser assertion over the draft's challenge and
