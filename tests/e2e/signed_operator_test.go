@@ -371,12 +371,12 @@ func softReceiveDetailsHash(salt [32]byte, cargoplaceID, operatorID uuid.UUID, o
 	return out
 }
 
-// softItemsHash is keccak256 of the concatenated 32-byte item ids in the given
-// order (ADR-0001 §3); empty input equals keccak256("").
+// softItemsHash is keccak256 of the concatenated itemIds, itemId = keccak256
+// (lowercase uuid string) (ADR-0001 §2/§3); empty input equals keccak256("").
 func softItemsHash(itemIDs []uuid.UUID) [32]byte {
 	buf := make([]byte, 0, 32*len(itemIDs))
 	for _, id := range itemIDs {
-		buf = append(buf, id[:]...)
+		buf = append(buf, crypto.Keccak256([]byte(id.String()))...)
 	}
 	var out [32]byte
 	copy(out[:], crypto.Keccak256(buf))
