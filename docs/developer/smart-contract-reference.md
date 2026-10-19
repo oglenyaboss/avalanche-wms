@@ -231,4 +231,4 @@ func UUIDToUint256(s string) *big.Int {
 | Нет `batchId` | Батч — группировка на стороне Go; контракт знает только пары `eventId`/`itemId`. |
 | `block.timestamp` | Секундная гранулярность, контролируется валидатором — не точное время. |
 | Нет upgrade/proxy | Изменение → редеплой + обновление `CONTRACT_ADDR`. |
-| ABI поддерживается вручную | `internal/chain/abi.go` встраивает `BatchMappingWMS.abi.json` (генерация: `forge build` + `jq`). При изменении контракта ABI нужно регенерировать — автопроверки нет. |
+| ABI поддерживается вручную | `internal/chain/abi.go` встраивает `SignedMappingWMS.abi.json` (генерация: `forge build` + `jq`). При изменении контракта ABI нужно регенерировать — автопроверки нет. |

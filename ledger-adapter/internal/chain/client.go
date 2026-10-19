@@ -75,7 +75,7 @@ type ethBackend interface {
 	Close()
 }
 
-// Client обёртка над ethclient с методами для BatchMappingWMS.
+// Client обёртка над ethclient с методами для SignedMappingWMS.
 // sendMu сериализует nonce-critical секцию в send: локальный монотонный
 // nonce (nonce++ только при успешном SendTransaction) позволяет держать
 // несколько tx in-flight в одном блоке без per-send PendingNonceAt — иначе
@@ -128,7 +128,7 @@ func (c *Client) Close() { c.eth.Close() }
 // FromAddress — адрес, из-под которого клиент подписывает tx.
 func (c *Client) FromAddress() common.Address { return c.signer.Address() }
 
-// aggregateToMethod маппит WMS aggregate_type в solidity-методы BatchMappingWMS.
+// aggregateToMethod маппит WMS aggregate_type в solidity-методы SignedMappingWMS.
 var aggregateToMethod = map[string]string{
 	"receiving": "batchAccept",
 	"putaway":   "batchPutAway",
@@ -193,7 +193,7 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 }
 
 // SendCalldata отправляет произвольные готовые calldata на указанный адрес —
-// вызовы вне BatchMappingWMS (например ConsortiumRegistry.applyKeyActions,
+// вызовы вне SignedMappingWMS (например ConsortiumRegistry.applyKeyActions,
 // пакуемые отдельным RegistryABI). Идёт по тому же nonce/gas/sign/send-пути,
 // что и sendMethod: одна nonce-последовательность подписанта и те же классы
 // ошибок (ErrChainTransient/ErrChainRevert).

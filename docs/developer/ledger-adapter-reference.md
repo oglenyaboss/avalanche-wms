@@ -34,7 +34,7 @@ WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter 
 |---|---|
 | `cmd/adapter/main.go` | Точка входа: собирает все компоненты, поднимает `errgroup` (consumer-goroutine + reconcile-goroutine) и отдельный HTTP-сервер |
 | `internal/config/config.go` | `Load()` — чтение env, `_FILE`-override для секретов, валидация обязательных полей и инвариантов на старте |
-| `internal/chain/abi.go` | Встраивает `BatchMappingWMS.abi.json` как `ContractABI string` через `//go:embed` |
+| `internal/chain/abi.go` | Встраивает `SignedMappingWMS.abi.json` как `ContractABI string` через `//go:embed` |
 | `internal/chain/client.go` | `Client` — обёртка над `ethclient`; ABI-паковка; пайплайн nonce/gas/sign/send; диспетчер `BatchCall`; классификация ошибок (revert vs transient) |
 | `internal/chain/convert.go` | `UUIDToUint256` — `keccak256(UUID-строка) → *big.Int` (совпадает с Solidity-конвенцией) |
 | `internal/chain/receipt.go` | `WaitReceipt` — поллинг receipt'а с экспоненциальным backoff и таймаутом |

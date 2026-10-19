@@ -354,6 +354,33 @@ contract SignedActionsTest is PasskeyTest {
         _apply(a);
     }
 
+    function test_ReceiveByActionThenPutAwayByLegacy() public {
+        uint256[] memory ids = _ids(2, 1200);
+        _apply(_action(operatorA, SignedAction.Type.Receive, ids, bytes32(0)));
+
+        uint256[] memory eventIds = new uint256[](2);
+        eventIds[0] = 1; eventIds[1] = 2;
+        wms.batchPutAway(eventIds, ids);
+
+        assertTrue(wms.itemStatus(ids[0]) == SignedMappingWMS.Status.PutAway);
+        assertTrue(wms.itemStatus(ids[1]) == SignedMappingWMS.Status.PutAway);
+    }
+
+    function test_AcceptByLegacyThenPutAwayByAction() public {
+        uint256[] memory ids = _ids(2, 1300);
+        uint256[] memory eventIds = new uint256[](2);
+        eventIds[0] = 1; eventIds[1] = 2;
+        wms.batchAccept(eventIds, ids);
+
+        SignedMappingWMS.Action memory a = _action(operatorA, SignedAction.Type.PutAway, ids, bytes32(0));
+        vm.expectEmit(address(wms));
+        emit ActionApplied(a.actionId, operatorA.keyId, ORG_A, SignedAction.Type.PutAway, bytes32(0), 2);
+        _apply(a);
+        assertTrue(wms.itemStatus(ids[0]) == SignedMappingWMS.Status.PutAway);
+        assertTrue(wms.itemStatus(ids[1]) == SignedMappingWMS.Status.PutAway);
+        assertTrue(wms.actionState(a.actionId) == SignedAction.State.Applied);
+    }
+
     // ---------- helpers ----------
 
     function _action(Passkey memory signer, SignedAction.Type t, uint256[] memory ids, bytes32 detailsHash)

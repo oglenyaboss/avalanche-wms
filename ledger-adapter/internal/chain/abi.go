@@ -2,11 +2,12 @@ package chain
 
 import _ "embed"
 
-// ContractABI — ABI BatchMappingWMS, сгенерирован через `forge build` +
-// `jq -c '.abi' out/BatchMappingWMS.sol/BatchMappingWMS.json`.
+// ContractABI — ABI SignedMappingWMS (контракт v2: старые batch-функции и applyActions),
+// сгенерирован через `forge build` +
+// `jq -c '.abi' out/SignedMappingWMS.sol/SignedMappingWMS.json`.
 // Обновлять при изменении контракта.
 //
-//go:embed BatchMappingWMS.abi.json
+//go:embed SignedMappingWMS.abi.json
 var ContractABI string
 
 // RegistryABI — ABI ConsortiumRegistry, сгенерирован так же:
