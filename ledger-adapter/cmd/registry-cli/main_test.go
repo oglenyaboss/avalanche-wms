@@ -138,11 +138,11 @@ func TestFoldLogs(t *testing.T) {
 	}
 	want := []org{
 		{id: orgA, name: "Org A", keys: []orgKey{
-			{keyID: adminKey, role: 1, active: true},
-			{keyID: opKey, role: 2, active: false},
+			{keyID: adminKey, role: chain.RoleAdmin, active: true},
+			{keyID: opKey, role: chain.RoleOperator, active: false},
 		}},
 		{id: orgB, name: "", keys: []orgKey{
-			{keyID: orphanKey, role: 1, active: true},
+			{keyID: orphanKey, role: chain.RoleAdmin, active: true},
 		}},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -158,8 +158,8 @@ func TestRender(t *testing.T) {
 	orgA := uuid.MustParse(vecOrgID)
 	orgs := []org{
 		{id: orgA, name: "Org A", keys: []orgKey{
-			{keyID: common.HexToHash(vecKeyID), role: 1, active: true},
-			{keyID: common.HexToHash("0x" + strings.Repeat("01", 32)), role: 2, active: false},
+			{keyID: common.HexToHash(vecKeyID), role: chain.RoleAdmin, active: true},
+			{keyID: common.HexToHash("0x" + strings.Repeat("01", 32)), role: chain.RoleOperator, active: false},
 		}},
 		{id: uuid.MustParse("0190f2a0-0000-7000-8000-000000000b0b")},
 	}
