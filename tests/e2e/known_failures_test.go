@@ -47,19 +47,18 @@ func TestS1_WMSChainDivergence_pendingFix(t *testing.T) {
 	setOnchainStatus(t, ctx, env, receivingEventID, "FAILED")
 
 	// 3. The operator can still scan into the putaway cart, but placement must be gated:
-	//    scan-storage-bin → 409 CHAIN_EVENT_REJECTED.
-	postJSON[map[string]any](t, env, token, "/putaway/scan-buffer", map[string]string{
+	//    the signed putaway DRAFT already runs the chain gate → 409 CHAIN_EVENT_REJECTED,
+	//    so no operation is even drafted.
+	op := newSignedOperator(t, ctx, env)
+	postJSON[map[string]any](t, env, op.token, "/putaway/scan-buffer", map[string]string{
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
-	postJSON[map[string]any](t, env, token, "/putaway/scan-product", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/putaway/scan-product", map[string]string{
 		"product_id":    productID.String(),
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
 
-	status, code, _ := postExpectError(t, env, token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    []string{productID.String()},
-		"storage_bin_id": fixture.StorageBinID.String(),
-	})
+	status, code, _ := draftPlaceToStorageBinRaw(t, env, op.token, []string{productID.String()}, fixture.StorageBinID.String())
 	require.Equal(t, http.StatusConflict, status)
 	require.Equal(t, "CHAIN_EVENT_REJECTED", code)
 

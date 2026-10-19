@@ -261,27 +261,21 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, op *signed
 			"product %d on-chain status should be Accepted(1) after receiving", i)
 	}
 
-	// 5. Putaway all products: scan-buffer -> scan-product x N -> scan-storage-bin.
+	// 5. Putaway all products: scan-buffer -> scan-product x N -> signed putaway draft+submit.
 	postJSON[map[string]any](t, env, op.token, "/putaway/scan-buffer", map[string]string{
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
 
-	pidStrings := make([]string, productCount)
-	for i, pid := range productIDs {
-		pidStrings[i] = pid.String()
+	for _, pid := range productIDs {
 		postJSON[map[string]any](t, env, op.token, "/putaway/scan-product", map[string]string{
 			"product_id":    pid.String(),
 			"buffer_bin_id": sc.ReceivingBinID.String(),
 		}, nil)
 	}
 
-	var putaway scanStorageBinData
-	postJSON(t, env, op.token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    pidStrings,
-		"storage_bin_id": sc.StorageBinID.String(),
-	}, &putaway)
+	putaway := placeToStorageBinSigned(t, env, op, productIDs, sc.StorageBinID)
 	require.Equal(t, productCount, putaway.ProductsPlaced)
-	require.Equal(t, productCount, putaway.OutboxEventsCreated)
+	require.Equal(t, 1, putaway.OutboxEventsCreated, "a basket of <2000 products places with exactly one signed part")
 
 	for _, pid := range productIDs {
 		requireProductStatus(t, ctx, env, pid, "STORED")
@@ -688,7 +682,7 @@ func TestFullChain_MultiBoxReceiving(t *testing.T) {
 // ── P2: Batch putaway test ───────────────────────────────────────────────────
 
 // TestFullChain_BatchPutaway (P2) receives 3 products via the full receiving
-// flow, then puts away all 3 in a single scan-storage-bin call, and verifies
+// flow, then puts away all 3 with a single signed putaway action, and verifies
 // all putaway events land on-chain as PutAway(2).
 func TestFullChain_BatchPutaway(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -769,27 +763,21 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 			"product %d on-chain should be Accepted(1) before putaway", i)
 	}
 
-	// Batch putaway: scan-buffer → scan-product × N → scan-storage-bin with all N.
+	// Batch putaway: scan-buffer → scan-product × N → one signed putaway action with all N.
 	postJSON[map[string]any](t, env, token, "/putaway/scan-buffer", map[string]string{
 		"buffer_bin_id": sc.ReceivingBinID.String(),
 	}, nil)
 
-	pidStrings := make([]string, productCount)
-	for i, pid := range productIDs {
-		pidStrings[i] = pid.String()
+	for _, pid := range productIDs {
 		postJSON[map[string]any](t, env, token, "/putaway/scan-product", map[string]string{
 			"product_id":    pid.String(),
 			"buffer_bin_id": sc.ReceivingBinID.String(),
 		}, nil)
 	}
 
-	var putaway scanStorageBinData
-	postJSON(t, env, token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    pidStrings,
-		"storage_bin_id": sc.StorageBinID.String(),
-	}, &putaway)
+	putaway := placeToStorageBinSigned(t, env, op, productIDs, sc.StorageBinID)
 	require.Equal(t, productCount, putaway.ProductsPlaced)
-	require.Equal(t, productCount, putaway.OutboxEventsCreated)
+	require.Equal(t, 1, putaway.OutboxEventsCreated, "a basket of <2000 products places with exactly one signed part")
 
 	for _, pid := range productIDs {
 		requireProductStatus(t, ctx, env, pid, "STORED")
