@@ -68,7 +68,7 @@ live_addr() {
   fi
 }
 
-# Registry деплоится первым (ewoq nonce 0), BatchMappingWMS — вторым (nonce 1).
+# Registry деплоится первым (ewoq nonce 0), SignedMappingWMS — вторым (nonce 1).
 REG=$(live_addr /shared/registry_addr.txt)
 if [ -n "$REG" ]; then
   echo "==> ConsortiumRegistry already deployed at $REG — skipping"
@@ -99,12 +99,13 @@ if [ -n "$CONTRACT" ]; then
   exit 0
 fi
 
-echo "==> Deploying BatchMappingWMS"
-OUT=$(forge create BatchMappingWMS \
+echo "==> Deploying SignedMappingWMS"
+OUT=$(forge create SignedMappingWMS \
   --rpc-url "$RPC_URL" \
   --private-key "$EWOQ_KEY" \
   --broadcast \
-  --json)
+  --json \
+  --constructor-args "$REG")
 
 ADDR=$(echo "$OUT" | sed -n '/^{$/,/^}$/p' | jq -r '.deployedTo')
 TX=$(echo   "$OUT" | sed -n '/^{$/,/^}$/p' | jq -r '.transactionHash')
@@ -113,12 +114,16 @@ echo "==> Sanity: itemStatus(0) must be 0 (None)"
 STATUS=$(cast call "$ADDR" "itemStatus(uint256)(uint8)" 0 --rpc-url "$RPC_URL")
 [ "$STATUS" = "0" ] || { echo "FAIL: itemStatus(0) = $STATUS"; exit 1; }
 
+echo "==> Sanity: registry() must be the deployed Registry ($REG)"
+REG_ONCHAIN=$(cast call "$ADDR" "registry()(address)" --rpc-url "$RPC_URL")
+[ "${REG_ONCHAIN,,}" = "${REG,,}" ] || { echo "FAIL: registry() = $REG_ONCHAIN"; exit 1; }
+
 # Persist only after successful sanity
 echo -n "$RPC_URL"   > /shared/rpc_url.txt
 echo -n "$ADDR"      > /shared/contract_addr.txt
 echo -n "$EWOQ_KEY"  > /shared/deployer_key.txt
-echo "==> Deployed BatchMappingWMS at $ADDR"
+echo "==> Deployed SignedMappingWMS at $ADDR"
 echo "    tx $TX"
 echo "==> ConsortiumRegistry: $REG"
-echo "==> BatchMappingWMS:    $ADDR"
+echo "==> SignedMappingWMS:   $ADDR"
 echo "OK"

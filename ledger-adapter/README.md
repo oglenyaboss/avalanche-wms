@@ -1,6 +1,6 @@
 # Ledger Adapter
 
-Kafka→EVM мост. Читает outbox-события WMS из Kafka, батчит, отправляет одну транзакцию на batch в `BatchMappingWMS`. Адаптер EVM-агностичен: локально работает против Avalanche Subnet-EVM, но подойдёт любой EVM-совместимый RPC. Idempotent, at-least-once, DLQ при фейлах.
+Kafka→EVM мост. Читает outbox-события WMS из Kafka, батчит, отправляет одну транзакцию на batch в `SignedMappingWMS`. Адаптер EVM-агностичен: локально работает против Avalanche Subnet-EVM, но подойдёт любой EVM-совместимый RPC. Idempotent, at-least-once, DLQ при фейлах.
 
 ## Архитектура
 
@@ -60,7 +60,7 @@ ledger-adapter/
 │   ├── config/                # Load() (*Config, error) с _FILE override для secrets
 │   ├── chain/                 # go-ethereum wrappers
 │   │   ├── client.go          # BatchAccept/PutAway/Pick/Ship + BatchCall dispatcher
-│   │   ├── abi.go             # go:embed BatchMappingWMS.abi.json
+│   │   ├── abi.go             # go:embed SignedMappingWMS.abi.json
 │   │   ├── convert.go         # UUIDToUint256 (keccak256)
 │   │   └── receipt.go         # WaitReceipt — exponential backoff
 │   ├── store/                 # pgx pool + onchain_events Repository
@@ -69,7 +69,7 @@ ledger-adapter/
 │   └── handler/               # /health, /onchain/tx/{hash}, /registry/keys/{keyId}
 │
 └── contracts/
-    └── BatchMappingWMS.sol    # Solidity контракт (компилируется в contract-deploy)
+    └── SignedMappingWMS.sol   # Solidity контракт v2 (компилируется в contract-deploy)
 ```
 
 ## Конфигурация
@@ -82,7 +82,7 @@ ledger-adapter/
 | `KAFKA_GROUP_ID` | | `ledger-adapter` | consumer group |
 | `DB_URL` | ✓ | — | pgx DSN `postgres://user:pw@host/db` |
 | `RPC_URL` | ✓ | — | RPC EVM-узла (локально — Avalanche Subnet-EVM; подойдёт любой EVM-совместимый) |
-| `CONTRACT_ADDR` | ✓ | — | Адрес `BatchMappingWMS` |
+| `CONTRACT_ADDR` | ✓ | — | Адрес `SignedMappingWMS` |
 | `REGISTRY_ADDR` | | — | Адрес `ConsortiumRegistry`; без него `GET /registry/keys/{keyId}` отвечает 502. Override: `REGISTRY_ADDR_FILE` |
 | `PRIVATE_KEY` | ✓ (static) | — | Hex signer key (0x-prefixed ok); не нужен в kms-режиме |
 | `SIGNER_MODE` | | `static` | `static` — **только локальная разработка**: приватник в env открытым текстом; `kms` — подпись во внешнем Web3Signer (ключ адаптеру не нужен) |
@@ -187,6 +187,6 @@ go test -tags integration -race -timeout 180s ./internal/store/...
 ## Полезные ссылки
 
 - [go-ethereum book](https://goethereumbook.org/)
-- [BatchMappingWMS.sol](contracts/BatchMappingWMS.sol) — контракт
+- [SignedMappingWMS.sol](contracts/SignedMappingWMS.sol) — контракт (v2)
 - [Issue #20](https://git.miem.hse.ru/2340/blockchain_project/-/issues/20) — постановка задачи
 - [docs/ADR](../docs/ADR/) — архитектурные решения WMS
