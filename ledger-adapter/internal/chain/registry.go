@@ -11,7 +11,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// RegistryKey — ключ из ConsortiumRegistry. Role: 0 None, 1 Admin, 2 Operator.
+const (
+	RoleNone     uint8 = 0
+	RoleAdmin    uint8 = 1
+	RoleOperator uint8 = 2
+)
+
+// RegistryKey — ключ из ConsortiumRegistry.
 type RegistryKey struct {
 	QX, QY [32]byte
 	OrgID  [16]byte

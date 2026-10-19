@@ -38,7 +38,7 @@ func main() {
 }
 
 // run собирает и запускает pipeline: config → store → chain client →
-// dlq producer → Flusher → единственный consumer goroutine + health HTTP server.
+// dlq producer → Flusher → единственный consumer goroutine + HTTP server.
 func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -138,7 +138,7 @@ func run(log *slog.Logger) error {
 		registry = reg
 	}
 
-	srv := startHealthServer(log, cfg.Port, clients[0], registry)
+	srv := startHTTPServer(log, cfg.Port, clients[0], registry)
 
 	runErr := g.Wait()
 	log.Info("consumer stopped, shutting down http")
@@ -207,7 +207,7 @@ func assertSignersFunded(ctx context.Context, rpcURL string, clients []*chain.Cl
 	return nil
 }
 
-func startHealthServer(log *slog.Logger, port string, chainReader handler.ChainReader, registry handler.RegistryReader) *http.Server {
+func startHTTPServer(log *slog.Logger, port string, chainReader handler.ChainReader, registry handler.RegistryReader) *http.Server {
 	mux := http.NewServeMux()
 	handler.New(chainReader, registry).RegisterRoutes(mux)
 

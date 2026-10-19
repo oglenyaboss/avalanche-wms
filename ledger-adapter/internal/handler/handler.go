@@ -151,12 +151,12 @@ func (h *Handler) RegistryKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
 		return
 	}
-	if key.Role == 0 {
+	if key.Role == chain.RoleNone {
 		writeJSON(w, http.StatusOK, map[string]bool{"found": false})
 		return
 	}
 	role := "operator"
-	if key.Role == 1 {
+	if key.Role == chain.RoleAdmin {
 		role = "admin"
 	}
 	writeJSON(w, http.StatusOK, registryKeyResponse{
