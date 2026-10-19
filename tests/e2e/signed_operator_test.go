@@ -439,17 +439,36 @@ func softPutAwayDetailsHash(salt [32]byte, storageBinID, operatorID uuid.UUID, o
 	return softEntityDetailsHash(salt, bin, operatorID, occurredAtMs)
 }
 
+// softDetailsWords is the one shared encoder of the ADR-0001 details-hash words
+// (receive, putaway, pick): a uuid.UUID is left-aligned in its 32-byte word
+// (zero tail), a uint64 is right-aligned big-endian, a [32]byte passes through
+// unchanged (salt), an int encodes an ABI offset/length word.
+func softDetailsWords(words ...any) []byte {
+	buf := make([]byte, 0, 32*len(words))
+	for _, w := range words {
+		var word [32]byte
+		switch v := w.(type) {
+		case [32]byte:
+			word = v
+		case uuid.UUID:
+			copy(word[:16], v[:])
+		case uint64:
+			binary.BigEndian.PutUint64(word[24:], v)
+		case int:
+			binary.BigEndian.PutUint64(word[24:], uint64(v))
+		default:
+			panic(fmt.Sprintf("softDetailsWords: unsupported word type %T", w))
+		}
+		buf = append(buf, word[:]...)
+	}
+	return buf
+}
+
 // softEntityDetailsHash is the shared body of the single-entity details hashes
-// (receive, putaway): bytes16 words are left-aligned (zero tail), the uint64 is
-// right-aligned big-endian in its word.
+// (receive, putaway).
 func softEntityDetailsHash(salt, entity [32]byte, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
-	var buf [128]byte
-	copy(buf[0:32], salt[:])
-	copy(buf[32:48], entity[:])
-	copy(buf[64:80], operatorID[:])
-	binary.BigEndian.PutUint64(buf[120:128], occurredAtMs)
 	var out [32]byte
-	copy(out[:], crypto.Keccak256(buf[:]))
+	copy(out[:], crypto.Keccak256(softDetailsWords(salt, entity, operatorID, occurredAtMs)))
 	return out
 }
 
@@ -552,31 +571,15 @@ func unloadToShippingBufferSigned(t *testing.T, env *env, op *signedOperator, bu
 func softPickDetailsHash(salt [32]byte, binID uuid.UUID, orderIDs []uuid.UUID, operatorID uuid.UUID, occurredAtMs uint64) [32]byte {
 	orders := sortedUniqueUUIDs(orderIDs)
 
-	buf := make([]byte, 0, 32*(6+len(orders)))
-	buf = append(buf, salt[:]...)
-	var bin [32]byte
-	copy(bin[:16], binID[:])
-	buf = append(buf, bin[:]...)
-	var offset [32]byte
-	binary.BigEndian.PutUint64(offset[24:], 0xa0) // 5 static head words
-	buf = append(buf, offset[:]...)
-	var operator [32]byte
-	copy(operator[:16], operatorID[:])
-	buf = append(buf, operator[:]...)
-	var ms [32]byte
-	binary.BigEndian.PutUint64(ms[24:], occurredAtMs)
-	buf = append(buf, ms[:]...)
-	var length [32]byte
-	binary.BigEndian.PutUint64(length[24:], uint64(len(orders)))
-	buf = append(buf, length[:]...)
+	// Head: salt, bin, offset 0xa0 (5 static words), operator, uint64; tail:
+	// length, one left-aligned bytes16 per orderId.
+	words := make([]any, 0, 6+len(orders))
+	words = append(words, salt, binID, 0xa0, operatorID, occurredAtMs, len(orders))
 	for _, id := range orders {
-		var word [32]byte
-		copy(word[:16], id[:])
-		buf = append(buf, word[:]...)
+		words = append(words, id)
 	}
-
 	var out [32]byte
-	copy(out[:], crypto.Keccak256(buf))
+	copy(out[:], crypto.Keccak256(softDetailsWords(words...)))
 	return out
 }
 

@@ -54,22 +54,8 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 	}
 
 	// ── Signed putaway of both products into the storage bin ──
-	productIDStrings := make([]string, len(run.productIDs))
-	for i, pid := range run.productIDs {
-		productIDStrings[i] = pid.String()
-	}
-	var pDraft closeDraftDTO
-	postJSON(t, env, op.token, "/putaway/scan-storage-bin/draft", map[string]any{
-		"product_ids":    productIDStrings,
-		"storage_bin_id": sc.StorageBinID.String(),
-	}, &pDraft)
-	require.Len(t, pDraft.Parts, 1)
-	pAssertions := signDraft(t, op, pDraft)
-	var placedPutaway scanStorageBinData
-	postJSON(t, env, op.token, "/putaway/scan-storage-bin/submit", map[string]any{
-		"operation_id": pDraft.OperationID,
-		"assertions":   pAssertions,
-	}, &placedPutaway)
+	productIDStrings := uuidStrings(run.productIDs)
+	placedPutaway := placeToStorageBinSigned(t, env, op, run.productIDs, sc.StorageBinID)
 	require.Equal(t, 2, placedPutaway.ProductsPlaced)
 	for _, pid := range run.productIDs {
 		requireProductStatus(t, ctx, env, pid, "STORED")
