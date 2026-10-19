@@ -98,7 +98,7 @@ func Load() (*Config, error) {
 		{"CONTRACT_ADDR", &c.ContractAddr},
 	}
 	for _, r := range common {
-		v, err := getRequired(r.name)
+		v, err := GetRequired(r.name)
 		if err != nil {
 			return nil, err
 		}
@@ -106,7 +106,7 @@ func Load() (*Config, error) {
 	}
 
 	// REGISTRY_ADDR необязателен: без него /registry/keys отвечает 502.
-	regAddr, err := getOptional("REGISTRY_ADDR")
+	regAddr, err := GetOptional("REGISTRY_ADDR")
 	if err != nil {
 		return nil, err
 	}
@@ -118,10 +118,10 @@ func Load() (*Config, error) {
 	switch c.SignerMode {
 	case "kms":
 		var err error
-		if c.KMSURL, err = getRequired("KMS_URL"); err != nil {
+		if c.KMSURL, err = GetRequired("KMS_URL"); err != nil {
 			return nil, err
 		}
-		rawKeys, err := getRequired("KMS_PUBLIC_KEYS")
+		rawKeys, err := GetRequired("KMS_PUBLIC_KEYS")
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +141,7 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("KMS_PUBLIC_KEYS is empty")
 		}
 	case "static":
-		v, err := getRequired("PRIVATE_KEY")
+		v, err := GetRequired("PRIVATE_KEY")
 		if err != nil {
 			return nil, err
 		}
@@ -201,9 +201,10 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// getRequired — getOptional, но пустое значение = ошибка.
-func getRequired(name string) (string, error) {
-	v, err := getOptional(name)
+// GetRequired — GetOptional, но пустое значение = ошибка.
+// Используется и вне config.Load (cmd/registry-cli), поэтому экспортирована.
+func GetRequired(name string) (string, error) {
+	v, err := GetOptional(name)
 	if err != nil {
 		return "", err
 	}
@@ -213,11 +214,11 @@ func getRequired(name string) (string, error) {
 	return v, nil
 }
 
-// getOptional сначала читает <NAME>_FILE, потом <NAME>. Пустая строка = не задано.
+// GetOptional сначала читает <NAME>_FILE, потом <NAME>. Пустая строка = не задано.
 // Ошибка чтения существующего файла — fatal (явная мисконфигурация).
 // Если <NAME>_FILE задан, но файл не найден — логируем warning в stderr
 // (опечатка в пути молча бы привела к использованию env-var с другим значением).
-func getOptional(name string) (string, error) {
+func GetOptional(name string) (string, error) {
 	if path := os.Getenv(name + "_FILE"); path != "" {
 		b, err := os.ReadFile(path)
 		if err == nil {
