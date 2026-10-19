@@ -50,7 +50,7 @@ func receiveAndCloseSigned(t *testing.T, ctx context.Context, env *env, op *sign
 	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
-		"barcode":       outboundSeedBarcode,
+		"barcode":       sc.Barcode,
 	}, &sku)
 	require.Equal(t, sc.SKUID, sku.SKUID)
 
@@ -61,7 +61,7 @@ func receiveAndCloseSigned(t *testing.T, ctx context.Context, env *env, op *sign
 			postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 				"cargoplace_id": sc.CargoplaceID.String(),
 				"box_id":        box.BoxID.String(),
-				"barcode":       outboundSeedBarcode,
+				"barcode":       sc.Barcode,
 			}, &skuAgain)
 		}
 		var scanned scanQRData
@@ -367,7 +367,7 @@ func receiveAndCloseSignedPrep(t *testing.T, ctx context.Context, env *env, op *
 	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": sc.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
-		"barcode":       outboundSeedBarcode,
+		"barcode":       sc.Barcode,
 	}, &sku)
 
 	var scanned scanQRData

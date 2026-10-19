@@ -33,6 +33,10 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 
 	op := newSignedOperator(t, ctx, env)
 
+	// Fresh per-test SKU: the signed allocate is FIFO over ALL STORED products of
+	// the SKU, so a shared SKU would hand this test other tests' leftovers.
+	skuID, barcode := newFreshOutboundSKU(t, ctx, env)
+
 	// The destination and its shipping buffer bin (one per destination).
 	var destinationID, bufferBinID uuid.UUID
 	err := env.db.QueryRow(ctx, `
@@ -44,8 +48,8 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 		WHERE w.name = $2`, destinationCode, warehouseName).Scan(&destinationID, &bufferBinID)
 	require.NoError(t, err, "resolve destination and shipping buffer bin")
 
-	// ── Signed receive of two products of the seeded SKU ──
-	sc := setupReceivingScaffold(t, ctx, env, 2)
+	// ── Signed receive of two products of the fresh per-test SKU ──
+	sc := setupReceivingScaffoldWithSKU(t, ctx, env, 2, skuID, barcode)
 	run := receiveAndCloseSigned(t, ctx, env, op, sc, 2)
 	require.Len(t, run.productIDs, 2)
 	for _, pid := range run.productIDs {
@@ -78,10 +82,9 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 			WHERE u.username='customer'`, orderNo, warehouseName, destinationCode)
 		mustExec(t, ctx, env, `
 			INSERT INTO wms_inventory.order_lines(order_id,sku_id,qty)
-			SELECT o.order_id,s.sku_id,1
+			SELECT o.order_id,$2,1
 			FROM wms_inventory.orders o
-			JOIN wms_inventory.skus s ON s.name=$2
-			WHERE o.external_order_no=$1`, orderNo, outboundSeedSKUName)
+			WHERE o.external_order_no=$1`, orderNo, sc.SKUID)
 	}
 	resolveOrder := func(orderNo string) uuid.UUID {
 		var id uuid.UUID

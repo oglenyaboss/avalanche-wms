@@ -52,6 +52,7 @@ type receivingScaffold struct {
 	CargoplaceCode string
 	TTNCode        string
 	SKUID          uuid.UUID
+	Barcode        string
 	ReceivingBinID uuid.UUID
 	StorageBinID   uuid.UUID
 }
@@ -60,6 +61,48 @@ type receivingScaffold struct {
 // cargoplace (RECEIVED_AT_GATE), and expected_cargoplace_skus row using the
 // seeded outbound SKU. It resolves bin IDs and registers cleanup.
 func setupReceivingScaffold(t *testing.T, ctx context.Context, env *env, productCount int) receivingScaffold {
+	var skuID uuid.UUID
+	err := env.db.QueryRow(ctx, `SELECT sku_id FROM wms_inventory.skus WHERE name = $1`, outboundSeedSKUName).Scan(&skuID)
+	require.NoError(t, err, "resolve seeded outbound sku")
+	return setupReceivingScaffoldWithSKU(t, ctx, env, productCount, skuID, outboundSeedBarcode)
+}
+
+// newFreshOutboundSKU inserts a fresh SKU + barcode with per-test unique names
+// (same columns the fixture path uses). Products received into this SKU never
+// contend with the seeded FIFO allocate pool of other tests. Cleanup is
+// registered here and runs after the caller's own cleanups (LIFO), so
+// products/order_lines referencing the SKU are already gone by then.
+func newFreshOutboundSKU(t *testing.T, ctx context.Context, env *env) (uuid.UUID, string) {
+	t.Helper()
+	skuID := uuid.New()
+	barcode := "BC-SR-" + shortSuffix()
+	mustExec(t, ctx, env, `
+		INSERT INTO wms_inventory.skus(sku_id,name,created_at,updated_at)
+		VALUES ($1,$2,now(),now())`, skuID, "E2E Signed SKU "+shortSuffix())
+	mustExec(t, ctx, env, `
+		INSERT INTO wms_inventory.sku_barcodes(sku_id,barcode)
+		VALUES ($1,$2)`, skuID, barcode)
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		for _, stmt := range []struct {
+			sql  string
+			args []any
+		}{
+			{`DELETE FROM wms_inventory.sku_barcodes WHERE barcode=$1`, []any{barcode}},
+			{`DELETE FROM wms_inventory.skus WHERE sku_id=$1`, []any{skuID}},
+		} {
+			if _, err := env.db.Exec(cleanupCtx, stmt.sql, stmt.args...); err != nil {
+				t.Logf("fresh sku cleanup (%s): %v", stmt.sql, err)
+			}
+		}
+	})
+	return skuID, barcode
+}
+
+// setupReceivingScaffoldWithSKU is setupReceivingScaffold for an explicit SKU:
+// tests that allocate their products afterwards use a fresh per-test SKU so
+// the FIFO allocate pool never hands out other tests' leftovers.
+func setupReceivingScaffoldWithSKU(t *testing.T, ctx context.Context, env *env, productCount int, skuID uuid.UUID, barcode string) receivingScaffold {
 	t.Helper()
 
 	suf := shortSuffix()
@@ -78,30 +121,30 @@ func setupReceivingScaffold(t *testing.T, ctx context.Context, env *env, product
 		SELECT gen_random_uuid(),sh.shipment_id,$1,'RECEIVED_AT_GATE',now(),now(),now()
 		FROM wms_inventory.inbound_shipments sh WHERE sh.ttn_code=$2`, cpCode, ttnCode)
 
-	// Expected units of the seeded outbound SKU in this cargoplace.
+	// Expected units of this SKU in this cargoplace.
 	mustExec(t, ctx, env, `
 		INSERT INTO wms_inventory.expected_cargoplace_skus(cargoplace_id,sku_id,expected_qty)
-		SELECT c.cargoplace_id,s.sku_id,$3
+		SELECT c.cargoplace_id,$2,$3
 		FROM wms_inventory.cargoplaces c
-		JOIN wms_inventory.skus s ON s.name=$2
-		WHERE c.cargoplace_code=$1`, cpCode, outboundSeedSKUName, productCount)
+		WHERE c.cargoplace_code=$1`, cpCode, skuID, productCount)
 
 	// Resolve ids.
 	var sc receivingScaffold
 	sc.TTNCode = ttnCode
 	sc.CargoplaceCode = cpCode
+	sc.Barcode = barcode
 	err := env.db.QueryRow(ctx, `
-		SELECT c.cargoplace_id, s.sku_id, rb.bin_id, sb.bin_id
+		SELECT c.cargoplace_id, rb.bin_id, sb.bin_id
 		FROM wms_inventory.cargoplaces c
 		JOIN wms_inventory.inbound_shipments sh ON sh.shipment_id = c.shipment_id
 		JOIN wms_inventory.warehouses w ON w.warehouse_id = sh.warehouse_id
-		JOIN wms_inventory.skus s ON s.name = $2
 		JOIN wms_inventory.bins rb ON rb.warehouse_id = w.warehouse_id AND rb.code = 'BUFFER-01'
 		JOIN wms_inventory.bins sb ON sb.warehouse_id = w.warehouse_id AND sb.code = 'A-01-01'
-		WHERE c.cargoplace_code = $1 AND w.name = $3`,
-		cpCode, outboundSeedSKUName, warehouseName,
-	).Scan(&sc.CargoplaceID, &sc.SKUID, &sc.ReceivingBinID, &sc.StorageBinID)
+		WHERE c.cargoplace_code = $1 AND w.name = $2`,
+		cpCode, warehouseName,
+	).Scan(&sc.CargoplaceID, &sc.ReceivingBinID, &sc.StorageBinID)
 	require.NoError(t, err, "resolve receiving scaffold ids")
+	sc.SKUID = skuID
 
 	// Register cleanup for the scaffold rows; product/box/ops rows are cleaned
 	// by the caller's own cleanup since they depend on the API flow.
