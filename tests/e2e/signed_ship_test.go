@@ -266,7 +266,7 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 	// The signed chain below is valid only for THIS test's own products: allocate
 	// is FIFO over ALL STORED products of the SKU, so if stale leftovers of earlier
 	// tests sit in the pool, the pick would chain-fail on foreign items. Guard it.
-	require.ElementsMatchf(t, run.productIDs, allProducts,
+	require.ElementsMatchf(t, uuidStrings(run.productIDs), allProducts,
 		"allocate must hand out this test's own signed-chain products, got stale FIFO leftovers")
 
 	for _, pid := range allProducts {
