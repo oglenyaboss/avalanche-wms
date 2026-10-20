@@ -52,12 +52,11 @@ ON CONFLICT (username) DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- 0.2 Выделенный SKU + штрихкод для теста 07-full-flow (STANDALONE).
---     allocate выбирает товары глобально по SKU (oldest-first). На общем
---     'E2E Seed Outbound SKU' заказы 07 разбирали pre-STORED пул теста 06
---     (STRESS-PROD-QR), который НЕ проходил receiving/putaway on-chain →
---     picking/shipping на контракте уходили в soft-skip (no-op). Отдельный SKU
---     изолирует 07: allocate матчит ТОЛЬКО собственные товары потока, и
---     picking/shipping становятся реальными FSM-переходами.
+--     allocate выбирает товары глобально по SKU (oldest-first) и не смотрит на
+--     цепочку. На общем 'E2E Seed Outbound SKU' заказы 07 разбирали pre-STORED
+--     товары других фикстур без цепочечной истории. Отдельный SKU изолирует 07:
+--     allocate матчит ТОЛЬКО собственные товары потока, и picking/shipping
+--     становятся реальными FSM-переходами (None→Accepted→PutAway→Picked→Shipped).
 -- ────────────────────────────────────────────────────────────────────────────
 INSERT INTO wms_inventory.skus (sku_id, name, description, volume, created_at, updated_at)
 SELECT gen_random_uuid(), 'STRESS-FLOW-SKU', 'Выделенный SKU для нагрузочного теста 07-full-flow', 1.0::numeric, now(), now()
@@ -68,6 +67,69 @@ SELECT s.sku_id, 'STRESS-FLOW-BC-01'
 FROM wms_inventory.skus s
 WHERE s.name = 'STRESS-FLOW-SKU'
 ON CONFLICT (barcode) DO NOTHING;
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- 0.3 Выделенные SKU + штрихкоды для тестов 06 и 08.
+--     Товары этих тестов создаются в setup() через подписанный receiving
+--     (lib/bootstrap.js), поэтому allocate матчит только собственный пул теста
+--     и не задевает dev-сид (QR-2026-*, ORD-2026-0501) и другие пулы.
+-- ────────────────────────────────────────────────────────────────────────────
+INSERT INTO wms_inventory.skus (sku_id, name, description, volume, created_at, updated_at)
+SELECT gen_random_uuid(), 'STRESS-ASM-SKU', 'Выделенный SKU для нагрузочного теста 06-assembly', 1.0::numeric, now(), now()
+WHERE NOT EXISTS (SELECT 1 FROM wms_inventory.skus WHERE name = 'STRESS-ASM-SKU');
+
+INSERT INTO wms_inventory.sku_barcodes (sku_id, barcode)
+SELECT s.sku_id, 'STRESS-ASM-BC-01'
+FROM wms_inventory.skus s
+WHERE s.name = 'STRESS-ASM-SKU'
+ON CONFLICT (barcode) DO NOTHING;
+
+INSERT INTO wms_inventory.skus (sku_id, name, description, volume, created_at, updated_at)
+SELECT gen_random_uuid(), 'STRESS-TPS-SKU', 'Выделенный SKU для нагрузочного теста 08-blockchain-tps', 1.0::numeric, now(), now()
+WHERE NOT EXISTS (SELECT 1 FROM wms_inventory.skus WHERE name = 'STRESS-TPS-SKU');
+
+INSERT INTO wms_inventory.sku_barcodes (sku_id, barcode)
+SELECT s.sku_id, 'STRESS-TPS-BC-01'
+FROM wms_inventory.skus s
+WHERE s.name = 'STRESS-TPS-SKU'
+ON CONFLICT (barcode) DO NOTHING;
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- 0.4 Выделенные магазины и их буферы отгрузки для тестов 06 и 07.
+--     Свои destination на каждый тест ⇒ в пуле NEW-заказов магазина нет чужих
+--     заказов (dev-сид ORD-2026-0501 → SHOP-5 раньше уводил allocate 07 на
+--     товары QR-2026-* без цепочечной истории). Буфер отгрузки обязан быть
+--     привязан к магазину (bins_shipping_buffer_requires_destination).
+-- ────────────────────────────────────────────────────────────────────────────
+INSERT INTO wms_inventory.destinations (destination_id, code, name, address, warehouse_id, created_at, updated_at)
+SELECT gen_random_uuid(), 'STRESS-SHOP-06', 'Stress-магазин сборки (06)',
+       'г. Москва, Нагрузочная ул., 6', w.warehouse_id, now(), now()
+FROM wms_inventory.warehouses w
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO wms_inventory.destinations (destination_id, code, name, address, warehouse_id, created_at, updated_at)
+SELECT gen_random_uuid(), 'STRESS-SHOP-07', 'Stress-магазин полного потока (07)',
+       'г. Москва, Нагрузочная ул., 7', w.warehouse_id, now(), now()
+FROM wms_inventory.warehouses w
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO wms_inventory.bins (bin_id, warehouse_id, code, section, destination_id, volume, created_at, updated_at)
+SELECT gen_random_uuid(), w.warehouse_id, 'BIN-SHIP-S06', 'SHIPPING_BUFFER', d.destination_id,
+       9999.0::numeric, now(), now()
+FROM wms_inventory.warehouses w
+JOIN wms_inventory.destinations d ON d.code = 'STRESS-SHOP-06'
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO wms_inventory.bins (bin_id, warehouse_id, code, section, destination_id, volume, created_at, updated_at)
+SELECT gen_random_uuid(), w.warehouse_id, 'BIN-SHIP-S07', 'SHIPPING_BUFFER', d.destination_id,
+       9999.0::numeric, now(), now()
+FROM wms_inventory.warehouses w
+JOIN wms_inventory.destinations d ON d.code = 'STRESS-SHOP-07'
+WHERE w.name = 'Склад Москва-Север'
+ON CONFLICT DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- 1. Входящие поставки для теста 04-receiving-gate.js
@@ -202,72 +264,58 @@ WHERE sh.ttn_code LIKE 'STRESS-FLOW-TTN-%'
 ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
--- 3. Pre-STORED товары для теста 06-assembly.js
---    2000 продуктов в статусе STORED, sku = E2E Seed Outbound SKU, bin = A-01-01
---    (4× по сравнению с прежними 500 — покрывает 1000 заказов SHOP-7 с запасом)
+-- 3. Пул грузомест для теста 06-assembly.js
+--    100 грузомест STRESS-ASM-CP-001..100 в RECEIVED_AT_GATE по 10 товаров SKU
+--    STRESS-ASM-SKU (= 1000 товаров). Сами товары создаёт setup() теста через
+--    подписанный receiving (lib/bootstrap.js): прямой INSERT в products оставлял
+--    их на контракте в Status.None, и PutAway/Pick отклонялись (WrongItemStatus).
 -- ────────────────────────────────────────────────────────────────────────────
--- Вспомогательная поставка для assembly-продуктов
 INSERT INTO wms_inventory.inbound_shipments
   (shipment_id, warehouse_id, ttn_code, status, created_at, updated_at)
 SELECT
   gen_random_uuid(),
   w.warehouse_id,
-  'STRESS-ASSEMBLY-TTN-001',
-  'GATE_CLOSED',
+  'STRESS-ASM-TTN-' || LPAD(gs.i::text, 4, '0'),
+  'GATE_IN_PROGRESS',
   now(),
   now()
 FROM wms_inventory.warehouses w
+CROSS JOIN generate_series(1, 100) AS gs(i)
 WHERE w.name = 'Склад Москва-Север'
 ON CONFLICT (ttn_code) DO NOTHING;
 
 INSERT INTO wms_inventory.cargoplaces
-  (cargoplace_id, shipment_id, cargoplace_code, status, created_at, updated_at)
+  (cargoplace_id, shipment_id, cargoplace_code, status, received_at_gate_at, created_at, updated_at)
 SELECT
   gen_random_uuid(),
-  sh.shipment_id,
-  'STRESS-ASSEMBLY-CP-001',
-  'TABLE_CLOSED',
+  s.shipment_id,
+  'STRESS-ASM-CP-' || LPAD(idx.i::text, 3, '0'),
+  'RECEIVED_AT_GATE',
+  now(),
   now(),
   now()
-FROM wms_inventory.inbound_shipments sh
-WHERE sh.ttn_code = 'STRESS-ASSEMBLY-TTN-001'
+FROM wms_inventory.inbound_shipments s
+JOIN (SELECT i FROM generate_series(1, 100) AS gs(i)) AS idx
+  ON s.ttn_code = 'STRESS-ASM-TTN-' || LPAD(idx.i::text, 4, '0')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO wms_inventory.products
-  (product_id, sku_id, shipment_id, cargoplace_id, qr_code, bin_id, status, created_at, updated_at)
+-- Ожидаемые SKU для assembly-грузомест (10 товаров на грузоместо)
+INSERT INTO wms_inventory.expected_cargoplace_skus
+  (cargoplace_id, sku_id, expected_qty)
 SELECT
-  gen_random_uuid(),
-  sk.sku_id,
-  sh.shipment_id,
   c.cargoplace_id,
-  'STRESS-PROD-QR-' || LPAD(gs.i::text, 6, '0'),
-  b.bin_id,
-  'STORED',
-  now(),
-  now()
-FROM generate_series(1, 2000) AS gs(i)
-CROSS JOIN (
-  SELECT sk.sku_id FROM wms_inventory.skus sk WHERE sk.name = 'E2E Seed Outbound SKU'
-) sk
-CROSS JOIN (
-  SELECT sh.shipment_id FROM wms_inventory.inbound_shipments sh
-  WHERE sh.ttn_code = 'STRESS-ASSEMBLY-TTN-001'
-) sh
-CROSS JOIN (
-  SELECT c.cargoplace_id FROM wms_inventory.cargoplaces c
-  WHERE c.cargoplace_code = 'STRESS-ASSEMBLY-CP-001'
-) c
-CROSS JOIN (
-  SELECT b.bin_id
-  FROM wms_inventory.bins b
-  JOIN wms_inventory.warehouses w ON w.warehouse_id = b.warehouse_id
-  WHERE b.code = 'A-01-01' AND w.name = 'Склад Москва-Север'
-) b
-ON CONFLICT (qr_code) DO NOTHING;
+  s.sku_id,
+  10
+FROM wms_inventory.cargoplaces c
+JOIN wms_inventory.inbound_shipments sh ON sh.shipment_id = c.shipment_id
+JOIN wms_inventory.skus s ON s.name = 'STRESS-ASM-SKU'
+WHERE sh.ttn_code LIKE 'STRESS-ASM-TTN-%'
+ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
--- 4. NEW заказы и SCHEDULED рейсы для теста 06-assembly (SHOP-7)
---    1000 заказов (↑ от 300) — тест 06 работает до исчерпания стока.
+-- 4. NEW заказы и SCHEDULED рейсы для теста 06-assembly (STRESS-SHOP-06)
+--    1000 заказов — 1:1 с товарами пула (1 заказ = 1 товар STRESS-ASM-SKU),
+--    свой destination ⇒ в пуле нет чужих NEW-заказов.
 -- ────────────────────────────────────────────────────────────────────────────
 INSERT INTO wms_inventory.orders
   (order_id, external_order_no, customer_id, warehouse_id, destination_id, status, created_at, updated_at)
@@ -286,21 +334,21 @@ CROSS JOIN wms_inventory.warehouses w
 CROSS JOIN wms_inventory.destinations d
 WHERE u.username = 'customer'
   AND w.name = 'Склад Москва-Север'
-  AND d.code = 'SHOP-7'
+  AND d.code = 'STRESS-SHOP-06'
 ON CONFLICT (external_order_no) DO NOTHING;
 
--- Строки заказов: 1 единица E2E Seed Outbound SKU на заказ
+-- Строки заказов: 1 единица STRESS-ASM-SKU на заказ
 INSERT INTO wms_inventory.order_lines (order_id, sku_id, qty)
 SELECT
   o.order_id,
   s.sku_id,
   1
 FROM wms_inventory.orders o
-JOIN wms_inventory.skus s ON s.name = 'E2E Seed Outbound SKU'
+JOIN wms_inventory.skus s ON s.name = 'STRESS-ASM-SKU'
 WHERE o.external_order_no LIKE 'STRESS-ORD-%'
 ON CONFLICT DO NOTHING;
 
--- 10 рейсов для SHOP-7
+-- 10 рейсов для STRESS-SHOP-06
 INSERT INTO wms_inventory.outbound_dispatches
   (dispatch_id, dispatch_code, warehouse_id, destination_id,
    vehicle_number, driver_name, driver_phone,
@@ -321,14 +369,14 @@ FROM generate_series(1, 10) AS gs(i)
 CROSS JOIN wms_inventory.warehouses w
 CROSS JOIN wms_inventory.destinations d
 WHERE w.name = 'Склад Москва-Север'
-  AND d.code = 'SHOP-7'
+  AND d.code = 'STRESS-SHOP-06'
 ON CONFLICT (dispatch_code) DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
--- 5. NEW заказы и SCHEDULED рейсы для теста 07-full-flow (SHOP-5)
+-- 5. NEW заказы и SCHEDULED рейсы для теста 07-full-flow (STRESS-SHOP-07)
 --    2000 заказов — 1:1 с товарами (1 на итерацию), чтобы КАЖДЫЙ товар мог быть
 --    аллоцирован и пройти все 4 стадии (сбалансированный 4-стадийный backlog).
---    Пул изолирован от теста 06 (SHOP-7).
+--    Пул изолирован от тестов 06/08 и от dev-сида (ORD-2026-0501 → SHOP-5).
 -- ────────────────────────────────────────────────────────────────────────────
 INSERT INTO wms_inventory.orders
   (order_id, external_order_no, customer_id, warehouse_id, destination_id, status, created_at, updated_at)
@@ -347,7 +395,7 @@ CROSS JOIN wms_inventory.warehouses w
 CROSS JOIN wms_inventory.destinations d
 WHERE u.username = 'customer'
   AND w.name = 'Склад Москва-Север'
-  AND d.code = 'SHOP-5'
+  AND d.code = 'STRESS-SHOP-07'
 ON CONFLICT (external_order_no) DO NOTHING;
 
 INSERT INTO wms_inventory.order_lines (order_id, sku_id, qty)
@@ -360,7 +408,7 @@ JOIN wms_inventory.skus s ON s.name = 'STRESS-FLOW-SKU'
 WHERE o.external_order_no LIKE 'STRESS-FLOW-ORD-%'
 ON CONFLICT DO NOTHING;
 
--- 10 рейсов для SHOP-5
+-- 10 рейсов для STRESS-SHOP-07
 INSERT INTO wms_inventory.outbound_dispatches
   (dispatch_id, dispatch_code, warehouse_id, destination_id,
    vehicle_number, driver_name, driver_phone,
@@ -381,14 +429,17 @@ FROM generate_series(1, 10) AS gs(i)
 CROSS JOIN wms_inventory.warehouses w
 CROSS JOIN wms_inventory.destinations d
 WHERE w.name = 'Склад Москва-Север'
-  AND d.code = 'SHOP-5'
+  AND d.code = 'STRESS-SHOP-07'
 ON CONFLICT (dispatch_code) DO NOTHING;
 
 -- ────────────────────────────────────────────────────────────────────────────
--- 6. Pre-RECEIVED товары для теста 08-blockchain-tps.js
---    5000 продуктов в статусе RECEIVED, bin_id = BUFFER-01.
---    Каждый putaway (scan-product + scan-storage-bin) создаёт 1 outbox_event,
---    который Debezium → Kafka → ledger-adapter доставляет в блокчейн.
+-- 6. Пул грузомест для теста 08-blockchain-tps.js
+--    500 грузомест STRESS-TPS-CP-001..500 в RECEIVED_AT_GATE по 10 товаров SKU
+--    STRESS-TPS-SKU (= 5000 товаров). Товары создаёт setup() теста подписанным
+--    receiving (lib/bootstrap.js): они приходят в BUFFER-01 в статусе RECEIVED
+--    и с on-chain Receive (Accepted), поэтому каждый putaway
+--    (scan-product + scan-storage-bin) — настоящий переход Accepted→PutAway
+--    и даёт outbox_event для Debezium → Kafka → ledger-adapter → контракт.
 --    Тест 08: shared-iterations 5000, измеряет WMS event-generation TPS
 --    и (через run-all.sh мониторинг) blockchain commit rate.
 -- ────────────────────────────────────────────────────────────────────────────
@@ -397,57 +448,41 @@ INSERT INTO wms_inventory.inbound_shipments
 SELECT
   gen_random_uuid(),
   w.warehouse_id,
-  'STRESS-TPS-TTN-001',
+  'STRESS-TPS-TTN-' || LPAD(gs.i::text, 4, '0'),
   'GATE_IN_PROGRESS',
   now(),
   now()
 FROM wms_inventory.warehouses w
+CROSS JOIN generate_series(1, 500) AS gs(i)
 WHERE w.name = 'Склад Москва-Север'
 ON CONFLICT (ttn_code) DO NOTHING;
 
 INSERT INTO wms_inventory.cargoplaces
-  (cargoplace_id, shipment_id, cargoplace_code, status, created_at, updated_at)
+  (cargoplace_id, shipment_id, cargoplace_code, status, received_at_gate_at, created_at, updated_at)
 SELECT
   gen_random_uuid(),
-  sh.shipment_id,
-  'STRESS-TPS-CP-001',
-  'TABLE_CLOSED',
+  s.shipment_id,
+  'STRESS-TPS-CP-' || LPAD(idx.i::text, 3, '0'),
+  'RECEIVED_AT_GATE',
+  now(),
   now(),
   now()
-FROM wms_inventory.inbound_shipments sh
-WHERE sh.ttn_code = 'STRESS-TPS-TTN-001'
+FROM wms_inventory.inbound_shipments s
+JOIN (SELECT i FROM generate_series(1, 500) AS gs(i)) AS idx
+  ON s.ttn_code = 'STRESS-TPS-TTN-' || LPAD(idx.i::text, 4, '0')
 ON CONFLICT DO NOTHING;
 
-INSERT INTO wms_inventory.products
-  (product_id, sku_id, shipment_id, cargoplace_id, qr_code, bin_id, status, created_at, updated_at)
+-- Ожидаемые SKU для TPS-грузомест (10 товаров на грузоместо)
+INSERT INTO wms_inventory.expected_cargoplace_skus
+  (cargoplace_id, sku_id, expected_qty)
 SELECT
-  gen_random_uuid(),
-  sk.sku_id,
-  sh.shipment_id,
   c.cargoplace_id,
-  'STRESS-TPS-QR-' || LPAD(gs.i::text, 6, '0'),
-  b.bin_id,
-  'RECEIVED',
-  now(),
-  now()
-FROM generate_series(1, 5000) AS gs(i)
-CROSS JOIN (
-  SELECT sk.sku_id FROM wms_inventory.skus sk WHERE sk.name = 'E2E Seed Outbound SKU'
-) sk
-CROSS JOIN (
-  SELECT sh.shipment_id FROM wms_inventory.inbound_shipments sh
-  WHERE sh.ttn_code = 'STRESS-TPS-TTN-001'
-) sh
-CROSS JOIN (
-  SELECT c.cargoplace_id FROM wms_inventory.cargoplaces c
-  WHERE c.cargoplace_code = 'STRESS-TPS-CP-001'
-) c
-CROSS JOIN (
-  SELECT b.bin_id
-  FROM wms_inventory.bins b
-  JOIN wms_inventory.warehouses w ON w.warehouse_id = b.warehouse_id
-  WHERE b.code = 'BUFFER-01' AND w.name = 'Склад Москва-Север'
-) b
-ON CONFLICT (qr_code) DO NOTHING;
+  s.sku_id,
+  10
+FROM wms_inventory.cargoplaces c
+JOIN wms_inventory.inbound_shipments sh ON sh.shipment_id = c.shipment_id
+JOIN wms_inventory.skus s ON s.name = 'STRESS-TPS-SKU'
+WHERE sh.ttn_code LIKE 'STRESS-TPS-TTN-%'
+ON CONFLICT (cargoplace_id, sku_id) DO NOTHING;
 
 COMMIT;

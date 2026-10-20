@@ -67,4 +67,11 @@ DELETE FROM wms_inventory.inbound_shipments WHERE ttn_code LIKE 'STRESS-%';
 DELETE FROM wms_inventory.orders WHERE external_order_no LIKE 'STRESS-%';
 DELETE FROM wms_inventory.outbound_dispatches WHERE dispatch_code LIKE 'STRESS-%';
 
+-- Справочники тестов 06/07 (stress-seed.sql §0.3-0.4): сначала ячейки, потом
+-- магазины — bins.destination_id и orders/dispatches ссылаются на destinations.
+DELETE FROM wms_inventory.bins WHERE code IN ('BIN-SHIP-S06', 'BIN-SHIP-S07');
+DELETE FROM wms_inventory.destinations WHERE code IN ('STRESS-SHOP-06', 'STRESS-SHOP-07');
+-- sku_barcodes уходят каскадом (ON DELETE CASCADE от skus).
+DELETE FROM wms_inventory.skus WHERE name IN ('STRESS-ASM-SKU', 'STRESS-TPS-SKU');
+
 COMMIT;

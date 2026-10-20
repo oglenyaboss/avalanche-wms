@@ -26,9 +26,13 @@
  *   - Переменные окружения:
  *       RECEIVING_BIN_ID   — UUID ячейки BUFFER-01
  *       STORAGE_BIN_ID     — UUID ячейки A-01-01
- *       DESTINATION_ID     — UUID магазина SHOP-5
- *       SHIPPING_BIN_ID    — UUID буфера отгрузки для SHOP-5
+ *       DESTINATION_ID     — UUID магазина STRESS-SHOP-07
+ *       SHIPPING_BIN_ID    — UUID буфера отгрузки STRESS-SHOP-07 (BIN-SHIP-S07)
  *       DISPATCH_CODE      — коды рейсов через запятую (STRESS-FLOW-DSP-0001,...,0010)
+ *
+ * Магазин STRESS-SHOP-07 выделен тесту: в его пуле NEW-заказов нет dev-заказа
+ * ORD-2026-0501, чьи товары QR-2026-* не имеют цепочечной истории и отклоняли
+ * весь Pick (WrongItemStatus).
  *
  * Запуск:
  *   source <(bash tests/stress/setup/generate-stress-data.sh)
@@ -72,7 +76,9 @@ export const options = {
     },
   },
   // Отгрузка вынесена в teardown(): даём время на пакетную развозку буфера.
-  teardownTimeout: '5m',
+  // Больше, чем TAIL_DEADLINE_S (300с) = дефолт: предупреждение о дедлайне хвоста
+  // успевает напечататься до того, как k6 убьёт teardown.
+  teardownTimeout: '7m',
   thresholds: {
     'group_duration{group:::receiving_table}': ['p(95)<1500'],
     'group_duration{group:::putaway}':         ['p(95)<500'],

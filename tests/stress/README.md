@@ -177,6 +177,12 @@ make stress
 | `07-full-flow.js` | Полный цикл receiving → putaway → assembly → shipping (4 подписанных перехода) | shared-iterations | 30 | 2000 | **Да** |
 | `08-blockchain-tps.js` | Blockchain TPS: 5000 подписанных putaway-действий → outbox → pipeline | shared-iterations | 100 | 5000 | **Да** |
 
+Тесты `06` и `08` готовят свои товары в `setup()` через подписанный receiving/putaway
+(`lib/bootstrap.js`): только что принятый товар имеет on-chain `Receive` (`Accepted`),
+и его `PutAway`/`Pick` — реальные переходы FSM, а не `WrongItemStatus`.
+Пул заказов каждого теста изолирован своим магазином (`STRESS-SHOP-06` / `STRESS-SHOP-07`),
+поэтому `allocate` не задевает dev-заказ `ORD-2026-0501` (`SHOP-5`) и чужие фикстуры.
+
 ### Запуск всех тестов одной командой (рекомендуется)
 
 ```bash
@@ -193,7 +199,7 @@ make stress-logs
 3. Ожидание готовности PostgreSQL и WMS
 4. Очистку предыдущих stress-данных (`stress-cleanup.sql`)
 5. Засев данных (`stress-seed.sql`)
-6. Генерацию JSON-файлов UUID грузомест и продуктов для SharedArray
+6. Генерацию JSON-файлов UUID грузомест для SharedArray
 7. Разрешение UUID ячеек/рейсов из БД
 8. Проверку операторов с ключами — без них 05–08 пропускаются
 9. Последовательный запуск тестов 01–08
@@ -232,14 +238,14 @@ k6 run -e RECEIVING_BIN_ID=$RECEIVING_BIN_ID \
        -e "DISPATCH_CODE=$DISPATCH_CODE_07" \
        tests/stress/07-full-flow.js
 
-# Тест blockchain TPS (нужен seed + UUID продуктов)
+# Тест blockchain TPS (нужен seed + UUID грузомест; товары создаёт setup())
 docker exec -i postgres_db psql -U root -d wms_blockchain_db \
   < tests/stress/setup/stress-seed.sql
-# Генерация /tmp/stress-tps-products.json:
+# Генерация /tmp/stress-tps-cps.json:
 docker exec postgres_db psql -U root -d wms_blockchain_db \
-  -tAc "SELECT COALESCE(json_agg(product_id::text ORDER BY qr_code),'[]') \
-        FROM wms_inventory.products WHERE qr_code LIKE 'STRESS-TPS-QR-%'" \
-  | tr -d '[:space:]' > /tmp/stress-tps-products.json
+  -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code),'[]') \
+        FROM wms_inventory.cargoplaces WHERE cargoplace_code LIKE 'STRESS-TPS-CP-%'" \
+  | tr -d '[:space:]' > /tmp/stress-tps-cps.json
 k6 run -e "WMS_URL=http://localhost:8080" \
        -e "RECEIVING_BIN_ID=<uuid-BUFFER-01>" \
        -e "STORAGE_BIN_ID=<uuid-A-01-01>" \
@@ -339,11 +345,16 @@ outbox-строку на много товаров (`warehouse_actions.item_ids`
 | TTN поставки | `STRESS-TTN-*` | 2000 | 04 |
 | КПП-грузоместа | `STRESS-CP-*` | 6000 (3 на TTN) | 04 |
 | Стол-грузоместа | `STRESS-TABLE-CP-*` | 2000 | 05 |
+| ASM-грузоместа (товары создаёт setup) | `STRESS-ASM-CP-*` | 100 (×10 товаров) | 06 |
+| NEW-заказы STRESS-SHOP-06 | `STRESS-ORD-*` | 1000 | 06 |
 | FLOW-грузоместа | `STRESS-FLOW-CP-*` | 2000 | 07 |
-| STORED-продукты (SHOP-7) | `STRESS-SKU-*` | 1000 продуктов | 06 |
-| NEW-заказы SHOP-7 | `STRESS-ORD-*` | 1000 | 06 |
-| NEW-заказы SHOP-5 | `STRESS-FLOW-ORD-*` | 1000 | 07 |
-| RECEIVED-продукты (TPS) | `STRESS-TPS-QR-*` | 5000 | 08 |
+| NEW-заказы STRESS-SHOP-07 | `STRESS-FLOW-ORD-*` | 2000 | 07 |
+| TPS-грузоместа (товары создаёт setup) | `STRESS-TPS-CP-*` | 500 (×10 товаров) | 08 |
+
+Пул `06`/`08` — грузоместа в `RECEIVED_AT_GATE`: товары создаёт `setup()` теста через
+receiving table и подписанные `close-cargoplace`/`scan-storage-bin` (`06` ещё и ставит их
+на склад). Прямой `INSERT` в `products` оставлял бы их на контракте в `Status.None` -
+и `PutAway`/`Pick` для них отклоняются.
 
 Все паттерны `STRESS-*` покрываются `stress-cleanup.sql` — очистка полностью сбрасывает пулы.
 

@@ -12,15 +12,18 @@
  *   Debezium → Kafka → ledger-adapter → contract → onchain_events
  *                        ↑ blockchain TPS измеряется через run-all.sh мониторинг
  *
- * Каждая итерация выполняет putaway одного pre-seeded продукта:
+ * Каждая итерация выполняет putaway одного товара, созданного в setup():
  *   POST /putaway/scan-product          → продукт добавлен в корзину
  *   POST /putaway/scan-storage-bin/draft + /submit → продукт STORED (подписанное действие)
  *
  * Метрика items_placed — товары из ответа submit (products_placed), а не строки
  * outbox: одно подписанное действие покрывает много товаров (warehouse_actions.item_ids).
  *
- * Данные: 5000 продуктов в статусе RECEIVED в буфере BUFFER-01.
- * Засев:  tests/stress/setup/stress-seed.sql (секция 6, STRESS-TPS-QR-*).
+ * Данные: setup() сам создаёт 5000 товаров (500 грузомест STRESS-TPS-CP-* × 10)
+ * через подписанный receiving (lib/bootstrap.js): они приходят в BUFFER-01
+ * с on-chain Receive (Status.Accepted), поэтому PutAway — настоящий переход
+ * FSM, а не WrongItemStatus для товаров без цепочечной истории.
+ * Засев: tests/stress/setup/stress-seed.sql (секция 6, STRESS-TPS-CP-*).
  *
  * Требования:
  *   - RECEIVING_BIN_ID  — UUID ячейки BUFFER-01
@@ -54,17 +57,20 @@ import { BASE_URL } from './lib/config.js';
 import { login, authHeaders } from './lib/helpers.js';
 import { importSigner } from './lib/signer.js';
 import { loadOperators, signedPost } from './lib/signedflow.js';
+import { receiveProducts } from './lib/bootstrap.js';
 
 const TOTAL_PRODUCTS = 5000;
 const VUS = Number(__ENV.VUS) || 100;
+// Минимум принятых товаров с on-chain Receive: 4750 из 5000 (95%).
+const MIN_RECEIVED = 4750;
 
 // Операторы с активными ключами (stress-provision): VU i подписывает оператором i.
 const OPERATORS = loadOperators();
 
-// UUIDs продуктов STRESS-TPS-QR-XXXXXX (pre-seeded в RECEIVED статусе, bin_id = BUFFER-01).
-// Генерируется run-all.sh перед тестом в /tmp/stress-tps-products.json.
-const PRODUCT_UUIDS = new SharedArray('tps_products', () =>
-  JSON.parse(open('/tmp/stress-tps-products.json')));
+// Грузоместа пула STRESS-TPS-CP-001..500 (файл готовит run-all.sh). Товары по ним
+// создаёт setup() — id собираются из ответов scan-qr и раздаются VU через setup data.
+const CP_UUIDS = new SharedArray('tps_cargoplaces', () =>
+  JSON.parse(open('/tmp/stress-tps-cps.json')));
 
 // Счётчик товаров, реально размещённых подписанным действием (products_placed submit-ответа).
 // Threshold 'count>=4750' означает: ≥95% из 5000 продуктов успешно помещено на склад.
@@ -81,6 +87,8 @@ export const options = {
       maxDuration: '5m',
     },
   },
+  // Подписанный receiving 500 грузомест × 10 товаров — ~17k запросов в setup.
+  setupTimeout: '10m',
   thresholds: {
     'http_req_duration{step:scan_product}':     ['p(95)<500', 'p(99)<1000'],
     'http_req_duration{step:scan_storage_bin}': ['p(95)<500', 'p(99)<1000'],
@@ -92,7 +100,7 @@ export const options = {
   },
 };
 
-export function setup() {
+export async function setup() {
   const required = {
     RECEIVING_BIN_ID: __ENV.RECEIVING_BIN_ID,
     STORAGE_BIN_ID:   __ENV.STORAGE_BIN_ID,
@@ -121,9 +129,25 @@ export function setup() {
     tokens.push(t);
   }
 
+  // Товары с реальной on-chain историей: Receive (close-cargoplace) оператором 0.
+  // PutAway в setup не делаем — тест 08 измеряет именно putaway-действия.
+  const bootstrapSigner = await importSigner(OPERATORS[0]);
+  const productIds = await receiveProducts(authHeaders(tokens[0]), bootstrapSigner, CP_UUIDS, {
+    receivingBinId: __ENV.RECEIVING_BIN_ID,
+    barcode: 'STRESS-TPS-BC-01',
+    qrPrefix: 'STRESS-TPS-QR',
+    perCp: 10,
+  });
+  if (productIds.length < MIN_RECEIVED) {
+    exec.test.abort(`[08-blockchain-tps] ABORT: принято ${productIds.length} товаров из ${TOTAL_PRODUCTS} ` +
+      `(минимум ${MIN_RECEIVED}): receiving не прошёл — проверь seed и stress-provision`);
+  }
+  console.log(`setup: принято товаров ${productIds.length} (пул ${CP_UUIDS.length} грузомест × 10)`);
+
   return {
     tokens,
     operators: OPERATORS,
+    productIds,
     receivingBinId: __ENV.RECEIVING_BIN_ID,
     storageBinId:   __ENV.STORAGE_BIN_ID,
   };
@@ -134,7 +158,7 @@ export function setup() {
 let vuSigner = null;
 
 export default async function (data) {
-  const { tokens, operators, receivingBinId, storageBinId } = data;
+  const { tokens, operators, productIds, receivingBinId, storageBinId } = data;
   const opIdx = (__VU - 1) % operators.length;
   const token = tokens[opIdx];
   if (!token) return;
@@ -152,7 +176,7 @@ export default async function (data) {
   const H = authHeaders(token);
 
   // exec.scenario.iterationInTest: глобальный уникальный индекс 0…4999.
-  const productId = PRODUCT_UUIDS[exec.scenario.iterationInTest];
+  const productId = productIds[exec.scenario.iterationInTest];
   if (!productId) {
     console.warn(`VU${__VU}: no product UUID at index ${exec.scenario.iterationInTest}`);
     return;
