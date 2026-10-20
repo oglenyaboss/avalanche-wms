@@ -8,7 +8,7 @@
 - Сквозной процесс и потоки данных: [end-to-end-flow](../business-process/end-to-end-flow.md), [data-flow-diagrams](../business-process/data-flow-diagrams.md)
 - Поэтапные флоу: [receiving-gate](../flows/receiving-gate-flow.md), [receiving-table](../flows/receiving-table-flow.md), [putaway](../flows/putaway-flow.md), [assembly](../flows/assembly-flow.md), [shipping](../flows/shipping-flow.md)
 - Модель данных: [entity-lifecycle](../data-model/entity-lifecycle.md), [er-diagram](../data-model/er-diagram.md), [Database_ru_v2](../db/Database_ru_v2.md)
-- Интеграция с блокчейном: [blockchain-mapping](../integration/blockchain-mapping.md), [data-contract](../integration/data-contract.md), [batch-mapping-approach](../integration/batch-mapping-approach.md)
+- Интеграция с блокчейном: [blockchain-mapping](../integration/blockchain-mapping.md), [data-contract](../integration/data-contract.md)
 - Справочник по модулям/эндпоинтам WMS: [wms-reference](./wms-reference.md)
 - Конвенции и процесс ревью: [CONVENTIONS](../CONVENTIONS.md), [MR_GUIDE](../MR_GUIDE.md)
 - Локальный Avalanche-стек: [deploy/subnet/README.md](../../deploy/subnet/README.md)
@@ -404,7 +404,7 @@ docker run --rm --network host --entrypoint cast ghcr.io/foundry-rs/foundry:stab
 адаптера) — [deploy/subnet/README.md](../../deploy/subnet/README.md), раздел
 «Allow-list отправителей транзакций и деплоеров».
 
-Маппинг WMS→контракт и формат данных — [blockchain-mapping](../integration/blockchain-mapping.md), [data-contract](../integration/data-contract.md), [batch-mapping-approach](../integration/batch-mapping-approach.md).
+Маппинг WMS→контракт и формат данных — [blockchain-mapping](../integration/blockchain-mapping.md), [data-contract](../integration/data-contract.md).
 
 ---
 

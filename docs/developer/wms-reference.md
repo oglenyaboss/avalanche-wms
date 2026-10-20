@@ -11,7 +11,7 @@
 | Пошаговые flow по этапам | [flows/receiving-gate-flow.md](../flows/receiving-gate-flow.md), [flows/receiving-table-flow.md](../flows/receiving-table-flow.md), [flows/putaway-flow.md](../flows/putaway-flow.md), [flows/assembly-flow.md](../flows/assembly-flow.md), [flows/shipping-flow.md](../flows/shipping-flow.md) |
 | Жизненный цикл сущностей, ER-диаграмма | [data-model/entity-lifecycle.md](../data-model/entity-lifecycle.md), [data-model/er-diagram.md](../data-model/er-diagram.md) |
 | Схема БД (таблицы, колонки, enum, миграции) | [db/Database_ru_v2.md](../db/Database_ru_v2.md) |
-| Маппинг WMS → блокчейн, контракт данных | [integration/blockchain-mapping.md](../integration/blockchain-mapping.md), [integration/data-contract.md](../integration/data-contract.md), [integration/batch-mapping-approach.md](../integration/batch-mapping-approach.md) |
+| Маппинг WMS → блокчейн, контракт данных | [integration/blockchain-mapping.md](../integration/blockchain-mapping.md), [integration/data-contract.md](../integration/data-contract.md) |
 | Обзор архитектуры | [architecture/system-overview.md](../architecture/system-overview.md) |
 | Контракт HTTP API (request/response по эндпоинтам) | [api/openapi.yaml](../api/openapi.yaml) — источник истины; [api/api-contract.md](../api/api-contract.md) — компаньон |
 | Конвенции кода/git, гайд по MR | [CONVENTIONS.md](../CONVENTIONS.md), [MR_GUIDE.md](../MR_GUIDE.md) |

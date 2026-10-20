@@ -124,7 +124,6 @@ flowchart LR
 | [db/Database_ru_v2.md](../db/Database_ru_v2.md) | Подробная схема БД: все поля всех таблиц с описаниями (схемы `public`, `wms_inventory`, `wms_ops`). |
 | [integration/blockchain-mapping.md](../integration/blockchain-mapping.md) | Маппинг WMS → блокчейн: какая операция что пишет, полный путь события. |
 | [integration/data-contract.md](../integration/data-contract.md) | Контракт данных: формат outbox, Kafka, Ledger Adapter, `onchain_events`. |
-| [integration/batch-mapping-approach.md](../integration/batch-mapping-approach.md) | Исторический подход v1 (событие на товар): сравнение альтернатив и нагрузочные замеры. |
 | [CONVENTIONS.md](../CONVENTIONS.md) | Конвенции проекта: git workflow, Go style, SQL naming, Docker. |
 | [MR_GUIDE.md](../MR_GUIDE.md) | Правила оформления merge requests. |
 

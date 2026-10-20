@@ -46,7 +46,7 @@ info:
     - Модель данных: `../data-model/entity-lifecycle.md`, `../data-model/er-diagram.md`,
       `../db/Database_ru_v2.md`
     - Интеграция с блокчейном: `../integration/blockchain-mapping.md`,
-      `../integration/data-contract.md`, `../integration/batch-mapping-approach.md`
+      `../integration/data-contract.md`
     - Архитектура: `../architecture/system-overview.md`, `../CONVENTIONS.md`, `../MR_GUIDE.md`
 
 servers:
