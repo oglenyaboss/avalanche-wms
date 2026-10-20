@@ -5,7 +5,7 @@
 # Шаги:
 #   1. Очистка предыдущих stress-данных (допустим сбой — первый прогон)
 #   2. Засев данных (stress-seed.sql)
-#   3. Генерация JSON-файлов UUID грузомест и продуктов для SharedArray
+#   3. Генерация JSON-файлов UUID грузомест для SharedArray
 #   4. Разрешение UUID ячеек и рейсов через psql
 #   4.5. Проверка операторов с ACTIVE-ключами для подписанных тестов 05–08
 #   5. Последовательный запуск тестов 01–08
@@ -117,10 +117,11 @@ else
     sleep 10
 fi
 
-# ── 3. Генерация JSON с UUID грузомест и продуктов ───────────────────────────
+# ── 3. Генерация JSON с UUID грузомест ──────────────────────────────────────
 # Тест 05 использует STRESS-TABLE-CP-* (stress-table-cps.json).
-# Тест 07 использует STRESS-FLOW-CP-*  (stress-flow-cps.json).
-# Тест 08 использует STRESS-TPS-QR-*  (stress-tps-products.json).
+# Тест 06 — STRESS-ASM-CP-*  (stress-asm-cps.json), setup создаёт по ним товары.
+# Тест 07 — STRESS-FLOW-CP-*  (stress-flow-cps.json).
+# Тест 08 — STRESS-TPS-CP-*  (stress-tps-cps.json), setup создаёт по ним товары.
 
 echo "[SEED] Генерация /tmp/stress-table-cps.json (тест 05)..."
 psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
@@ -137,6 +138,21 @@ if [ "${CP_COUNT:-0}" -eq 0 ]; then
 fi
 echo "[SEED] /tmp/stress-table-cps.json: ${CP_COUNT} UUID готово"
 
+echo "[SEED] Генерация /tmp/stress-asm-cps.json (тест 06)..."
+psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+    -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code), '[]')
+          FROM wms_inventory.cargoplaces
+          WHERE cargoplace_code LIKE 'STRESS-ASM-CP-%'" \
+    | tr -d '[:space:]' > /tmp/stress-asm-cps.json
+
+ASM_CP_COUNT=$(psql_q "SELECT count(*) FROM wms_inventory.cargoplaces
+                       WHERE cargoplace_code LIKE 'STRESS-ASM-CP-%'")
+if [ "${ASM_CP_COUNT:-0}" -eq 0 ]; then
+    echo "[SEED] FATAL: грузоместа STRESS-ASM-CP-* не найдены после засева." >&2
+    exit 1
+fi
+echo "[SEED] /tmp/stress-asm-cps.json: ${ASM_CP_COUNT} UUID готово"
+
 echo "[SEED] Генерация /tmp/stress-flow-cps.json (тест 07)..."
 psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
     -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code), '[]')
@@ -152,20 +168,20 @@ if [ "${FLOW_CP_COUNT:-0}" -eq 0 ]; then
 fi
 echo "[SEED] /tmp/stress-flow-cps.json: ${FLOW_CP_COUNT} UUID готово"
 
-echo "[SEED] Генерация /tmp/stress-tps-products.json (тест 08)..."
+echo "[SEED] Генерация /tmp/stress-tps-cps.json (тест 08)..."
 psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
-    -tAc "SELECT COALESCE(json_agg(product_id::text ORDER BY qr_code), '[]')
-          FROM wms_inventory.products
-          WHERE qr_code LIKE 'STRESS-TPS-QR-%'" \
-    | tr -d '[:space:]' > /tmp/stress-tps-products.json
+    -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code), '[]')
+          FROM wms_inventory.cargoplaces
+          WHERE cargoplace_code LIKE 'STRESS-TPS-CP-%'" \
+    | tr -d '[:space:]' > /tmp/stress-tps-cps.json
 
-TPS_PROD_COUNT=$(psql_q "SELECT count(*) FROM wms_inventory.products
-                         WHERE qr_code LIKE 'STRESS-TPS-QR-%'")
-if [ "${TPS_PROD_COUNT:-0}" -eq 0 ]; then
-    echo "[SEED] FATAL: продукты STRESS-TPS-QR-* не найдены после засева." >&2
+TPS_CP_COUNT=$(psql_q "SELECT count(*) FROM wms_inventory.cargoplaces
+                       WHERE cargoplace_code LIKE 'STRESS-TPS-CP-%'")
+if [ "${TPS_CP_COUNT:-0}" -eq 0 ]; then
+    echo "[SEED] FATAL: грузоместа STRESS-TPS-CP-* не найдены после засева." >&2
     exit 1
 fi
-echo "[SEED] /tmp/stress-tps-products.json: ${TPS_PROD_COUNT} UUID готово"
+echo "[SEED] /tmp/stress-tps-cps.json: ${TPS_CP_COUNT} UUID готово"
 
 # ── 4. Разрешение UUID ячеек и рейсов ────────────────────────────────────────
 echo "[SEED] Разрешение UUID ячеек и рейсов..."
@@ -182,11 +198,11 @@ STORAGE_BIN_ID=$(psql_q "
   WHERE b.code = 'A-01-01' AND w.name = 'Склад Москва-Север'
   LIMIT 1")
 
-# SHOP-7: для теста 06
+# STRESS-SHOP-06: для теста 06 (свой магазин ⇒ в пуле нет чужих NEW-заказов)
 DESTINATION_ID=$(psql_q "
   SELECT d.destination_id FROM wms_inventory.destinations d
   JOIN wms_inventory.warehouses w ON w.warehouse_id = d.warehouse_id
-  WHERE d.code = 'SHOP-7' AND w.name = 'Склад Москва-Север'
+  WHERE d.code = 'STRESS-SHOP-06' AND w.name = 'Склад Москва-Север'
   LIMIT 1")
 
 SHIPPING_BIN_ID=$(psql_q "
@@ -202,11 +218,12 @@ DISPATCH_CODE=$(psql_q "
   ORDER BY d.dispatch_code
   LIMIT 1")
 
-# SHOP-5: для теста 07 (изолированный пул, не конкурирует с тестом 06)
+# STRESS-SHOP-07: для теста 07 (изолированный пул, не конкурирует с тестами 06/08,
+# и в нём нет dev-заказа ORD-2026-0501 на товары QR-2026-* без цепочечной истории)
 DESTINATION_ID_07=$(psql_q "
   SELECT d.destination_id FROM wms_inventory.destinations d
   JOIN wms_inventory.warehouses w ON w.warehouse_id = d.warehouse_id
-  WHERE d.code = 'SHOP-5' AND w.name = 'Склад Москва-Север'
+  WHERE d.code = 'STRESS-SHOP-07' AND w.name = 'Склад Москва-Север'
   LIMIT 1")
 
 SHIPPING_BIN_ID_07=$(psql_q "
@@ -233,10 +250,10 @@ fi
 echo "[SEED] Готово:"
 echo "  RECEIVING_BIN_ID  = ${RECEIVING_BIN_ID}"
 echo "  STORAGE_BIN_ID    = ${STORAGE_BIN_ID}"
-echo "  DESTINATION_ID    = ${DESTINATION_ID}  (SHOP-7, тест 06)"
+echo "  DESTINATION_ID    = ${DESTINATION_ID}  (STRESS-SHOP-06, тест 06)"
 echo "  SHIPPING_BIN_ID   = ${SHIPPING_BIN_ID}"
 echo "  DISPATCH_CODE     = ${DISPATCH_CODE}"
-echo "  DESTINATION_ID_07 = ${DESTINATION_ID_07} (SHOP-5, тест 07)"
+echo "  DESTINATION_ID_07 = ${DESTINATION_ID_07} (STRESS-SHOP-07, тест 07)"
 echo "  SHIPPING_BIN_ID_07= ${SHIPPING_BIN_ID_07}"
 echo "  DISPATCH_CODE_07  = ${DISPATCH_CODE_07}"
 
@@ -309,7 +326,9 @@ run_signed "05-receiving-table.js" \
 
 run_signed "06-assembly.js" \
     -e "DESTINATION_ID=${DESTINATION_ID}" \
-    -e "SHIPPING_BIN_ID=${SHIPPING_BIN_ID}"
+    -e "SHIPPING_BIN_ID=${SHIPPING_BIN_ID}" \
+    -e "RECEIVING_BIN_ID=${RECEIVING_BIN_ID}" \
+    -e "STORAGE_BIN_ID=${STORAGE_BIN_ID}"
 
 run_signed "07-full-flow.js" \
     -e "RECEIVING_BIN_ID=${RECEIVING_BIN_ID}" \

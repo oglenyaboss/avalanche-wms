@@ -7,29 +7,45 @@
  *   POST /assembly/pick  (×N для каждого товара)
  *   POST /assembly/scan-shipping-buffer/draft + /submit  (подписанное действие)
  *
+ * setup() сам готовит пул товаров через подписанный receiving/putaway
+ * (lib/bootstrap.js): прямой INSERT в products оставлял товары на контракте в
+ * Status.None, и Pick отклонялся (WrongItemStatus).
+ *
  * Требования к данным:
  *   Перед запуском выполнить: tests/stress/setup/stress-seed.sql
- *   (создаёт STORED products и NEW orders для SHOP-5 / SHOP-7)
+ *   (создаёт 100 грузомест STRESS-ASM-CP-* и 1000 NEW-заказов STRESS-ORD-*
+ *   для магазина STRESS-SHOP-06)
  *   + tests/stress/.signed/operators.json — операторы с ACTIVE-ключами
  *     (`cd tests/e2e && go run ./cmd/stress-provision -operators 100`):
  *     один оператор на VU (своя корзина сборки и свой ключ подписи).
  *
  * Запуск:
- *   k6 run tests/stress/06-assembly.js
+ *   k6 run -e RECEIVING_BIN_ID=<uuid> -e STORAGE_BIN_ID=<uuid> \
+ *          -e DESTINATION_ID=<uuid> -e SHIPPING_BIN_ID=<uuid> \
+ *          tests/stress/06-assembly.js
  */
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import exec from 'k6/execution';
+import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders } from './lib/helpers.js';
 import { importSigner } from './lib/signer.js';
 import { loadOperators, signedPost } from './lib/signedflow.js';
+import { receiveProducts, putawayProducts } from './lib/bootstrap.js';
 
 // Максимум VU в рампе — столько же операторов и токенов нужно в setup().
 const MAX_VUS = 40;
 
 // Операторы с активными ключами (stress-provision): VU i подписывает оператором i.
 const OPERATORS = loadOperators();
+
+// Грузоместа пула STRESS-ASM-CP-001..100 (файл готовит run-all.sh).
+const CP_UUIDS = new SharedArray('assembly_cargoplaces', () =>
+  JSON.parse(open('/tmp/stress-asm-cps.json')));
+
+// Минимум товаров, размещённых на склад подписанным putaway: 950 из 1000 (95%).
+const MIN_STORED = 950;
 
 export const options = {
   scenarios: {
@@ -43,6 +59,8 @@ export const options = {
       ],
     },
   },
+  // Подписанные draft/submit медленные (P-256) — setup готовит 1000 товаров.
+  setupTimeout: '10m',
   thresholds: {
     'http_req_duration{step:allocate}': ['p(95)<500', 'p(99)<1000'],
     'http_req_duration{step:tasks}': ['p(95)<250'],
@@ -52,11 +70,13 @@ export const options = {
   },
 };
 
-export function setup() {
+export async function setup() {
   // Проверяем обязательные env-переменные перед стартом VU.
   const missing = [];
   if (!__ENV.DESTINATION_ID) missing.push('DESTINATION_ID');
   if (!__ENV.SHIPPING_BIN_ID) missing.push('SHIPPING_BIN_ID');
+  if (!__ENV.RECEIVING_BIN_ID) missing.push('RECEIVING_BIN_ID');
+  if (!__ENV.STORAGE_BIN_ID) missing.push('STORAGE_BIN_ID');
 
   if (missing.length > 0) {
     const msg =
@@ -65,7 +85,8 @@ export function setup() {
       '\n\nВыполните перед запуском:\n' +
       '  source <(bash tests/stress/setup/generate-stress-data.sh)\n' +
       'или передайте явно:\n' +
-      '  k6 run -e DESTINATION_ID=<uuid> -e SHIPPING_BIN_ID=<uuid> \\\n' +
+      '  k6 run -e RECEIVING_BIN_ID=<uuid> -e STORAGE_BIN_ID=<uuid> \\\n' +
+      '         -e DESTINATION_ID=<uuid> -e SHIPPING_BIN_ID=<uuid> \\\n' +
       '         tests/stress/06-assembly.js\n';
     exec.test.abort(msg);
   }
@@ -85,6 +106,28 @@ export function setup() {
     }
     tokens.push(t);
   }
+
+  // Пул товаров с реальной on-chain историей: Receive (close-cargoplace) →
+  // PutAway (scan-storage-bin), оператором 0. Без этого Pick отклоняется
+  // контрактом (Status.None ≠ PutAway).
+  const bootstrapSigner = await importSigner(OPERATORS[0]);
+  const bootstrapHeaders = authHeaders(tokens[0]);
+  const productIds = await receiveProducts(bootstrapHeaders, bootstrapSigner, CP_UUIDS, {
+    receivingBinId: __ENV.RECEIVING_BIN_ID,
+    barcode: 'STRESS-ASM-BC-01',
+    qrPrefix: 'STRESS-ASM-QR',
+    perCp: 10,
+  });
+  const stored = await putawayProducts(bootstrapHeaders, bootstrapSigner, productIds, {
+    receivingBinId: __ENV.RECEIVING_BIN_ID,
+    storageBinId: __ENV.STORAGE_BIN_ID,
+  });
+  if (stored < MIN_STORED) {
+    exec.test.abort(`[06-assembly] ABORT: размещено ${stored} товаров из ${CP_UUIDS.length * 10} ` +
+      `(минимум ${MIN_STORED}): receiving/putaway не прошли — проверь seed и stress-provision`);
+  }
+  console.log(`setup: товаров на складе ${stored} (пул ${CP_UUIDS.length} грузомест × 10)`);
+
   return {
     tokens,
     operators: OPERATORS,
@@ -128,15 +171,21 @@ export default async function (data) {
   });
 
   if (!allocOk) {
-    // 422 INSUFFICIENT_STOCK — нет товаров; 409 ORDER_NOT_NEW — заказы кончились
+    // 422 INSUFFICIENT_STOCK — нет товаров; 409 ORDER_NOT_NEW — заказы кончились.
+    // Пул исчерпан — не долбим allocate в горячем цикле, ждём следующего VU.
     if (allocRes.status === 422 || allocRes.status === 409) {
       console.warn(`VU${__VU}: allocate returned ${allocRes.status} — no allocatable orders left`);
+      sleep(1);
     }
     return;
   }
 
   const allocData = JSON.parse(allocRes.body).data;
-  if (!allocData || allocData.allocated_orders === 0) return;
+  if (!allocData || allocData.allocated_orders === 0) {
+    // Пул заказов/стока исчерпан: 200 без аллокаций — дальше без паузы нет смысла.
+    sleep(1);
+    return;
+  }
 
   sleep(0.1);
 
