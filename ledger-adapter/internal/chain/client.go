@@ -51,7 +51,10 @@ const (
 // оценивается, пока предыдущее действие с теми же товарами ещё in-flight:
 // estimateGas видит товар в раннем статусе и идёт по пути отклонения
 // (ActionRejected), а к майнингу товар уже в нужном статусе и действие
-// применяется с записью на каждый товар — дороже. ×3/2 — запас на этот разрыв.
+// применяется с записью на каждый товар — дороже. ×3/2 сам по себе этот разрыв
+// не покрывает (дешёвая reject-оценка может быть многократно ниже применения);
+// детерминированную нижнюю границу по числу товаров даёт
+// chain.ApplyActionsGasFloor — она подставляется minGas'ом в send.
 const (
 	gasLimitHeadroomNum = 3
 	gasLimitHeadroomDen = 2
@@ -128,14 +131,15 @@ func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
 // applyActions на SignedMappingWMS и applyKeyActions на ConsortiumRegistry
 // пакуются заранее (PackApplyActions / PackApplyKeyActions). Идёт по общему
 // nonce/gas/sign/send-пути send: одна nonce-последовательность подписанта и те
-// же классы ошибок (ErrChainTransient/ErrChainRevert).
-func (c *Client) SendCalldata(ctx context.Context, to common.Address, data []byte) (common.Hash, error) {
-	return c.send(ctx, to, data, "calldata")
+// же классы ошибок (ErrChainTransient/ErrChainRevert). minGas — нижняя граница
+// gas-лимита, 0 — без неё.
+func (c *Client) SendCalldata(ctx context.Context, to common.Address, data []byte, minGas uint64) (common.Hash, error) {
+	return c.send(ctx, to, data, "calldata", minGas)
 }
 
 // send строит, подписывает и отправляет legacy-tx с готовыми calldata на to.
 // label попадает в текст ошибок estimate-gas для диагностики.
-func (c *Client) send(ctx context.Context, to common.Address, data []byte, label string) (common.Hash, error) {
+func (c *Client) send(ctx context.Context, to common.Address, data []byte, label string, minGas uint64) (common.Hash, error) {
 	// Сериализуем nonce-allocation + sign + send: один fromAddress.
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -178,6 +182,9 @@ func (c *Client) send(ctx context.Context, to common.Address, data []byte, label
 	// Запас на gas-лимит против разрыва отклонение→применение под пайплайном (см.
 	// gasLimitHeadroomNum/Den) — иначе stale-оценка → OutOfGas-реверт.
 	gasLimit = gasLimit * gasLimitHeadroomNum / gasLimitHeadroomDen
+	if gasLimit < minGas {
+		gasLimit = minGas
+	}
 
 	chainID, err := c.eth.ChainID(ctx)
 	if err != nil {

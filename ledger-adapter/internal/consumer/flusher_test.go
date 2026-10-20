@@ -29,6 +29,7 @@ type stubChain struct {
 	calldataLens      []int            // размер data каждого SendCalldata (по порядку)
 	calldatas         [][]byte         // data каждого SendCalldata (копия, по порядку)
 	tos               []common.Address // адрес каждого SendCalldata (по порядку)
+	minGases          []uint64         // minGas каждого SendCalldata (по порядку)
 	receiptCalls      int              // сколько раз дёрнули TransactionReceipt
 	callErr           error
 	callErrFor        map[string]error // per-aggregate error
@@ -38,13 +39,14 @@ type stubChain struct {
 	receiptWait       int
 }
 
-func (s *stubChain) SendCalldata(_ context.Context, to common.Address, data []byte) (common.Hash, error) {
+func (s *stubChain) SendCalldata(_ context.Context, to common.Address, data []byte, minGas uint64) (common.Hash, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, aggregateSignedAction)
 	s.calldataLens = append(s.calldataLens, len(data))
 	s.calldatas = append(s.calldatas, append([]byte(nil), data...))
 	s.tos = append(s.tos, to)
+	s.minGases = append(s.minGases, minGas)
 	if s.callErrFor != nil {
 		if err, ok := s.callErrFor[aggregateSignedAction]; ok {
 			return common.Hash{}, err
@@ -1113,5 +1115,49 @@ func TestFlusher_WarehouseSegmentWithoutResolver_TerminalFail(t *testing.T) {
 	}
 	if len(dq.messages) != 1 || len(dq.messages[0]) != 2 {
 		t.Errorf("expected 1 DLQ batch of 2, got %v", dq.messages)
+	}
+}
+
+// TestFlusher_WarehouseChunkPassesGasFloor: складской чанк уходит в SendCalldata
+// с minGas = детерминированной нижней границей по числу товаров самого чанка —
+// estimate под пайплайном видит дешёвый reject-путь, а к майнингу действие
+// применяется с записью на каждый товар (без границы → OOG → revert всего tx).
+func TestFlusher_WarehouseChunkPassesGasFloor(t *testing.T) {
+	f, ch, _, _ := newFlusherT()
+	receive := makeWarehouseMessage(`{}`)
+	receive.WarehouseAction.ItemIds = []*big.Int{big.NewInt(1), big.NewInt(2), big.NewInt(3)}
+	ship := makeWarehouseMessage(`{}`)
+	ship.WarehouseAction.ActionType = 4 // Ship
+	ship.WarehouseAction.ItemIds = []*big.Int{big.NewInt(1), big.NewInt(2), big.NewInt(3), big.NewInt(4), big.NewInt(5)}
+	f.WithWarehouseActions(appliedResolver(receive, ship))
+
+	if _, err := f.Send(context.Background(), []*Message{receive, ship}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(ch.minGases) != 1 {
+		t.Fatalf("expected 1 SendCalldata, got %d", len(ch.minGases))
+	}
+	// 21_000 база + 2×70_000 действия + 3×26_000 приёмка + 5×9_000 отгрузка.
+	want := uint64(21_000 + 2*70_000 + 3*26_000 + 5*9_000)
+	if got := ch.minGases[0]; got != want {
+		t.Errorf("minGas: got %d, want %d", got, want)
+	}
+}
+
+// TestFlusher_KeyActionsNoGasFloor: ключевые действия уходят с minGas = 0 —
+// нижняя граница газа считается только для applyActions.
+func TestFlusher_KeyActionsNoGasFloor(t *testing.T) {
+	f, ch, _, _ := newFlusherT()
+	k := makeActionMessage(`{}`)
+	f.WithRegistry(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{k.EventID: {Applied: true}}})
+
+	if _, err := f.Send(context.Background(), []*Message{k}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(ch.minGases) != 1 {
+		t.Fatalf("expected 1 SendCalldata, got %d", len(ch.minGases))
+	}
+	if got := ch.minGases[0]; got != 0 {
+		t.Errorf("key actions minGas: got %d, want 0", got)
 	}
 }

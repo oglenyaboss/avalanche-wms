@@ -14,7 +14,7 @@ import (
 
 // ChainCaller — minimal interface что нужен flusher'у от chain client'а.
 type ChainCaller interface {
-	SendCalldata(ctx context.Context, to common.Address, data []byte) (common.Hash, error)
+	SendCalldata(ctx context.Context, to common.Address, data []byte, minGas uint64) (common.Hash, error)
 	TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error)
 }
 

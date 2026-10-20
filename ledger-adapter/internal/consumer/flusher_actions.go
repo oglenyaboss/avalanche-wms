@@ -69,6 +69,7 @@ type actionTarget struct {
 	name     string         // "applyActions" | "applyKeyActions" — для логов и причины фейла
 	resolver ActionResolver // nil → терминальный фейл "<name>: contract not configured"
 	pack     func([]*Message) ([]byte, error)
+	gasFloor func([]*Message) uint64 // нижняя граница газа чанка; nil → minGas = 0
 }
 
 // WithRegistry подключает разбор исходов ключевых действий (nil = они
@@ -94,6 +95,9 @@ func (f *Flusher) warehouseTarget() actionTarget {
 		resolver: f.warehouse,
 		pack: func(msgs []*Message) ([]byte, error) {
 			return chain.PackApplyActions(warehouseActionsOf(msgs))
+		},
+		gasFloor: func(msgs []*Message) uint64 {
+			return chain.ApplyActionsGasFloor(warehouseActionsOf(msgs))
 		},
 	}
 }
@@ -154,7 +158,11 @@ func (f *Flusher) sendActions(ctx context.Context, msgs []*Message, inflight []I
 			i++
 		default:
 			chunk := pending[i : i+n]
-			txHash, err := f.caller.SendCalldata(ctx, t.resolver.Address(), data)
+			var minGas uint64
+			if t.gasFloor != nil {
+				minGas = t.gasFloor(chunk)
+			}
+			txHash, err := f.caller.SendCalldata(ctx, t.resolver.Address(), data, minGas)
 			if err != nil {
 				if errors.Is(err, chain.ErrChainTransient) {
 					f.log.Warn(t.name+" transient error — will retry", "size", len(chunk), "err", err)
