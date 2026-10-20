@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -191,7 +192,45 @@ func TestGetProduct_InconsistentDomainRowsAreSurfaced(t *testing.T) {
 	if a.Details != nil {
 		t.Fatalf("details = %+v, want null", a.Details)
 	}
-	if a.DetailsError == nil || *a.DetailsError != detailsErr.Error() {
-		t.Fatalf("detailsError = %v, want %q", a.DetailsError, detailsErr.Error())
+	if a.DetailsError == nil || *a.DetailsError != "DOMAIN_INCONSISTENT" {
+		t.Fatalf("detailsError = %v, want %q", a.DetailsError, "DOMAIN_INCONSISTENT")
+	}
+}
+
+func TestGetProduct_MissingDomainRowIsSurfaced(t *testing.T) {
+	productID := uuid.New()
+	detailsErr := fmt.Errorf("audit.Repository.Details putaways: %w", ErrDomainRowMissing)
+	repo := &fakeRepo{
+		productID:  productID,
+		actions:    []Action{putAwayAction(productID)},
+		detailsErr: detailsErr,
+	}
+	rec := serveAudit(repo, domain.UserRoleAuditor, "/audit/products/"+productID.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var env auditEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	a := env.Data.Actions[0]
+	if a.Details != nil {
+		t.Fatalf("details = %+v, want null", a.Details)
+	}
+	if a.DetailsError == nil || *a.DetailsError != "DOMAIN_ROW_MISSING" {
+		t.Fatalf("detailsError = %v, want %q", a.DetailsError, "DOMAIN_ROW_MISSING")
+	}
+}
+
+func TestGetProduct_DetailsInternalError500(t *testing.T) {
+	productID := uuid.New()
+	repo := &fakeRepo{
+		productID:  productID,
+		actions:    []Action{putAwayAction(productID)},
+		detailsErr: errors.New("connection reset"),
+	}
+	rec := serveAudit(repo, domain.UserRoleAuditor, "/audit/products/"+productID.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
 	}
 }

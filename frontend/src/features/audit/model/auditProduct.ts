@@ -7,6 +7,11 @@ import type { AuditStage, DbAction, ProductAudit } from './types'
 
 type Entry = { stage: AuditStage; blockNumber: bigint | null; dbIndex: number }
 
+const DETAILS_ERROR_TEXT: Record<string, string> = {
+  DOMAIN_ROW_MISSING: 'В БД нет строки этапа для товара этого действия',
+  DOMAIN_INCONSISTENT: 'Детали действия в БД расходятся между товарами',
+}
+
 export async function auditProduct(db: ProductAudit, chain: ChainReader): Promise<AuditStage[]> {
   const chainIds = await chain.actionIdsForItem(BigInt(db.itemId))
   const ids = [...new Set([...chainIds, ...db.actions.map((a) => a.actionId)])]
@@ -153,7 +158,10 @@ async function appliedStage(
 
   if (dbAction.details === null) {
     stage.detailsHash = 'mismatch'
-    problems.push(dbAction.detailsError ?? 'Хеш деталей из БД недоступен')
+    problems.push(
+      (dbAction.detailsError && DETAILS_ERROR_TEXT[dbAction.detailsError]) ??
+        'Хеш деталей из БД недоступен',
+    )
   } else if (chainAction.actionType !== dbAction.actionType) {
     stage.detailsHash = 'mismatch'
     problems.push('Тип действия в БД не совпадает с цепью')
