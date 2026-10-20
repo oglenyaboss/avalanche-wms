@@ -123,7 +123,7 @@ func (r *Repository) InsertPasskey(ctx context.Context, p domain.Passkey) error 
 		INSERT INTO public.passkey_credentials
 			(credential_id, user_id, org_id, qx, qy, key_id, role, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)`,
-		p.CredentialID, p.UserID, p.OrgID, p.QX[:], p.QY[:], p.KeyID[:], string(p.Role), string(p.Status), p.CreatedAt)
+		p.CredentialID, p.UserID, p.OrgID, p.Key.X[:], p.Key.Y[:], p.KeyID[:], string(p.Role), string(p.Status), p.CreatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -179,13 +179,13 @@ type rowScanner interface {
 
 func scanPasskey(row rowScanner) (domain.Passkey, error) {
 	var p domain.Passkey
-	var qx, qy, keyID []byte
+	var x, y, keyID []byte
 	var role, status string
-	if err := row.Scan(&p.CredentialID, &p.UserID, &p.OrgID, &qx, &qy, &keyID, &role, &status, &p.CreatedAt); err != nil {
+	if err := row.Scan(&p.CredentialID, &p.UserID, &p.OrgID, &x, &y, &keyID, &role, &status, &p.CreatedAt); err != nil {
 		return domain.Passkey{}, err
 	}
-	copy(p.QX[:], qx)
-	copy(p.QY[:], qy)
+	copy(p.Key.X[:], x)
+	copy(p.Key.Y[:], y)
 	copy(p.KeyID[:], keyID)
 	p.Role = domain.UserRole(role)
 	p.Status = domain.PasskeyStatus(status)

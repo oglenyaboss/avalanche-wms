@@ -67,12 +67,11 @@ func (m *mockSignerSource) RelyingParty() (string, []string) {
 // signedSigner returns an operator passkey whose key pair signs real assertions.
 func signedSigner() (*domain.Passkey, *ecdsa.PrivateKey) {
 	key := signedactiontest.NewKey()
-	qx, qy := signedactiontest.Coordinates(key)
+	point := signedactiontest.Coordinates(key)
 	return &domain.Passkey{
 		CredentialID: []byte("cred-operator"),
-		QX:           qx,
-		QY:           qy,
-		KeyID:        signedaction.KeyID(qx, qy),
+		Key:          point,
+		KeyID:        signedaction.KeyID(point),
 		Status:       domain.PasskeyStatusActive,
 	}, key
 }

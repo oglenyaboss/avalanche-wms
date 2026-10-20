@@ -195,7 +195,7 @@ func (a *Auditor) checkSignature(ctx context.Context, db *Action, applied *Chain
 	}
 	itemsHash := itemsHashWords(auth.ItemIDs)
 	challenge := signedaction.Challenge(db.ActionID, applied.ActionType, itemsHash, applied.DetailsHash)
-	if err := signedaction.VerifyOnChain(auth.WebAuthn, challenge, k.QX, k.QY); err != nil {
+	if err := signedaction.VerifyOnChain(auth.WebAuthn, challenge, k.Point); err != nil {
 		s.Signature = CheckMismatch
 		s.Findings = append(s.Findings, Finding{ActionID: db.ActionID, Kind: KindSignature, Detail: err.Error()})
 		return nil

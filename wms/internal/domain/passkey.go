@@ -15,12 +15,17 @@ const (
 	PasskeyStatusRevoked  PasskeyStatus = "REVOKED"
 )
 
+// P256Point is an uncompressed P-256 public key (big-endian coordinates).
+type P256Point struct {
+	X [32]byte
+	Y [32]byte
+}
+
 type Passkey struct {
 	CredentialID []byte
 	UserID       uuid.UUID
 	OrgID        uuid.UUID
-	QX           [32]byte
-	QY           [32]byte
+	Key          P256Point
 	KeyID        [32]byte
 	Role         UserRole
 	Status       PasskeyStatus

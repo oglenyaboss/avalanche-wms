@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 
+	"wms/internal/domain"
 	"wms/internal/signedaction"
 )
 
@@ -276,7 +277,7 @@ func consistentFakes(f fixture, product uuid.UUID) (*fakeStore, *fakeLedger) {
 	for _, it := range f.action.ItemIDs {
 		items = append(items, [32]byte(it))
 	}
-	signer := Key{QX: [32]byte(f.vectors.Signer.QX), QY: [32]byte(f.vectors.Signer.QY)}
+	signer := Key{Point: domain.P256Point{X: [32]byte(f.vectors.Signer.QX), Y: [32]byte(f.vectors.Signer.QY)}}
 	s := &fakeStore{
 		byProduct: map[uuid.UUID][]Action{product: {f.dbAction}},
 		byID:      map[uuid.UUID]*Action{f.actionID: &f.dbAction},
@@ -489,7 +490,7 @@ func TestAudit_Product_SignerMismatch(t *testing.T) {
 	ca := f.chainAction()
 	ca.KeyID = [32]byte{0xee}
 	l.applied[f.actionID] = ca
-	l.keys[ca.KeyID] = Key{QX: [32]byte(f.vectors.Signer.QX), QY: [32]byte(f.vectors.Signer.QY)}
+	l.keys[ca.KeyID] = Key{Point: domain.P256Point{X: [32]byte(f.vectors.Signer.QX), Y: [32]byte(f.vectors.Signer.QY)}}
 	report, err := NewAuditor(s, l).Product(context.Background(), product)
 	if err != nil {
 		t.Fatalf("Product: %v", err)

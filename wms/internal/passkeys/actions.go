@@ -50,8 +50,7 @@ type KeyActionSubmission struct {
 // KeyActionDraft is a stored draft plus what the admin's browser needs to sign it.
 type KeyActionDraft struct {
 	Action      KeyAction
-	SubjectQX   [32]byte
-	SubjectQY   [32]byte
+	Subject     domain.P256Point
 	DetailsHash [32]byte
 	SignerKeyID [32]byte
 	RPID        string
@@ -95,7 +94,7 @@ func (s *Service) draftKeyAction(ctx context.Context, userID uuid.UUID, actionTy
 	if err != nil {
 		return nil, fmt.Errorf("passkeys.Service.draftKeyAction action id: %w", err)
 	}
-	detailsHash := signedaction.KeyDetailsHash(subject.QX, subject.QY)
+	detailsHash := signedaction.KeyDetailsHash(subject.Key)
 	action := KeyAction{
 		ActionID:           actionID,
 		OrgID:              *member.OrgID,
@@ -110,8 +109,7 @@ func (s *Service) draftKeyAction(ctx context.Context, userID uuid.UUID, actionTy
 	}
 	return &KeyActionDraft{
 		Action:      action,
-		SubjectQX:   subject.QX,
-		SubjectQY:   subject.QY,
+		Subject:     subject.Key,
 		DetailsHash: detailsHash,
 		SignerKeyID: signer.KeyID,
 		RPID:        s.wa.Config.RPID,
@@ -241,7 +239,7 @@ func (s *Service) SubmitKeyAction(ctx context.Context, userID, actionID uuid.UUI
 	if !bytes.Equal(a.CredentialID, signer.CredentialID) {
 		return nil, ErrInvalidAssertion
 	}
-	wa, err := signedaction.Verify(a, action.Challenge, signer.QX, signer.QY, s.wa.Config.RPID, s.wa.Config.RPOrigins)
+	wa, err := signedaction.Verify(a, action.Challenge, signer.Key, s.wa.Config.RPID, s.wa.Config.RPOrigins)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidAssertion, err)
 	}

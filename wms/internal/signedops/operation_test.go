@@ -19,12 +19,11 @@ import (
 
 func testSignerWithKey() (*domain.Passkey, *ecdsa.PrivateKey) {
 	key := signedactiontest.NewKey()
-	qx, qy := signedactiontest.Coordinates(key)
+	point := signedactiontest.Coordinates(key)
 	return &domain.Passkey{
 		CredentialID: []byte("cred-signer"),
-		QX:           qx,
-		QY:           qy,
-		KeyID:        signedaction.KeyID(qx, qy),
+		Key:          point,
+		KeyID:        signedaction.KeyID(point),
 	}, key
 }
 

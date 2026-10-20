@@ -81,8 +81,8 @@ func newActionFixture(t *testing.T) *actionFixture {
 	repo, signer, target := actionRepo(t)
 	f := &actionFixture{repo: repo, signer: signer, target: target}
 	f.signerKey = signedactiontest.NewKey()
-	qx, qy := signedactiontest.Coordinates(f.signerKey)
-	signer.QX, signer.QY, signer.KeyID = qx, qy, signedaction.KeyID(qx, qy)
+	key := signedactiontest.Coordinates(f.signerKey)
+	signer.Key, signer.KeyID = key, signedaction.KeyID(key)
 	repo.insertKeyActionFn = func(_ context.Context, a KeyAction) error {
 		cp := a
 		f.stored = &cp
@@ -141,7 +141,7 @@ func TestDraftKeyRegister_Success(t *testing.T) {
 		t.Fatalf("DraftKeyRegister: %v", err)
 	}
 
-	want := signedaction.Challenge(draft.Action.ActionID, signedaction.TypeKeyRegister, signedaction.NoItems, signedaction.KeyDetailsHash(f.target.QX, f.target.QY))
+	want := signedaction.Challenge(draft.Action.ActionID, signedaction.TypeKeyRegister, signedaction.NoItems, signedaction.KeyDetailsHash(f.target.Key))
 	if draft.Action.Challenge != want {
 		t.Errorf("challenge = %x, want %x", draft.Action.Challenge, want)
 	}
@@ -151,10 +151,10 @@ func TestDraftKeyRegister_Success(t *testing.T) {
 	if draft.Action.ActionID.Version() != 7 {
 		t.Errorf("actionID version = %d, want 7", draft.Action.ActionID.Version())
 	}
-	if draft.SubjectQX != f.target.QX || draft.SubjectQY != f.target.QY {
+	if draft.Subject != f.target.Key {
 		t.Errorf("subject key mismatch")
 	}
-	if draft.DetailsHash != signedaction.KeyDetailsHash(f.target.QX, f.target.QY) {
+	if draft.DetailsHash != signedaction.KeyDetailsHash(f.target.Key) {
 		t.Errorf("detailsHash mismatch")
 	}
 	if draft.SignerKeyID != f.signer.KeyID {
@@ -238,7 +238,7 @@ func TestDraftKeyRevoke_Success(t *testing.T) {
 		t.Fatalf("DraftKeyRevoke: %v", err)
 	}
 
-	want := signedaction.Challenge(draft.Action.ActionID, signedaction.TypeKeyRevoke, signedaction.NoItems, signedaction.KeyDetailsHash(f.target.QX, f.target.QY))
+	want := signedaction.Challenge(draft.Action.ActionID, signedaction.TypeKeyRevoke, signedaction.NoItems, signedaction.KeyDetailsHash(f.target.Key))
 	if draft.Action.ActionType != signedaction.TypeKeyRevoke {
 		t.Errorf("actionType = %d, want 6", draft.Action.ActionType)
 	}
@@ -248,10 +248,10 @@ func TestDraftKeyRevoke_Success(t *testing.T) {
 	if draft.Action.ActionID.Version() != 7 {
 		t.Errorf("actionID version = %d, want 7", draft.Action.ActionID.Version())
 	}
-	if draft.SubjectQX != f.target.QX || draft.SubjectQY != f.target.QY {
+	if draft.Subject != f.target.Key {
 		t.Errorf("subject key mismatch")
 	}
-	if draft.DetailsHash != signedaction.KeyDetailsHash(f.target.QX, f.target.QY) {
+	if draft.DetailsHash != signedaction.KeyDetailsHash(f.target.Key) {
 		t.Errorf("detailsHash mismatch")
 	}
 	if f.stored == nil || f.stored.ActionType != signedaction.TypeKeyRevoke {
@@ -560,7 +560,7 @@ func TestSubmitKeyAction_Success(t *testing.T) {
 	if !strings.Contains(string(sub.Payload), `"itemIds":[]`) {
 		t.Errorf("itemIds does not marshal as []: %s", sub.Payload)
 	}
-	if doc.SubjectKey.QX != "0x"+hex.EncodeToString(f.target.QX[:]) || doc.SubjectKey.QY != "0x"+hex.EncodeToString(f.target.QY[:]) {
+	if doc.SubjectKey.QX != "0x"+hex.EncodeToString(f.target.Key.X[:]) || doc.SubjectKey.QY != "0x"+hex.EncodeToString(f.target.Key.Y[:]) {
 		t.Errorf("subjectKey = %v, want target coordinates", doc.SubjectKey)
 	}
 	if doc.KeyID != "0x"+hex.EncodeToString(f.signer.KeyID[:]) {
@@ -761,10 +761,10 @@ func TestHandler_DraftResponseShape(t *testing.T) {
 	if draft.ActionID != f.stored.ActionID.String() || draft.ActionType != 5 {
 		t.Errorf("action = %s/%d, want %s/5", draft.ActionID, draft.ActionType, f.stored.ActionID)
 	}
-	if draft.SubjectKey.QX != "0x"+hex.EncodeToString(f.target.QX[:]) || draft.SubjectKey.QY != "0x"+hex.EncodeToString(f.target.QY[:]) {
+	if draft.SubjectKey.QX != "0x"+hex.EncodeToString(f.target.Key.X[:]) || draft.SubjectKey.QY != "0x"+hex.EncodeToString(f.target.Key.Y[:]) {
 		t.Errorf("subject_key = %v", draft.SubjectKey)
 	}
-	detailsHash := signedaction.KeyDetailsHash(f.target.QX, f.target.QY)
+	detailsHash := signedaction.KeyDetailsHash(f.target.Key)
 	if draft.DetailsHash != "0x"+hex.EncodeToString(detailsHash[:]) {
 		t.Errorf("details_hash = %s", draft.DetailsHash)
 	}

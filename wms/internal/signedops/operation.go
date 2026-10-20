@@ -117,7 +117,7 @@ func Envelopes(op *Operation, signer *domain.Passkey, assertions map[uuid.UUID]s
 		if !bytes.Equal(a.CredentialID, signer.CredentialID) {
 			return nil, fmt.Errorf("%w: credential mismatch", ErrInvalidAssertion)
 		}
-		wa, err := signedaction.Verify(a, p.Challenge, signer.QX, signer.QY, rpID, origins)
+		wa, err := signedaction.Verify(a, p.Challenge, signer.Key, rpID, origins)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidAssertion, err)
 		}
