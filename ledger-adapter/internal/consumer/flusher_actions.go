@@ -29,35 +29,29 @@ type ActionResolver interface {
 // упирается в лимит блока. Package var — тесты занижают его для проверки нарезки.
 var maxActionCalldata = 120_000
 
-// segmentKind — вид подряд идущих сообщений окна Send'а; смена вида режет окно
-// на сегменты (ADR-0001 §9).
+// segmentKind — вид подряд идущих сообщений окна Send'а: складские действия
+// или ключевые; смена вида режет окно на сегменты (ADR-0001 §9).
 type segmentKind int
 
 const (
-	segmentLegacy    segmentKind = iota // legacy-события FSM-агрегатов
-	segmentWarehouse                    // складские действия → SignedMappingWMS.applyActions
+	segmentWarehouse segmentKind = iota // складские действия → SignedMappingWMS.applyActions
 	segmentKey                          // ключевые действия → ConsortiumRegistry.applyKeyActions
 )
 
-// segmentOf определяет вид сообщения: складское действие, ключевое действие
-// или legacy-событие.
+// segmentOf определяет вид сообщения: складское действие или ключевое.
 func segmentOf(m *Message) segmentKind {
-	switch {
-	case m.WarehouseAction != nil:
+	if m.WarehouseAction != nil {
 		return segmentWarehouse
-	case m.Action != nil:
-		return segmentKey
-	default:
-		return segmentLegacy
 	}
+	return segmentKey
 }
 
-// splitSegments режет batch на подряд идущие сегменты одного вида: legacy-события,
-// складские действия (WarehouseAction != nil), ключевые действия (Action != nil).
-// Порядок сообщений внутри сегмента сохраняется: отзыв ключа нельзя переставить
-// раньше действий, которые были до него.
+// splitSegments режет batch на подряд идущие сегменты одного вида: складские
+// действия (WarehouseAction != nil) и ключевые действия (Action != nil)
+// (ADR-0001 §9). Порядок сообщений внутри сегмента сохраняется: отзыв ключа
+// нельзя переставить раньше действий, которые были до него.
 func splitSegments(msgs []*Message) [][]*Message {
-	segs := make([][]*Message, 0, 3)
+	segs := make([][]*Message, 0, 2)
 	start := 0
 	kind := segmentOf(msgs[0])
 	for i := 1; i < len(msgs); i++ {
@@ -75,6 +69,7 @@ type actionTarget struct {
 	name     string         // "applyActions" | "applyKeyActions" — для логов и причины фейла
 	resolver ActionResolver // nil → терминальный фейл "<name>: contract not configured"
 	pack     func([]*Message) ([]byte, error)
+	gasFloor func([]*Message) uint64 // нижняя граница газа чанка; nil → minGas = 0
 }
 
 // WithRegistry подключает разбор исходов ключевых действий (nil = они
@@ -100,6 +95,9 @@ func (f *Flusher) warehouseTarget() actionTarget {
 		resolver: f.warehouse,
 		pack: func(msgs []*Message) ([]byte, error) {
 			return chain.PackApplyActions(warehouseActionsOf(msgs))
+		},
+		gasFloor: func(msgs []*Message) uint64 {
+			return chain.ApplyActionsGasFloor(warehouseActionsOf(msgs))
 		},
 	}
 }
@@ -160,7 +158,11 @@ func (f *Flusher) sendActions(ctx context.Context, msgs []*Message, inflight []I
 			i++
 		default:
 			chunk := pending[i : i+n]
-			txHash, err := f.caller.SendCalldata(ctx, t.resolver.Address(), data)
+			var minGas uint64
+			if t.gasFloor != nil {
+				minGas = t.gasFloor(chunk)
+			}
+			txHash, err := f.caller.SendCalldata(ctx, t.resolver.Address(), data, minGas)
 			if err != nil {
 				if errors.Is(err, chain.ErrChainTransient) {
 					f.log.Warn(t.name+" transient error — will retry", "size", len(chunk), "err", err)

@@ -299,7 +299,7 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, op *signed
 	for i, pid := range productIDs {
 		eid := eventIDForAggregate(t, ctx, env, pid, "receiving")
 		receivingEventIDs[i] = eid
-		waitForOnchainCommitted(t, ctx, env, eid, "receiving")
+		waitForOnchainCommitted(t, ctx, env, eid)
 		require.Equal(t, statusAccepted, callItemStatus(t, ctx, env, pid),
 			"product %d on-chain status should be Accepted(1) after receiving", i)
 	}
@@ -329,7 +329,7 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, op *signed
 	for i, pid := range productIDs {
 		eid := eventIDForAggregate(t, ctx, env, pid, "putaway")
 		putawayEventIDs[i] = eid
-		waitForOnchainCommitted(t, ctx, env, eid, "putaway")
+		waitForOnchainCommitted(t, ctx, env, eid)
 		require.Equal(t, statusPutAway, callItemStatus(t, ctx, env, pid),
 			"product %d on-chain status should be PutAway(2) after putaway", i)
 	}
@@ -350,9 +350,10 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, op *signed
 			sql  string
 			args []any
 		}{
-			// Chain/outbox rows keyed by product_id.
-			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id = ANY($1::uuid[]))`, []any{productIDs}},
-			{`DELETE FROM public.outbox_events WHERE aggregate_id = ANY($1::uuid[])`, []any{productIDs}},
+			// Signed actions containing these products (their onchain_events and
+			// outbox rows, event_id = action_id).
+			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM public.outbox_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
 			// Ops rows.
 			{`DELETE FROM wms_ops.shippings WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
 			{`DELETE FROM wms_ops.assembly_tasks WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
@@ -457,7 +458,7 @@ func TestFullChain_MultiProduct(t *testing.T) {
 		parsed, err := uuid.Parse(pid)
 		require.NoError(t, err)
 		pickingEventID := eventIDForAggregate(t, ctx, env, parsed, "picking")
-		waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
+		waitForOnchainCommitted(t, ctx, env, pickingEventID)
 		stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
 
 		require.Equal(t, statusPicked, callItemStatus(t, ctx, env, parsed),
@@ -501,7 +502,7 @@ func TestFullChain_MultiProduct(t *testing.T) {
 		requireProductStatus(t, ctx, env, parsed, "SHIPPED")
 
 		shippingEventID := eventIDForAggregate(t, ctx, env, parsed, "shipping")
-		waitForOnchainCommitted(t, ctx, env, shippingEventID, "shipping")
+		waitForOnchainCommitted(t, ctx, env, shippingEventID)
 		stageEventIDs["shipping"] = append(stageEventIDs["shipping"], shippingEventID)
 
 		require.Equal(t, statusShipped, callItemStatus(t, ctx, env, parsed),
@@ -567,7 +568,7 @@ func TestFullChain_PartialShip(t *testing.T) {
 		parsed, err := uuid.Parse(pid)
 		require.NoError(t, err)
 		pickingEventID := eventIDForAggregate(t, ctx, env, parsed, "picking")
-		waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
+		waitForOnchainCommitted(t, ctx, env, pickingEventID)
 		stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
 
 		require.Equal(t, statusPicked, callItemStatus(t, ctx, env, parsed),
@@ -609,7 +610,7 @@ func TestFullChain_PartialShip(t *testing.T) {
 		requireProductStatus(t, ctx, env, parsed, "SHIPPED")
 
 		shippingEventID := eventIDForAggregate(t, ctx, env, parsed, "shipping")
-		waitForOnchainCommitted(t, ctx, env, shippingEventID, "shipping")
+		waitForOnchainCommitted(t, ctx, env, shippingEventID)
 		stageEventIDs["shipping"] = append(stageEventIDs["shipping"], shippingEventID)
 
 		require.Equal(t, statusShipped, callItemStatus(t, ctx, env, parsed),
@@ -698,7 +699,7 @@ func TestFullChain_MultiBoxReceiving(t *testing.T) {
 	// Wait for all receiving events on-chain → Accepted(1).
 	for i, pid := range productIDs {
 		eid := eventIDForAggregate(t, ctx, env, pid, "receiving")
-		waitForOnchainCommitted(t, ctx, env, eid, "receiving")
+		waitForOnchainCommitted(t, ctx, env, eid)
 		require.Equal(t, statusAccepted, callItemStatus(t, ctx, env, pid),
 			"product %d on-chain status should be Accepted(1)", i)
 	}
@@ -711,8 +712,8 @@ func TestFullChain_MultiBoxReceiving(t *testing.T) {
 			sql  string
 			args []any
 		}{
-			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id = ANY($1::uuid[]))`, []any{productIDs}},
-			{`DELETE FROM public.outbox_events WHERE aggregate_id = ANY($1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM public.outbox_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
 			{`DELETE FROM wms_ops.receiving_table WHERE cargoplace_id IN ` + cpSel, []any{sc.CargoplaceCode}},
 			{`DELETE FROM wms_ops.receiving_gate WHERE cargoplace_id IN ` + cpSel, []any{sc.CargoplaceCode}},
 			{`DELETE FROM wms_inventory.products WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
@@ -805,7 +806,7 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 	// Wait for receiving events on-chain before proceeding to putaway.
 	for i, pid := range productIDs {
 		eid := eventIDForAggregate(t, ctx, env, pid, "receiving")
-		waitForOnchainCommitted(t, ctx, env, eid, "receiving")
+		waitForOnchainCommitted(t, ctx, env, eid)
 		require.Equal(t, statusAccepted, callItemStatus(t, ctx, env, pid),
 			"product %d on-chain should be Accepted(1) before putaway", i)
 	}
@@ -833,7 +834,7 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 	// Wait for all putaway events on-chain → PutAway(2).
 	for i, pid := range productIDs {
 		eid := eventIDForAggregate(t, ctx, env, pid, "putaway")
-		waitForOnchainCommitted(t, ctx, env, eid, "putaway")
+		waitForOnchainCommitted(t, ctx, env, eid)
 		require.Equal(t, statusPutAway, callItemStatus(t, ctx, env, pid),
 			"product %d on-chain status should be PutAway(2)", i)
 	}
@@ -846,8 +847,8 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 			sql  string
 			args []any
 		}{
-			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id = ANY($1::uuid[]))`, []any{productIDs}},
-			{`DELETE FROM public.outbox_events WHERE aggregate_id = ANY($1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM public.outbox_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
 			{`DELETE FROM wms_ops.putaways WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
 			{`DELETE FROM wms_ops.receiving_table WHERE cargoplace_id IN ` + cpSel, []any{sc.CargoplaceCode}},
 			{`DELETE FROM wms_ops.receiving_gate WHERE cargoplace_id IN ` + cpSel, []any{sc.CargoplaceCode}},

@@ -103,6 +103,45 @@ CPU: PostgreSQL 6.0 ядра (узкое место), блокчейн 1.6 яд�
 
 ---
 
+## Подписанный прогон (#20)
+
+Сквозной bench идёт через SIGNED API: каждый Receive/PutAway/Pick/Ship — это
+`draft → программная P-256 WebAuthn-подпись → submit` (`tests/stress/lib/signer.js`,
+байты 1-в-1 с `tests/e2e/softauthn_test.go`). Плейновых эндпоинтов стадий больше нет.
+
+Предпосылки: стек `stresstest` поднят, применён OLTP-тюнинг postgres
+(`setup/apply-postgres-tune.sh`), WMS поднят с `WMS_DB_MAX_CONNS=30` (см. ловушки выше);
+на хосте есть k6 и `cast`. Операторы с активными ключами готовятся отдельным инструментом
+(пишет `tests/stress/.signed/operators.json`, каталог не коммитится):
+
+```bash
+cd tests/e2e && COMPOSE_PROJECT_NAME=stresstest go run ./cmd/stress-provision -operators 70
+```
+
+Проверка подписанта без стека (векторы `testdata/signed-actions/vectors.v1.json`):
+
+```bash
+k6 run tests/stress/signer-selftest.js
+```
+
+Прогон (число операторов в `operators.json` должно быть ≥ VUS):
+
+```bash
+N_ITEMS=150000 ./tests/stress/profile-e2e-cpu.sh 70
+```
+
+«Переход» теперь — товар подтверждённого (`COMMITTED`) подписанного действия, а не отдельная
+строка `onchain_events`: одно действие покрывает много товаров (`warehouse_actions.item_ids`).
+Потери и отказы — в секции `=== 8. losses ===`: rejected (`FAILED` + `reject_reason`),
+failed (`FAILED` без причины = потерянная tx), still pending.
+
+Сырые результаты (полный stdout + `e2e-live.log`, `e2e-cpu.log`, `e2e-k6.log`) складываются в
+`tests/stress/results/<UTC yyyymmdd-hhmmss>-<git sha>/`; каталог коммитится.
+
+Скрипты `05`–`08` не переведены на подписанный API и в текущем виде не запускаются.
+
+---
+
 ## Функциональный набор (`01`–`08`)
 
 Пороговый набор: каждый тест бьёт отдельный эндпоинт/стадию и проверяет латентность и

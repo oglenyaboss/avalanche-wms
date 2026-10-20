@@ -164,7 +164,7 @@ func signedPutawayFixture(t *testing.T, ctx context.Context, env *env) auditFixt
 	run := receiveAndCloseSigned(t, ctx, env, op, sc, productCount)
 	require.Equal(t, "TABLE_CLOSED", run.result.Status)
 	for _, pid := range run.productIDs {
-		waitForOnchainCommitted(t, ctx, env, eventIDForAggregate(t, ctx, env, pid, "receiving"), "receiving")
+		waitForOnchainCommitted(t, ctx, env, eventIDForAggregate(t, ctx, env, pid, "receiving"))
 	}
 
 	require.Equal(t, productCount, placeToStorageBinSigned(t, env, op, run.productIDs, sc.StorageBinID).ProductsPlaced)
@@ -182,7 +182,7 @@ func signedPutawayFixture(t *testing.T, ctx context.Context, env *env) auditFixt
 		SELECT action_id FROM public.warehouse_actions
 		WHERE action_type = 2 AND item_ids @> ARRAY[$1::uuid]`, fx.productIDs[0]).Scan(&fx.putawayActionID)
 	require.NoError(t, err, "putaway action id")
-	waitForOnchainCommitted(t, ctx, env, fx.putawayActionID, "putaway")
+	waitForOnchainCommitted(t, ctx, env, fx.putawayActionID)
 
 	err = env.db.QueryRow(ctx, `
 		SELECT action_id FROM public.warehouse_actions

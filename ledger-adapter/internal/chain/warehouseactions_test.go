@@ -173,3 +173,33 @@ func TestWarehouseActions_StateOutcome(t *testing.T) {
 		t.Errorf("StateOutcome None: got %+v, want zero outcome", outcome)
 	}
 }
+
+// TestApplyActionsGasFloor: нижняя граница газа tx applyActions = база tx +
+// накладные каждого действия + запись на каждый товар; приёмка (ActionType 1)
+// пишет новые слоты и дороже остальных переходов.
+func TestApplyActionsGasFloor(t *testing.T) {
+	items := func(n int) []*big.Int {
+		ids := make([]*big.Int, n)
+		for i := range ids {
+			ids[i] = big.NewInt(int64(i + 1))
+		}
+		return ids
+	}
+	cases := []struct {
+		name    string
+		actions []WarehouseAction
+		want    uint64
+	}{
+		{"nil", nil, 21_000},
+		// 117 000 ≥ измеренных 108 605 газа на приёмку 1 товара (ADR-0001).
+		{"receive 1 item", []WarehouseAction{{ActionType: 1, ItemIds: items(1)}}, 21_000 + 70_000 + 26_000},
+		{"putaway 100 items", []WarehouseAction{{ActionType: 2, ItemIds: items(100)}}, 21_000 + 70_000 + 100*9_000},
+		{"receive 3 + ship 5", []WarehouseAction{{ActionType: 1, ItemIds: items(3)}, {ActionType: 4, ItemIds: items(5)}}, 21_000 + 2*70_000 + 3*26_000 + 5*9_000},
+		{"pick 0 items", []WarehouseAction{{ActionType: 3}}, 21_000 + 70_000},
+	}
+	for _, tc := range cases {
+		if got := ApplyActionsGasFloor(tc.actions); got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}

@@ -5,19 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// fakeEthBackend подменяет *ethclient.Client в unit-тестах sendMethod/ReseedNonce.
+// fakeEthBackend подменяет *ethclient.Client в unit-тестах SendCalldata/ReseedNonce.
 // Считает вызовы PendingNonceAt и записывает все отправленные tx, чтобы тесты
 // могли проверить nonce/gasPrice подписанной транзакции без живого RPC.
 type fakeEthBackend struct {
@@ -87,27 +85,30 @@ func newTestClient(t *testing.T, eth ethBackend) *Client {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	parsed, err := abi.JSON(strings.NewReader(ContractABI))
-	if err != nil {
-		t.Fatalf("parse abi: %v", err)
-	}
 	return &Client{
-		eth:          eth,
-		signer:       &staticSigner{pk: pk, addr: crypto.PubkeyToAddress(pk.PublicKey)},
-		contractAddr: common.HexToAddress("0x0000000000000000000000000000000000000001"),
-		parsedABI:    parsed,
+		eth:    eth,
+		signer: &staticSigner{pk: pk, addr: crypto.PubkeyToAddress(pk.PublicKey)},
 	}
+}
+
+// sendOneGas — единица send-пути с явной нижней границей gas-лимита (minGas);
+// calldata фиктивные (паковка больше не часть Client'а).
+func sendOneGas(ctx context.Context, c *Client, minGas uint64) (common.Hash, error) {
+	return c.SendCalldata(ctx, common.HexToAddress("0x0000000000000000000000000000000000000001"), []byte{0x01}, minGas)
+}
+
+// sendOne — sendOneGas с minGas = 0 (без нижней границы).
+func sendOne(ctx context.Context, c *Client) (common.Hash, error) {
+	return sendOneGas(ctx, c, 0)
 }
 
 func TestClient_NonceMonotonicAcrossSends(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 5}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
 
@@ -128,14 +129,12 @@ func TestClient_NonceMonotonicAcrossSends(t *testing.T) {
 func TestClient_NonceUnchangedOnSendFailure(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 10, sendErr: errors.New("dial tcp: connection refused"), sendErrOnce: true}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
 	// Первый send падает (transient) → nonce НЕ должен продвинуться.
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err == nil {
+	if _, err := sendOne(context.Background(), c); err == nil {
 		t.Fatal("expected send to fail")
 	}
 	// Второй send (backend больше не падает) должен переиспользовать nonce=10.
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
 	if len(eth.sentTxs) != 1 {
@@ -149,9 +148,7 @@ func TestClient_NonceUnchangedOnSendFailure(t *testing.T) {
 func TestClient_GasPriceHeadroom(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 0, gasPrice: big.NewInt(100)}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if len(eth.sentTxs) != 1 {
@@ -173,9 +170,7 @@ func TestClient_GasPriceHeadroom(t *testing.T) {
 func TestClient_GasLimitHeadroom(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 0, estimateGas: 1000}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchPutAway", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if len(eth.sentTxs) != 1 {
@@ -190,9 +185,7 @@ func TestClient_GasLimitHeadroom(t *testing.T) {
 func TestClient_ReseedNonce(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 5}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
 	// Симулируем продвижение on-chain nonce'а (другой источник / mempool drop).
@@ -200,7 +193,7 @@ func TestClient_ReseedNonce(t *testing.T) {
 	if err := c.ReseedNonce(context.Background()); err != nil {
 		t.Fatalf("reseed: %v", err)
 	}
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
 	if eth.sentTxs[1].Nonce() != 20 {
@@ -271,7 +264,7 @@ func TestErrChainSentinels_DistinctFromEachOther(t *testing.T) {
 
 func TestClient_SendMu_SerializesConcurrentCalls(t *testing.T) {
 	// Смоук-тест для C1 фикса (MR !35): мьютекс sendMu в *Client должен
-	// реально блокировать параллельный доступ. Прямо тестировать sendMethod
+	// реально блокировать параллельный доступ. Прямо тестировать send-путь
 	// без мокания concrete *ethclient.Client нельзя, поэтому проверяем сам
 	// мьютекс через прямое взаимодействие с полем (in-package test).
 	// Race-detector в остальных тестах ловит реальные гонки; этот тест —
@@ -314,18 +307,11 @@ func TestSendMethod_SignerTransientIsChainTransient(t *testing.T) {
 	// KMS недоступен → ErrSignerTransient должен выйти как ErrChainTransient
 	// (flusher ретраит, DLQ не уходит) и НЕ сжечь nonce (invariant 3).
 	eth := &fakeEthBackend{nonce: 5}
-	parsed, err := abi.JSON(strings.NewReader(ContractABI))
-	if err != nil {
-		t.Fatalf("parse abi: %v", err)
-	}
 	c := &Client{
-		eth:       eth,
-		signer:    failingSigner{fmt.Errorf("%w: kms down", ErrSignerTransient)},
-		parsedABI: parsed,
+		eth:    eth,
+		signer: failingSigner{fmt.Errorf("%w: kms down", ErrSignerTransient)},
 	}
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err == nil {
+	if _, err := sendOne(context.Background(), c); err == nil {
 		t.Fatal("expected error from failing signer")
 	} else if !errors.Is(err, ErrChainTransient) {
 		t.Fatalf("signer transient must classify as ErrChainTransient, got %v", err)
@@ -336,11 +322,44 @@ func TestSendMethod_SignerTransientIsChainTransient(t *testing.T) {
 
 	// Локальная (terminal) ошибка подписи не должна становиться transient.
 	c2 := &Client{
-		eth:       &fakeEthBackend{nonce: 5},
-		signer:    failingSigner{errors.New("local crypto broke")},
-		parsedABI: parsed,
+		eth:    &fakeEthBackend{nonce: 5},
+		signer: failingSigner{errors.New("local crypto broke")},
 	}
-	if _, err := c2.sendMethod(context.Background(), "batchAccept", args, args); errors.Is(err, ErrChainTransient) {
+	if _, err := sendOne(context.Background(), c2); errors.Is(err, ErrChainTransient) {
 		t.Fatalf("local sign error must stay terminal, got %v", err)
+	}
+}
+
+// TestClient_GasFloorRaisesLimit: minGas выше estimate×3/2 поднимает gas-лимит
+// до нижней границы — защита от OOG, когда estimate видел дешёвый reject-путь,
+// а к майнингу действие применяется с записью на каждый товар.
+func TestClient_GasFloorRaisesLimit(t *testing.T) {
+	eth := &fakeEthBackend{nonce: 0, estimateGas: 100_000}
+	c := newTestClient(t, eth)
+	if _, err := sendOneGas(context.Background(), c, 2_000_000); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 sent tx, got %d", len(eth.sentTxs))
+	}
+	if got := eth.sentTxs[0].Gas(); got != 2_000_000 {
+		t.Errorf("gas limit: want 2_000_000 (minGas), got %d", got)
+	}
+}
+
+// TestClient_GasFloorBelowHeadroom: minGas ниже estimate×3/2 ничего не меняет —
+// действует обычный headroom, итог = max(estimate×3/2, minGas).
+func TestClient_GasFloorBelowHeadroom(t *testing.T) {
+	eth := &fakeEthBackend{nonce: 0, estimateGas: 100_000}
+	c := newTestClient(t, eth)
+	if _, err := sendOneGas(context.Background(), c, 120_000); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 sent tx, got %d", len(eth.sentTxs))
+	}
+	want := uint64(100_000) * gasLimitHeadroomNum / gasLimitHeadroomDen // 150_000
+	if got := eth.sentTxs[0].Gas(); got != want {
+		t.Errorf("gas limit: want %d (headroom), got %d", want, got)
 	}
 }

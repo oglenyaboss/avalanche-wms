@@ -84,24 +84,37 @@ func softShipDetailsHash(salt [32]byte, dispatchID, binID uuid.UUID, orderIDs []
 	return out
 }
 
-// markPickingConfirmed is a fixture shortcut for DB-contract tests that do not
-// exercise the chain: per product it inserts a legacy picking outbox row
-// (aggregate_type 'picking', aggregate_id = product) and a COMMITTED
-// onchain_events row for that event, so the signed ship's strict gate (picking
-// must be COMMITTED on chain) lets the flow pass without a real chain
-// round-trip. The rows are picked up by the fixture cleanup (both are keyed by
-// aggregate_id = product). Use it only where the real chain is not exercised.
+// markPickingConfirmed is a fixture shortcut for DB-contract tests whose products
+// never went through the chain (they are inserted STORED): it inserts ONE synthetic
+// submitted Pick action (action_type 3) containing all the products, with a
+// COMMITTED onchain_events row, so the signed ship's strict gate (a submitted Pick
+// action containing the product with a COMMITTED onchain_events row) passes without
+// a real chain round-trip. The real Pick action from the unload is rejected on chain
+// (the items were never received on chain) and is irrelevant to these tests. No
+// outbox row is written, so the adapter never sees the synthetic action. Use it only
+// where the real chain is not exercised.
 func markPickingConfirmed(t *testing.T, ctx context.Context, env *env, productIDs []uuid.UUID) {
 	t.Helper()
-	for _, pid := range productIDs {
-		eventID := uuid.New()
-		mustExec(t, ctx, env, `
-			INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
-			VALUES ($1, $2, 'picking', 'wms.picking.v1', 'fixture')`, eventID, pid)
-		mustExec(t, ctx, env, `
-			INSERT INTO public.onchain_events (event_id, aggregate_type, status)
-			VALUES ($1, 'picking', 'COMMITTED')`, eventID)
-	}
+	org := requireConsortium(t, ctx, env)
+	actionID := uuid.New()
+	var zeros [32]byte
+	mustExec(t, ctx, env, `
+		INSERT INTO public.warehouse_actions
+			(action_id, operation_id, part_index, action_type, signer_credential_id, created_by, item_ids, salt, details_hash, challenge, details, submitted_at)
+		VALUES ($1, $2, 0, 3, $3, $4, $5, $6, $6, $6, '{}'::jsonb, now())`,
+		actionID, uuid.New(), org.adminCred, org.adminUserID, productIDs, zeros[:])
+	mustExec(t, ctx, env, `
+		INSERT INTO public.onchain_events (event_id, aggregate_type, status)
+		VALUES ($1, 'signed_action', 'COMMITTED')`, actionID)
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if _, err := env.db.Exec(cleanupCtx, `DELETE FROM public.onchain_events WHERE event_id = $1`, actionID); err != nil {
+			t.Logf("markPickingConfirmed cleanup (onchain_events %s): %v", actionID, err)
+		}
+		if _, err := env.db.Exec(cleanupCtx, `DELETE FROM public.warehouse_actions WHERE action_id = $1`, actionID); err != nil {
+			t.Logf("markPickingConfirmed cleanup (warehouse_actions %s): %v", actionID, err)
+		}
+	})
 }
 
 // parseProductIDs parses product id strings into uuids.
@@ -175,7 +188,7 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 	require.Len(t, run.productIDs, 2)
 	for _, pid := range run.productIDs {
 		e := eventIDForAggregate(t, ctx, env, pid, "receiving")
-		waitForOnchainCommitted(t, ctx, env, e, "receiving")
+		waitForOnchainCommitted(t, ctx, env, e)
 	}
 
 	// ── Signed putaway of both products into the storage bin ──
@@ -184,7 +197,7 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 	for _, pid := range run.productIDs {
 		requireProductStatus(t, ctx, env, pid, "STORED")
 		e := eventIDForAggregate(t, ctx, env, pid, "putaway")
-		waitForOnchainCommitted(t, ctx, env, e, "putaway")
+		waitForOnchainCommitted(t, ctx, env, e)
 		require.Equal(t, statusPutAway, callItemStatus(t, ctx, env, pid),
 			"product should be PutAway(2) on-chain after the signed putaway")
 	}
@@ -227,9 +240,8 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 			sql  string
 			args []any
 		}{
-			{`DELETE FROM public.onchain_events WHERE event_id = ANY($1::uuid[])
-			   OR event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id = ANY($2::uuid[]))`, []any{actionIDs, productIDStrings}},
-			{`DELETE FROM public.outbox_events WHERE event_id = ANY($1::uuid[]) OR aggregate_id = ANY($2::uuid[])`, []any{actionIDs, productIDStrings}},
+			{`DELETE FROM public.onchain_events WHERE event_id = ANY($1::uuid[])`, []any{actionIDs}},
+			{`DELETE FROM public.outbox_events WHERE event_id = ANY($1::uuid[])`, []any{actionIDs}},
 			{`DELETE FROM wms_ops.shippings WHERE product_id = ANY($1::uuid[])`, []any{productIDStrings}},
 			{`DELETE FROM wms_ops.assembly_tasks WHERE product_id = ANY($1::uuid[])`, []any{productIDStrings}},
 			{`DELETE FROM wms_ops.putaways WHERE product_id = ANY($1::uuid[])`, []any{productIDStrings}},
@@ -290,7 +302,7 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 	// The signed ship gate requires COMMITTED picking: wait for the Pick action.
 	for _, pid := range run.productIDs {
 		e := eventIDForAggregate(t, ctx, env, pid, "picking")
-		waitForOnchainCommitted(t, ctx, env, e, "picking")
+		waitForOnchainCommitted(t, ctx, env, e)
 		require.Equal(t, statusPicked, callItemStatus(t, ctx, env, pid),
 			"product on-chain status should be Picked(3) before shipping")
 	}
@@ -406,7 +418,7 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 		"details_hash must be reproducible from shippings.dispatch_id/operator_id/occurred_at, products.bin_id/order_id and the action salt")
 
 	// ── Chain: the action commits, every product is Shipped(4) ──
-	waitForOnchainCommitted(t, ctx, env, shipActionID, "shipping")
+	waitForOnchainCommitted(t, ctx, env, shipActionID)
 	operationStatus := waitForOperationState(t, ctx, env, op.token, draft.OperationID, "APPLIED", nil)
 	require.Len(t, operationStatus.Parts, 1)
 	require.Equal(t, part.ActionID, operationStatus.Parts[0].ActionID)

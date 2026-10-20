@@ -171,7 +171,7 @@ func TestSignedReceive_EndToEnd(t *testing.T) {
 		FROM public.outbox_events
 		WHERE event_id = $1`, actionID).Scan(&aggID, &aggType)
 	require.NoError(t, err)
-	require.Equal(t, actionID, aggID, "event_id = aggregate_id = action_id")
+	require.Equal(t, actionID, aggID, "outbox aggregate_id must equal the action id")
 	require.Equal(t, "signed_action", aggType)
 
 	// Details from the CLOSE_CARGO log row and the action's salt: they must reproduce the on-chain detailsHash.
@@ -195,7 +195,7 @@ func TestSignedReceive_EndToEnd(t *testing.T) {
 	require.Equal(t, wantDetailsHash, draftDetailsHash, "draft details_hash must be reproducible from the DB details")
 
 	// ── Chain: the action commits and every product becomes Accepted(1) ──
-	waitForOnchainCommitted(t, ctx, env, actionID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, actionID)
 	status := waitForOperationState(t, ctx, env, op.token, run.draft.OperationID, "APPLIED", nil)
 	require.Equal(t, run.draft.OperationID, status.OperationID)
 	require.Len(t, status.Parts, 1)
@@ -407,7 +407,7 @@ func TestSignedReceive_RejectedActionBlocksPutaway(t *testing.T) {
 
 	actionID, err := uuid.Parse(run.draft.Parts[0].ActionID)
 	require.NoError(t, err)
-	waitForOnchainCommitted(t, ctx, env, actionID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, actionID)
 
 	// Simulate the contract rejecting the action: FAILED + RejectReason 12.
 	mustExec(t, ctx, env, `

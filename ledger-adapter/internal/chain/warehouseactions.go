@@ -49,6 +49,30 @@ func PackApplyActions(actions []WarehouseAction) ([]byte, error) {
 	return data, nil
 }
 
+// Нижние границы газа tx applyActions по замерам ADR-0001 («Замеры газа»):
+// газ из receipt'ов subnet-evm, включает базу tx. Приёмка пишет новые слоты
+// (0→1) и дороже перезаписи (1→2) в остальных переходах.
+const (
+	txBaseGas           uint64 = 21_000 // база tx
+	actionGasFloor      uint64 = 70_000 // накладные одного действия (замер ~56–62k, запас)
+	receiveItemGasFloor uint64 = 26_000 // товар приёмки: запись нового слота
+	moveItemGasFloor    uint64 = 9_000  // товар PutAway/Pick/Ship: перезапись слота
+)
+
+// ApplyActionsGasFloor — нижняя граница газа tx applyActions, если все действия применятся (ADR-0001, «Замеры газа»): база tx, накладные действия и запись на каждый товар; приёмка пишет новые слоты и дороже.
+func ApplyActionsGasFloor(actions []WarehouseAction) uint64 {
+	floor := txBaseGas
+	for _, a := range actions {
+		floor += actionGasFloor
+		perItem := moveItemGasFloor
+		if a.ActionType == 1 { // Receive
+			perItem = receiveItemGasFloor
+		}
+		floor += uint64(len(a.ItemIds)) * perItem
+	}
+	return floor
+}
+
 // WarehouseActions — read-only резолвер исходов SignedMappingWMS (логи
 // receipt'ов tx с applyActions и actionState по actionId).
 type WarehouseActions struct {

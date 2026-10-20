@@ -10,6 +10,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Этап по типу складского действия; у ключевого действия
+// (регистрация/отзыв passkey) строки в warehouse_actions нет — этап 'keys'.
+const stageOfAction = `CASE wa.action_type WHEN 1 THEN 'receiving' WHEN 2 THEN 'putaway' WHEN 3 THEN 'picking' WHEN 4 THEN 'shipping' ELSE 'keys' END`
+
 type dbTX interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -79,7 +83,10 @@ func (r *Repository) GetOnchain(ctx context.Context, failedLimit, committedLimit
 	}
 
 	byAgg, err := r.aggStatusCounts(ctx,
-		`SELECT aggregate_type, status::text, count(*) FROM public.onchain_events GROUP BY aggregate_type, status`)
+		`SELECT `+stageOfAction+`, oe.status::text, count(*)
+         FROM public.onchain_events oe
+         LEFT JOIN public.warehouse_actions wa ON wa.action_id = oe.event_id
+         GROUP BY 1, 2`)
 	if err != nil {
 		return OnchainReport{}, fmt.Errorf("analytics.Repository.GetOnchain byAgg: %w", err)
 	}
@@ -90,23 +97,30 @@ func (r *Repository) GetOnchain(ctx context.Context, failedLimit, committedLimit
 	}
 
 	outboxByType, err := r.statusCounts(ctx,
-		`SELECT aggregate_type, count(*) FROM public.outbox_events GROUP BY aggregate_type`)
+		`SELECT `+stageOfAction+`, count(*)
+         FROM public.outbox_events ob
+         LEFT JOIN public.warehouse_actions wa ON wa.action_id = ob.event_id
+         GROUP BY 1`)
 	if err != nil {
 		return OnchainReport{}, fmt.Errorf("analytics.Repository.GetOnchain outboxByType: %w", err)
 	}
 
 	failed, err := r.eventRefs(ctx,
-		`SELECT event_id::text, aggregate_type, tx_hash, error_message, updated_at
-         FROM public.onchain_events WHERE status = 'FAILED'
-         ORDER BY updated_at DESC LIMIT $1`, failedLimit)
+		`SELECT oe.event_id::text, `+stageOfAction+`, oe.tx_hash, oe.error_message, oe.updated_at
+         FROM public.onchain_events oe
+         LEFT JOIN public.warehouse_actions wa ON wa.action_id = oe.event_id
+         WHERE oe.status = 'FAILED'
+         ORDER BY oe.updated_at DESC LIMIT $1`, failedLimit)
 	if err != nil {
 		return OnchainReport{}, fmt.Errorf("analytics.Repository.GetOnchain failed: %w", err)
 	}
 
 	committed, err := r.eventRefs(ctx,
-		`SELECT event_id::text, aggregate_type, tx_hash, error_message, updated_at
-         FROM public.onchain_events WHERE status = 'COMMITTED'
-         ORDER BY updated_at DESC LIMIT $1`, committedLimit)
+		`SELECT oe.event_id::text, `+stageOfAction+`, oe.tx_hash, oe.error_message, oe.updated_at
+         FROM public.onchain_events oe
+         LEFT JOIN public.warehouse_actions wa ON wa.action_id = oe.event_id
+         WHERE oe.status = 'COMMITTED'
+         ORDER BY oe.updated_at DESC LIMIT $1`, committedLimit)
 	if err != nil {
 		return OnchainReport{}, fmt.Errorf("analytics.Repository.GetOnchain committed: %w", err)
 	}
@@ -120,9 +134,10 @@ func (r *Repository) GetThroughput(ctx context.Context, days int) (ThroughputRep
 	// Bucket and bound the window explicitly in UTC so day boundaries match the
 	// Go axis (time.Now().UTC()) regardless of the DB session timezone.
 	rows, err := r.q.Query(ctx,
-		`SELECT (created_at AT TIME ZONE 'UTC')::date AS day, aggregate_type, count(*)
-         FROM public.outbox_events
-         WHERE created_at >= (((now() AT TIME ZONE 'UTC')::date - ($1::int - 1))::timestamp AT TIME ZONE 'UTC')
+		`SELECT (ob.created_at AT TIME ZONE 'UTC')::date AS day, `+stageOfAction+`, count(*)
+         FROM public.outbox_events ob
+         LEFT JOIN public.warehouse_actions wa ON wa.action_id = ob.event_id
+         WHERE ob.created_at >= (((now() AT TIME ZONE 'UTC')::date - ($1::int - 1))::timestamp AT TIME ZONE 'UTC')
          GROUP BY 1, 2
          ORDER BY 1, 2`, days)
 	if err != nil {

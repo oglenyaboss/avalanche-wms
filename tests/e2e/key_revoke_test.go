@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/asn1"
 	"encoding/base64"
@@ -126,14 +127,18 @@ func TestKeyRevoke_EndToEnd(t *testing.T) {
 	require.Equal(t, "SIGNER_KEY_NOT_ACTIVE", code)
 }
 
-// insertBypassReceive builds a signed Receive envelope (ADR-0001 §9, version 1)
-// with the operator's key and inserts it directly into public.outbox_events,
-// bypassing the WMS backend. Returns the action id.
-func insertBypassReceive(t *testing.T, ctx context.Context, env *env, op *signedOperator) uuid.UUID {
+// receiveEnvelope builds a signed Receive envelope (ADR-0001 §9, version 1) over
+// n fresh items, sorted by itemId ascending (the contract rejects
+// ItemsNotAscending). Returns the action id, the sorted items, the challenge the
+// envelope signs and the marshalled envelope (the outbox/Kafka payload).
+func receiveEnvelope(t *testing.T, key *ecdsa.PrivateKey, keyID [32]byte, n int) (actionID uuid.UUID, items []uuid.UUID, challenge [32]byte, payload []byte) {
 	t.Helper()
 
-	actionID := uuid.New()
-	items := []uuid.UUID{uuid.New(), uuid.New()}
+	actionID = uuid.New()
+	items = make([]uuid.UUID, n)
+	for i := range items {
+		items[i] = uuid.New()
+	}
 	sort.Slice(items, func(i, j int) bool {
 		return uuidToUint256(items[i].String()).Cmp(uuidToUint256(items[j].String())) < 0
 	})
@@ -145,8 +150,8 @@ func insertBypassReceive(t *testing.T, ctx context.Context, env *env, op *signed
 	var detailsHash [32]byte
 	_, err := rand.Read(detailsHash[:])
 	require.NoError(t, err)
-	challenge := softChallenge(actionID, 1, softItemsHash(items), detailsHash)
-	a := softSign(op.key, challenge)
+	challenge = softChallenge(actionID, 1, softItemsHash(items), detailsHash)
+	a := softSign(key, challenge)
 
 	cdj := string(a.ClientDataJSON)
 	typeIndex := strings.Index(cdj, `"type":"webauthn.get"`)
@@ -158,17 +163,17 @@ func insertBypassReceive(t *testing.T, ctx context.Context, env *env, op *signed
 	_, err = asn1.Unmarshal(a.Signature, &sig)
 	require.NoError(t, err)
 	s := sig.S
-	if s.Cmp(new(big.Int).Rsh(op.key.Curve.Params().N, 1)) > 0 {
-		s = new(big.Int).Sub(op.key.Curve.Params().N, s)
+	if s.Cmp(new(big.Int).Rsh(key.Curve.Params().N, 1)) > 0 {
+		s = new(big.Int).Sub(key.Curve.Params().N, s)
 	}
 
-	payload, err := json.Marshal(map[string]any{
+	payload, err = json.Marshal(map[string]any{
 		"version":     1,
 		"actionId":    actionID.String(),
 		"actionType":  1,
 		"itemIds":     itemIDs,
 		"detailsHash": "0x" + hex.EncodeToString(detailsHash[:]),
-		"keyId":       "0x" + hex.EncodeToString(op.keyID[:]),
+		"keyId":       "0x" + hex.EncodeToString(keyID[:]),
 		"webauthn": map[string]any{
 			"authenticatorData": "0x" + hex.EncodeToString(a.AuthenticatorData),
 			"clientDataJSON":    cdj,
@@ -179,7 +184,16 @@ func insertBypassReceive(t *testing.T, ctx context.Context, env *env, op *signed
 		},
 	})
 	require.NoError(t, err)
+	return actionID, items, challenge, payload
+}
 
+// insertBypassReceive builds a signed Receive envelope with the operator's key
+// and inserts it directly into public.outbox_events, bypassing the WMS backend.
+// Returns the action id.
+func insertBypassReceive(t *testing.T, ctx context.Context, env *env, op *signedOperator) uuid.UUID {
+	t.Helper()
+
+	actionID, _, challenge, payload := receiveEnvelope(t, op.key, op.keyID, 2)
 	mustExec(t, ctx, env, `
 		INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash, payload)
 		VALUES ($1, $1, 'signed_action', 'wms.action.v1', $2, $3::jsonb)`,
@@ -238,7 +252,7 @@ func TestKeyRevoke_SerializesWithWarehouseAction(t *testing.T) {
 		`SELECT id FROM public.outbox_events WHERE event_id = $1`, revokeID).Scan(&revokeOutboxID))
 	require.Less(t, closeOutboxID, revokeOutboxID, "the close action must enter the outbox before the revoke")
 
-	waitForOnchainCommitted(t, ctx, env, closeActionID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, closeActionID)
 	waitForOperationState(t, ctx, env, op.token, draft.OperationID, "APPLIED", nil)
 	waitForOnchainKeyAction(t, ctx, env, revokeID, "COMMITTED", nil)
 

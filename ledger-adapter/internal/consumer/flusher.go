@@ -5,20 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
-
-	"ledger-adapter/internal/chain"
 )
 
 // ChainCaller — minimal interface что нужен flusher'у от chain client'а.
 type ChainCaller interface {
-	BatchCall(ctx context.Context, aggregateType string, eventIDs, itemIDs []*big.Int) (common.Hash, error)
-	SendCalldata(ctx context.Context, to common.Address, data []byte) (common.Hash, error)
+	SendCalldata(ctx context.Context, to common.Address, data []byte, minGas uint64) (common.Hash, error)
 	TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error)
 }
 
@@ -38,11 +34,6 @@ type DLQPublisher interface {
 	PublishAll(ctx context.Context, msgs []*Message, reason string) error
 }
 
-// fsmOrder определяет порядок обработки sub-batch'ей: контракт требует
-// None→Accepted→PutAway→Picked→Shipped, поэтому receiving (→Accepted) ДОЛЖЕН
-// быть committed ДО putaway (→PutAway) и т.д.
-var fsmOrder = []string{"receiving", "putaway", "picking", "shipping"}
-
 // InflightTx — отправленная (broadcast) но ещё не подтверждённая batch-tx.
 // Возвращается Send'ом и передаётся в Confirm (serial) либо в pipeline-окно.
 type InflightTx struct {
@@ -58,12 +49,12 @@ type InflightTx struct {
 // (видимы, не потеряны) для redelivery/reconcile (invariant 4).
 var ErrConfirmStalled = errors.New("confirm stalled")
 
-// Flusher — pipeline: группировка по aggregate_type → обработка в FSM-порядке →
-// для каждого sub-batch: idempotency-filter → InsertPending → chain.BatchCall →
-// MarkSent → WaitReceipt → MarkCommitted / MarkFailed+DLQ.
-// Подписанные действия (signed_action) идут в сегментах окна между legacy-стадиями
-// в Kafka-порядке: складские через SignedMappingWMS.applyActions, ключевые через
-// ConsortiumRegistry.applyKeyActions.
+// Flusher — pipeline: окно Kafka-сообщений режется на сегменты складских и
+// ключевых подписанных действий; каждый сегмент проходит
+// idempotency-filter → InsertPending → SendCalldata → MarkSent;
+// складские уходят в SignedMappingWMS.applyActions, ключевые в
+// ConsortiumRegistry.applyKeyActions. Confirm разбирает исходы действий по
+// receipt'у и пишет COMMITTED/FAILED+reject_reason.
 type Flusher struct {
 	caller         ChainCaller // единственный signer-клиент; он же читает receipt'ы (node-global)
 	store          Store
@@ -94,12 +85,11 @@ func NewFlusher(caller ChainCaller, store Store, dlq DLQPublisher, receiptTimeou
 	}
 }
 
-// Send режет batch на подряд идущие сегменты (подписанные действия / legacy) и
-// обрабатывает их в Kafka-порядке окна: действия не перепрыгивают legacy-стадии
-// между ними (все tx уходят с одного signer'а одной nonce-цепочкой). Legacy-сегмент
-// внутри себя группируется и отправляется в FSM-порядке (см. sendLegacy).
+// Send режет batch на подряд идущие сегменты складских и ключевых действий и
+// обрабатывает их в Kafka-порядке окна (все tx уходят с одного signer'а одной
+// nonce-цепочкой; порядок внутри сегмента сохраняется — см. splitSegments).
 //
-// Семантика ошибок (как у старого flushSubBatch):
+// Семантика ошибок:
 //   - transient chain error → возвращает (уже собранный inflight, error);
 //     caller ретраит весь drained-batch (Unshift). Уже-SENT sub-batch'и
 //     reconcile'ятся на redelivery, не переотправляются.
@@ -123,62 +113,9 @@ func (f *Flusher) Send(ctx context.Context, msgs []*Message) ([]InflightTx, erro
 			inflight, err = f.sendActions(ctx, seg, inflight, f.warehouseTarget())
 		case segmentKey:
 			inflight, err = f.sendActions(ctx, seg, inflight, f.keyTarget())
-		default:
-			inflight, err = f.sendLegacy(ctx, seg, inflight)
 		}
 		if err != nil {
 			return inflight, err
-		}
-	}
-	return inflight, nil
-}
-
-// sendLegacy — прежнее тело Send для FSM-агрегатов (receiving/putaway/picking/
-// shipping): группировка по aggregate_type, отправка в FSM-порядке; неизвестные
-// агрегаты сегмента — DLQ. inflight — накопленные tx предыдущих сегментов,
-// возвращается обновлённым.
-func (f *Flusher) sendLegacy(ctx context.Context, msgs []*Message, inflight []InflightTx) ([]InflightTx, error) {
-	grouped := groupByAggregate(msgs)
-
-	for _, agg := range fsmOrder {
-		sub, ok := grouped[agg]
-		if !ok {
-			continue
-		}
-		delete(grouped, agg)
-
-		pending, err := f.filterAndMarkPending(ctx, sub)
-		if err != nil {
-			return inflight, err
-		}
-		if len(pending) == 0 {
-			f.log.Info("all events already processed, skipping sub-batch", "aggregate", agg, "size", len(sub))
-			continue
-		}
-
-		ids, eventIDs, itemIDs := buildBatchArgs(pending)
-		txHash, err := f.caller.BatchCall(ctx, agg, eventIDs, itemIDs)
-		if err != nil {
-			if errors.Is(err, chain.ErrChainTransient) {
-				f.log.Warn("chain call transient error — will retry", "aggregate", agg, "err", err)
-				return inflight, fmt.Errorf("chain call transient: %w", err)
-			}
-			f.log.Error("chain call failed", "aggregate", agg, "err", err, "size", len(pending))
-			if rerr := f.recordFailure(ctx, pending, ids, "", err.Error()); rerr != nil {
-				return inflight, rerr
-			}
-			continue
-		}
-		if err := f.store.MarkSent(ctx, ids, txHash.Hex()); err != nil {
-			return inflight, fmt.Errorf("mark sent: %w", err)
-		}
-		inflight = append(inflight, InflightTx{Aggregate: agg, TxHash: txHash, IDs: ids, Msgs: pending})
-	}
-
-	for agg, sub := range grouped {
-		f.log.Error("unknown aggregate_type in batch — sending to DLQ", "aggregate", agg, "size", len(sub))
-		if err := f.dlq.PublishAll(ctx, sub, fmt.Sprintf("unknown aggregate_type: %s", agg)); err != nil {
-			return inflight, fmt.Errorf("dlq unknown aggregate %s: %w", agg, err)
 		}
 	}
 	return inflight, nil
@@ -255,7 +192,7 @@ func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]
 		case txHash != "":
 			// Уже broadcast'нуто (crash-recovery S2 / receipt-timeout N1). НЕ resubmit:
 			// reconcile существующую tx, tx_hash остаётся стабильным.
-			terminal, rerr := reconcileReceipt(ctx, f.caller, f.store, []uuid.UUID{m.EventID}, txHash, m.AggregateType, f.actionResolvers(), f.log)
+			terminal, rerr := reconcileReceipt(ctx, f.caller, f.store, []uuid.UUID{m.EventID}, txHash, f.actionResolvers(), f.log)
 			if rerr != nil {
 				return nil, fmt.Errorf("reconcile %s: %w", m.EventID, rerr)
 			}
@@ -268,33 +205,12 @@ func (f *Flusher) filterAndMarkPending(ctx context.Context, msgs []*Message) ([]
 			f.log.Info("skip failed event without tx", "event_id", m.EventID, "aggregate", m.AggregateType)
 		default:
 			// PENDING без tx_hash — InsertPending был, MarkSent нет, tx ещё не уходила:
-			// безопасно отправить. Краевой случай: если BatchCall прошёл, но MarkSent
-			// упал → redelivery попадёт сюда и отправит повторно. Contract idempotency
-			// (#44) не даст двойной transition, но первая tx осиротеет в DB (всплывёт
-			// через chain-status gate #45). Без распределённой транзакции окно неустранимо.
+			// безопасно отправить. Краевой случай: если отправка прошла, а MarkSent
+			// упал → redelivery отправит повторно; контракт пропустит повтор actionId
+			// (ADR §6), первая tx осиротеет в БД.
 			f.log.Warn("resubmitting pending event without tx", "event_id", m.EventID, "aggregate", m.AggregateType, "status", status)
 			pending = append(pending, m)
 		}
 	}
 	return pending, nil
-}
-
-func buildBatchArgs(msgs []*Message) (ids []uuid.UUID, eventIDs, itemIDs []*big.Int) {
-	ids = make([]uuid.UUID, len(msgs))
-	eventIDs = make([]*big.Int, len(msgs))
-	itemIDs = make([]*big.Int, len(msgs))
-	for i, m := range msgs {
-		ids[i] = m.EventID
-		eventIDs[i] = chain.UUIDToUint256(m.EventID.String())
-		itemIDs[i] = chain.UUIDToUint256(m.ProductID.String())
-	}
-	return ids, eventIDs, itemIDs
-}
-
-func groupByAggregate(msgs []*Message) map[string][]*Message {
-	groups := make(map[string][]*Message, len(fsmOrder))
-	for _, m := range msgs {
-		groups[m.AggregateType] = append(groups[m.AggregateType], m)
-	}
-	return groups
 }
