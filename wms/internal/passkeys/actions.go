@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ type KeyAction struct {
 // KeyConfirmation is the confirmation state of the latest submitted action for a key.
 type KeyConfirmation struct {
 	ActionID     uuid.UUID
+	ActionType   uint8
 	State        signedaction.ConfirmationState
 	RejectReason *int16
 }
@@ -38,6 +40,7 @@ type KeyConfirmation struct {
 // KeyActionSubmission carries the outbox row written when a draft is submitted.
 type KeyActionSubmission struct {
 	ActionID           uuid.UUID
+	ActionType         uint8
 	TargetCredentialID []byte
 	SignerCredentialID []byte
 	PayloadHash        string // challenge, 64 lowercase hex chars, no 0x
@@ -57,43 +60,58 @@ type KeyActionDraft struct {
 // DraftKeyRegister stores a KeyRegister draft confirming the operator passkey
 // with the given key id and returns the signing materials for the admin's browser.
 func (s *Service) DraftKeyRegister(ctx context.Context, userID uuid.UUID, targetKeyID string) (*KeyActionDraft, error) {
+	return s.draftKeyAction(ctx, userID, signedaction.TypeKeyRegister, func(orgID uuid.UUID) (*domain.Passkey, error) {
+		return s.pendingOperatorTarget(ctx, orgID, targetKeyID)
+	})
+}
+
+// DraftKeyRevoke stores a KeyRevoke draft revoking the active operator passkey
+// with the given key id and returns the signing materials for the admin's browser.
+func (s *Service) DraftKeyRevoke(ctx context.Context, userID uuid.UUID, targetKeyID string) (*KeyActionDraft, error) {
+	return s.draftKeyAction(ctx, userID, signedaction.TypeKeyRevoke, func(orgID uuid.UUID) (*domain.Passkey, error) {
+		return s.activeOperatorTarget(ctx, orgID, targetKeyID)
+	})
+}
+
+// draftKeyAction authorizes the admin, requires their active signer key,
+// resolves the action's target key via target and stores the drafted key action.
+func (s *Service) draftKeyAction(ctx context.Context, userID uuid.UUID, actionType uint8, target func(orgID uuid.UUID) (*domain.Passkey, error)) (*KeyActionDraft, error) {
 	member, err := s.authorize(ctx, userID, domain.UserRoleAdmin)
 	if err != nil {
 		return nil, err
 	}
-	orgID := *member.OrgID
 
 	signer, err := s.ActiveSigner(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 
-	target, err := s.pendingOperatorTarget(ctx, orgID, targetKeyID)
+	subject, err := target(*member.OrgID)
 	if err != nil {
 		return nil, err
 	}
 
 	actionID, err := uuid.NewV7()
 	if err != nil {
-		return nil, fmt.Errorf("passkeys.Service.DraftKeyRegister action id: %w", err)
+		return nil, fmt.Errorf("passkeys.Service.draftKeyAction action id: %w", err)
 	}
-	detailsHash := signedaction.KeyDetailsHash(target.QX, target.QY)
+	detailsHash := signedaction.KeyDetailsHash(subject.QX, subject.QY)
 	action := KeyAction{
 		ActionID:           actionID,
-		OrgID:              orgID,
-		ActionType:         signedaction.TypeKeyRegister,
-		TargetCredentialID: target.CredentialID,
+		OrgID:              *member.OrgID,
+		ActionType:         actionType,
+		TargetCredentialID: subject.CredentialID,
 		SignerCredentialID: signer.CredentialID,
-		Challenge:          signedaction.Challenge(actionID, signedaction.TypeKeyRegister, signedaction.NoItems, detailsHash),
+		Challenge:          signedaction.Challenge(actionID, actionType, signedaction.NoItems, detailsHash),
 		CreatedBy:          userID,
 	}
 	if err := s.repo.InsertKeyAction(ctx, action); err != nil {
-		return nil, fmt.Errorf("passkeys.Service.DraftKeyRegister insert: %w", err)
+		return nil, fmt.Errorf("passkeys.Service.draftKeyAction insert: %w", err)
 	}
 	return &KeyActionDraft{
 		Action:      action,
-		SubjectQX:   target.QX,
-		SubjectQY:   target.QY,
+		SubjectQX:   subject.QX,
+		SubjectQY:   subject.QY,
 		DetailsHash: detailsHash,
 		SignerKeyID: signer.KeyID,
 		RPID:        s.wa.Config.RPID,
@@ -124,33 +142,67 @@ func (s *Service) RejectKey(ctx context.Context, userID uuid.UUID, targetKeyID s
 	return nil
 }
 
-// pendingOperatorTarget returns the PENDING operator passkey of org orgID with the given key id
-// that has no confirmation in flight.
-func (s *Service) pendingOperatorTarget(ctx context.Context, orgID uuid.UUID, targetKeyID string) (*domain.Passkey, error) {
+// operatorTarget loads the operator passkey of org orgID with the given key id
+// and refreshes its status from the on-chain registry.
+func (s *Service) operatorTarget(ctx context.Context, orgID uuid.UUID, targetKeyID string) (*domain.Passkey, error) {
 	keyID, err := parseKeyID(targetKeyID)
 	if err != nil {
 		return nil, ErrInvalidRequest
 	}
 	target, err := s.repo.PasskeyByKeyID(ctx, keyID)
 	if err != nil {
-		return nil, fmt.Errorf("passkeys.Service.pendingOperatorTarget target: %w", err)
+		return nil, fmt.Errorf("passkeys.Service.operatorTarget target: %w", err)
 	}
 	if target == nil || target.OrgID != orgID || target.Role != domain.UserRoleOperator {
 		return nil, ErrPasskeyNotFound
 	}
 	s.syncStatus(ctx, target)
+	return target, nil
+}
+
+// pendingOperatorTarget returns the PENDING operator passkey of org orgID with
+// the given key id that has no confirmation in flight.
+func (s *Service) pendingOperatorTarget(ctx context.Context, orgID uuid.UUID, targetKeyID string) (*domain.Passkey, error) {
+	target, err := s.operatorTarget(ctx, orgID, targetKeyID)
+	if err != nil {
+		return nil, err
+	}
 	if target.Status != domain.PasskeyStatusPending {
 		return nil, ErrTargetNotPending
 	}
-
-	confirmations, err := s.repo.LatestConfirmations(ctx, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("passkeys.Service.pendingOperatorTarget confirmations: %w", err)
-	}
-	if c, ok := confirmations[string(target.CredentialID)]; ok && (c.State == signedaction.ConfirmationSent || c.State == signedaction.ConfirmationApplied) {
-		return nil, ErrActionInProgress
+	if err := s.requireNoConfirmation(ctx, orgID, target, signedaction.ConfirmationSent, signedaction.ConfirmationApplied); err != nil {
+		return nil, err
 	}
 	return target, nil
+}
+
+// activeOperatorTarget returns the ACTIVE operator passkey of org orgID with
+// the given key id that has no confirmation still awaiting the chain.
+func (s *Service) activeOperatorTarget(ctx context.Context, orgID uuid.UUID, targetKeyID string) (*domain.Passkey, error) {
+	target, err := s.operatorTarget(ctx, orgID, targetKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if target.Status != domain.PasskeyStatusActive {
+		return nil, ErrTargetNotActive
+	}
+	if err := s.requireNoConfirmation(ctx, orgID, target, signedaction.ConfirmationSent); err != nil {
+		return nil, err
+	}
+	return target, nil
+}
+
+// requireNoConfirmation fails with ErrActionInProgress when the latest
+// submitted key action for the target is in one of the blocking states.
+func (s *Service) requireNoConfirmation(ctx context.Context, orgID uuid.UUID, target *domain.Passkey, blocking ...signedaction.ConfirmationState) error {
+	confirmations, err := s.repo.LatestConfirmations(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("passkeys.Service.confirmations: %w", err)
+	}
+	if c, ok := confirmations[string(target.CredentialID)]; ok && slices.Contains(blocking, c.State) {
+		return ErrActionInProgress
+	}
+	return nil
 }
 
 // SubmitKeyAction verifies the browser assertion over the draft's challenge and
@@ -200,6 +252,7 @@ func (s *Service) SubmitKeyAction(ctx context.Context, userID, actionID uuid.UUI
 	}
 	if err := s.repo.SubmitKeyAction(ctx, KeyActionSubmission{
 		ActionID:           actionID,
+		ActionType:         action.ActionType,
 		TargetCredentialID: action.TargetCredentialID,
 		SignerCredentialID: action.SignerCredentialID,
 		PayloadHash:        hex.EncodeToString(action.Challenge[:]),
@@ -207,7 +260,7 @@ func (s *Service) SubmitKeyAction(ctx context.Context, userID, actionID uuid.UUI
 	}); err != nil {
 		return nil, fmt.Errorf("passkeys.Service.SubmitKeyAction submit: %w", err)
 	}
-	return &KeyConfirmation{ActionID: actionID, State: signedaction.ConfirmationSent}, nil
+	return &KeyConfirmation{ActionID: actionID, ActionType: action.ActionType, State: signedaction.ConfirmationSent}, nil
 }
 
 // ActiveSigner returns the caller's latest passkey when it is ACTIVE in the
@@ -230,39 +283,6 @@ func (s *Service) ActiveSigner(ctx context.Context, userID uuid.UUID) (*domain.P
 // RelyingParty returns the WebAuthn RP ID and allowed origins of this service.
 func (s *Service) RelyingParty() (rpID string, origins []string) {
 	return s.wa.Config.RPID, s.wa.Config.RPOrigins
-}
-
-// keyActionEnvelope matches the exact JSON keys of the signed-action envelope
-// (contract §2) for a key action: no itemIds, no detailsHash.
-type keyActionEnvelopeDoc struct {
-	Version    int                           `json:"version"`
-	ActionID   string                        `json:"actionId"`
-	ActionType uint8                         `json:"actionType"`
-	ItemIDs    []string                      `json:"itemIds"`
-	SubjectKey subjectKeyJSON                `json:"subjectKey"`
-	KeyID      string                        `json:"keyId"`
-	WebAuthn   signedaction.EnvelopeWebAuthn `json:"webauthn"`
-}
-
-type subjectKeyJSON struct {
-	QX string `json:"qx"`
-	QY string `json:"qy"`
-}
-
-func keyActionEnvelope(action *KeyAction, target *domain.Passkey, signerKeyID [32]byte, wa signedaction.WebAuthn) keyActionEnvelopeDoc {
-	return keyActionEnvelopeDoc{
-		Version:    1,
-		ActionID:   action.ActionID.String(),
-		ActionType: action.ActionType,
-		ItemIDs:    []string{},
-		SubjectKey: subjectKeyJSON{QX: hexCoordinate(target.QX), QY: hexCoordinate(target.QY)},
-		KeyID:      hexCoordinate(signerKeyID),
-		WebAuthn:   signedaction.NewEnvelopeWebAuthn(wa),
-	}
-}
-
-func hexCoordinate(v [32]byte) string {
-	return signedaction.Hex32(v)
 }
 
 // parseKeyID accepts "0x" followed by 64 hex characters.

@@ -41,6 +41,7 @@ type signedOperator struct {
 // ADMIN user + admin passkey registered on chain by the owner.
 type consortiumOrg struct {
 	orgID         uuid.UUID
+	adminUserID   uuid.UUID
 	adminUser     string
 	adminPassword string
 	adminToken    string
@@ -120,6 +121,7 @@ func setupConsortium(t *testing.T, ctx context.Context, env *env) error {
 
 	consortiumShared = &consortiumOrg{
 		orgID:         fx.orgID,
+		adminUserID:   fx.adminUserID,
 		adminUser:     fx.adminUser,
 		adminPassword: fx.password,
 		adminToken:    adminToken,

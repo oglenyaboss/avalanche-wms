@@ -1,6 +1,6 @@
 export { MyPasskeyCard } from './ui/MyPasskeyCard'
 export { OrgKeysTable } from './ui/OrgKeysTable'
 export { AdminKeyDownloadButton } from './ui/AdminKeyDownloadButton'
-export { useConfirmKey, useOrganizationKeys, useRejectKey } from './model/usePasskey'
+export { useConfirmKey, useOrganizationKeys, useRejectKey, useRevokeKey } from './model/usePasskey'
 export { passkeyErrorText } from './model/errors'
 export { assertionErrorText } from './model/webauthn'

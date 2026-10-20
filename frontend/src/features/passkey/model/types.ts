@@ -16,6 +16,7 @@ export type ConfirmationState = 'SENT' | 'APPLIED' | 'REJECTED' | 'FAILED'
 
 export interface KeyConfirmation {
   actionId: string
+  actionType: number
   state: ConfirmationState
   rejectReason: number | null
 }

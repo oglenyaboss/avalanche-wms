@@ -73,6 +73,7 @@ type keyActionDraftDTO struct {
 // confirmationDTO models the submit response and members[].confirmation.
 type confirmationDTO struct {
 	ActionID     string `json:"action_id"`
+	ActionType   int    `json:"action_type"`
 	State        string `json:"state"`
 	RejectReason *int16 `json:"reject_reason"`
 }
