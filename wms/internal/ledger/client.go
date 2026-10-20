@@ -35,44 +35,6 @@ func (c *Client) HealthCheck() error {
 	return nil
 }
 
-// TxReceipt is the on-chain proof returned by the adapter's receipt endpoint.
-type TxReceipt struct {
-	Found         bool   `json:"found"`
-	Status        string `json:"status"` // success | failed | pending
-	BlockNumber   uint64 `json:"block_number"`
-	Confirmations uint64 `json:"confirmations"`
-	GasUsed       uint64 `json:"gas_used"`
-}
-
-// GetTxReceipt proxies the adapter's GET /onchain/tx/{hash}. A transport error
-// or non-200 is returned as an error (caller maps to CHAIN_UNREACHABLE). A 200
-// with found:false (tx not yet mined) is a valid, non-error result.
-func (c *Client) GetTxReceipt(ctx context.Context, txHash string) (TxReceipt, error) {
-	// Explicit per-call deadline (independent of the transport-level
-	// httpClient.Timeout): bounds this UI-facing proxy and is cancellable
-	// mid-stream by the caller. Mirrors the adapter's own 4s receipt guard.
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/onchain/tx/"+txHash, http.NoBody)
-	if err != nil {
-		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt build: %w", err)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt: adapter status %d", resp.StatusCode)
-	}
-	var out TxReceipt
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt decode: %w", err)
-	}
-	return out, nil
-}
-
 // RegistryKey is the adapter's view of a key in the on-chain registry. Found is
 // false when the keyId is unknown to the registry.
 type RegistryKey struct {
@@ -82,8 +44,8 @@ type RegistryKey struct {
 	Active bool   `json:"active"`
 }
 
-// GetRegistryKey proxies the adapter's GET /registry/keys/{keyID}. Like
-// GetTxReceipt, a transport error or non-200 is returned as an error.
+// GetRegistryKey proxies the adapter's GET /registry/keys/{keyID}. A transport
+// error or non-200 is returned as an error.
 func (c *Client) GetRegistryKey(ctx context.Context, keyID string) (RegistryKey, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

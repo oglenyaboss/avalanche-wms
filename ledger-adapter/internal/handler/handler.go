@@ -3,26 +3,15 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"regexp"
 	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 
 	"ledger-adapter/internal/chain"
 )
-
-// ChainReader is the minimal chain surface the proof endpoint needs.
-// *chain.Client satisfies it. Defined here (consumer side) so the handler is
-// unit-testable with a stub.
-type ChainReader interface {
-	TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error)
-	BlockNumber(ctx context.Context) (uint64, error)
-}
 
 // RegistryReader is the ConsortiumRegistry read surface for /registry/keys.
 // *chain.Registry satisfies it.
@@ -30,23 +19,21 @@ type RegistryReader interface {
 	GetKey(ctx context.Context, keyID [32]byte) (chain.RegistryKey, error)
 }
 
-// Handler holds HTTP handler state: /health (liveness), /onchain/tx (proof)
-// and /registry/keys (key status).
+// Handler holds HTTP handler state: /health (liveness) and /registry/keys
+// (key status).
 type Handler struct {
-	chain    ChainReader
 	registry RegistryReader
 }
 
-// New creates a Handler. chain or registry may be nil if the process runs without
-// them (then the corresponding endpoints return 502); /health never depends on them.
-func New(chain ChainReader, registry RegistryReader) *Handler {
-	return &Handler{chain: chain, registry: registry}
+// New creates a Handler. registry may be nil if the process runs without it
+// (then /registry/keys returns 502); /health never depends on it.
+func New(registry RegistryReader) *Handler {
+	return &Handler{registry: registry}
 }
 
-// RegisterRoutes wires /health (liveness), the on-demand receipt proof and the registry key status.
+// RegisterRoutes wires /health (liveness) and the registry key status.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", h.Health)
-	mux.HandleFunc("GET /onchain/tx/{hash}", h.TxProof)
 	mux.HandleFunc("GET /registry/keys/{keyId}", h.RegistryKey)
 }
 
@@ -63,67 +50,7 @@ func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-var (
-	txHashRe = regexp.MustCompile(`^0x[0-9a-fA-F]{64}$`)
-	keyIDRe  = regexp.MustCompile(`^0x[0-9a-fA-F]{64}$`)
-)
-
-type txProofResponse struct {
-	Found         bool   `json:"found"`
-	Status        string `json:"status"` // success | failed | pending
-	BlockNumber   uint64 `json:"block_number,omitempty"`
-	Confirmations uint64 `json:"confirmations,omitempty"`
-	GasUsed       uint64 `json:"gas_used,omitempty"`
-}
-
-// TxProof does a single live receipt lookup (no polling) for an on-demand proof.
-//
-// SECURITY: this endpoint is intentionally UNAUTHENTICATED — the adapter has no
-// auth layer. It is safe only because the adapter port is reachable only from
-// the private Docker network and the host loopback (compose publishes
-// 127.0.0.1:8085); the public-facing wms /onchain/tx/{hash} proxy is the
-// authenticated entry point (RequireAdminOrOperator). Do NOT publish this port
-// beyond loopback without adding a shared-secret check.
-func (h *Handler) TxProof(w http.ResponseWriter, r *http.Request) {
-	hash := r.PathValue("hash")
-	if !txHashRe.MatchString(hash) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_TX_HASH"})
-		return
-	}
-	if h.chain == nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
-	defer cancel()
-
-	receipt, err := h.chain.TransactionReceipt(ctx, common.HexToHash(hash))
-	if errors.Is(err, ethereum.NotFound) {
-		writeJSON(w, http.StatusOK, txProofResponse{Found: false, Status: "pending"})
-		return
-	}
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
-		return
-	}
-
-	resp := txProofResponse{
-		Found:       true,
-		Status:      "failed",
-		BlockNumber: receipt.BlockNumber.Uint64(),
-		GasUsed:     receipt.GasUsed,
-	}
-	if receipt.Status == types.ReceiptStatusSuccessful {
-		resp.Status = "success"
-	}
-	// Confirmations clamped: a lagging head (multi-node RPC) must not underflow.
-	if head, herr := h.chain.BlockNumber(ctx); herr == nil {
-		if rb := receipt.BlockNumber.Uint64(); head > rb {
-			resp.Confirmations = head - rb
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
+var keyIDRe = regexp.MustCompile(`^0x[0-9a-fA-F]{64}$`)
 
 type registryKeyResponse struct {
 	Found  bool   `json:"found"`
@@ -132,7 +59,8 @@ type registryKeyResponse struct {
 	Active bool   `json:"active"`
 }
 
-// RegistryKey — статус ключа в ConsortiumRegistry; без аутентификации, как TxProof (только внутренняя сеть и loopback хоста).
+// RegistryKey — статус ключа в ConsortiumRegistry; без аутентификации
+// (только внутренняя сеть и loopback хоста).
 func (h *Handler) RegistryKey(w http.ResponseWriter, r *http.Request) {
 	raw := r.PathValue("keyId")
 	if !keyIDRe.MatchString(raw) {

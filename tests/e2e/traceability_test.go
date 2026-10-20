@@ -3,15 +3,20 @@
 package e2e
 
 import (
+	"context"
 	"net/url"
 	"testing"
+	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
 // Response shapes for the read-only traceability endpoints. The e2e module cannot
-// import the wms module, so these mirror the products/onchain DTO JSON tags.
+// import the wms module, so these mirror the products DTO JSON tags.
 type traceProductHeader struct {
 	ProductID string `json:"product_id"`
 	QRCode    string `json:"qr_code"`
@@ -35,12 +40,6 @@ type traceTimeline struct {
 type traceRecentProduct struct {
 	ProductID string `json:"product_id"`
 	QRCode    string `json:"qr_code"`
-}
-
-type traceTxProof struct {
-	Found       bool   `json:"found"`
-	Status      string `json:"status"`
-	BlockNumber uint64 `json:"block_number"`
 }
 
 // assertProductTraceability validates the traceability feature end-to-end against
@@ -91,10 +90,15 @@ func assertProductTraceability(t *testing.T, env *env, token string, productID u
 	}
 	require.True(t, found, "shipped product absent from /products/recent")
 
-	// Live on-chain proof against the real chain: a committed tx must verify.
-	var proof traceTxProof
-	getJSON(t, env, token, "/onchain/tx/"+aCommittedHash, &proof)
-	require.Truef(t, proof.Found, "committed tx not found on chain: %s", aCommittedHash)
-	require.Equal(t, "success", proof.Status)
-	require.Greater(t, proof.BlockNumber, uint64(0))
+	// Live on-chain proof: a committed tx must verify directly against the RPC
+	// node (the auditor page checks receipts the same way, around the backend).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := ethclient.DialContext(ctx, env.rpcURL)
+	require.NoError(t, err, "dial rpc")
+	defer client.Close()
+	receipt, err := client.TransactionReceipt(ctx, common.HexToHash(aCommittedHash))
+	require.NoErrorf(t, err, "receipt of committed tx: %s", aCommittedHash)
+	require.Truef(t, receipt.Status == types.ReceiptStatusSuccessful, "committed tx failed on chain: %s", aCommittedHash)
+	require.Greater(t, receipt.BlockNumber.Uint64(), uint64(0))
 }

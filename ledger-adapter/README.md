@@ -54,7 +54,7 @@ ledger-adapter/
 │   ├── consumer/              # Parse, Batcher, Flusher (сегменты/чанки), Pipeline (окно), Confirm, Reconciler
 │   ├── store/                 # pgx pool + onchain_events Repository
 │   ├── dlq/                   # kafka.Writer в wms.dlq.v1
-│   ├── handler/               # GET /health, /onchain/tx/{hash}, /registry/keys/{keyId}
+│   ├── handler/               # GET /health, /registry/keys/{keyId}
 │   └── kms/                   # подпись через Web3Signer
 └── contracts/                 # ConsortiumRegistry.sol, SignedMappingWMS.sol, SignedAction.sol + тесты и скрипты
 ```
