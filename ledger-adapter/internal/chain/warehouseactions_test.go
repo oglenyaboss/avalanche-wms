@@ -191,10 +191,10 @@ func TestApplyActionsGasFloor(t *testing.T) {
 		want    uint64
 	}{
 		{"nil", nil, 21_000},
-		// 117 000 ≥ измеренных 108 605 газа на приёмку 1 товара (ADR-0001).
-		{"receive 1 item", []WarehouseAction{{ActionType: 1, ItemIds: items(1)}}, 21_000 + 70_000 + 26_000},
+		// 119 000 ≥ измеренных 108 605 газа на приёмку 1 товара (ADR-0001).
+		{"receive 1 item", []WarehouseAction{{ActionType: 1, ItemIds: items(1)}}, 21_000 + 70_000 + 28_000},
 		{"putaway 100 items", []WarehouseAction{{ActionType: 2, ItemIds: items(100)}}, 21_000 + 70_000 + 100*9_000},
-		{"receive 3 + ship 5", []WarehouseAction{{ActionType: 1, ItemIds: items(3)}, {ActionType: 4, ItemIds: items(5)}}, 21_000 + 2*70_000 + 3*26_000 + 5*9_000},
+		{"receive 3 + ship 5", []WarehouseAction{{ActionType: 1, ItemIds: items(3)}, {ActionType: 4, ItemIds: items(5)}}, 21_000 + 2*70_000 + 3*28_000 + 5*9_000},
 		{"pick 0 items", []WarehouseAction{{ActionType: 3}}, 21_000 + 70_000},
 	}
 	for _, tc := range cases {

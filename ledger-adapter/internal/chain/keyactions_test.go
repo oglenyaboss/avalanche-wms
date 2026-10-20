@@ -283,6 +283,32 @@ func TestRegistry_StateOutcome(t *testing.T) {
 	}
 }
 
+// TestApplyKeyActionsGasFloor: нижняя граница газа tx applyKeyActions = база tx +
+// накладные каждого ключевого действия.
+func TestApplyKeyActionsGasFloor(t *testing.T) {
+	actions := func(n int) []KeyAction {
+		out := make([]KeyAction, n)
+		for i := range out {
+			out[i] = KeyAction{ActionType: 5}
+		}
+		return out
+	}
+	cases := []struct {
+		name    string
+		actions []KeyAction
+		want    uint64
+	}{
+		{"nil", nil, 21_000},
+		{"one action", actions(1), 156_000},
+		{"ten actions", actions(10), 1_371_000},
+	}
+	for _, tc := range cases {
+		if got := ApplyKeyActionsGasFloor(tc.actions); got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
 func mustPack(t *testing.T, f func(...any) ([]byte, error), args ...any) []byte {
 	t.Helper()
 	out, err := f(args...)

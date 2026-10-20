@@ -1137,27 +1137,31 @@ func TestFlusher_WarehouseChunkPassesGasFloor(t *testing.T) {
 	if len(ch.minGases) != 1 {
 		t.Fatalf("expected 1 SendCalldata, got %d", len(ch.minGases))
 	}
-	// 21_000 база + 2×70_000 действия + 3×26_000 приёмка + 5×9_000 отгрузка.
-	want := uint64(21_000 + 2*70_000 + 3*26_000 + 5*9_000)
+	// 21_000 база + 2×70_000 действия + 3×28_000 приёмка + 5×9_000 отгрузка.
+	want := uint64(21_000 + 2*70_000 + 3*28_000 + 5*9_000)
 	if got := ch.minGases[0]; got != want {
 		t.Errorf("minGas: got %d, want %d", got, want)
 	}
 }
 
-// TestFlusher_KeyActionsNoGasFloor: ключевые действия уходят с minGas = 0 —
-// нижняя граница газа считается только для applyActions.
-func TestFlusher_KeyActionsNoGasFloor(t *testing.T) {
+// TestFlusher_KeyChunkPassesGasFloor: чанк ключевых действий уходит в SendCalldata
+// с minGas = детерминированной нижней границей по числу действий самого чанка —
+// estimate под пайплайном видит дешёвый reject-путь, а к майнингу действие
+// применяется с записью ключа (без границы → OOG → revert всего tx).
+func TestFlusher_KeyChunkPassesGasFloor(t *testing.T) {
 	f, ch, _, _ := newFlusherT()
-	k := makeActionMessage(`{}`)
-	f.WithRegistry(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{k.EventID: {Applied: true}}})
+	msgs := []*Message{makeActionMessage(`{}`), makeActionMessage(`{}`), makeActionMessage(`{}`)}
+	f.WithRegistry(appliedResolver(msgs...))
 
-	if _, err := f.Send(context.Background(), []*Message{k}); err != nil {
+	if _, err := f.Send(context.Background(), msgs); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if len(ch.minGases) != 1 {
 		t.Fatalf("expected 1 SendCalldata, got %d", len(ch.minGases))
 	}
-	if got := ch.minGases[0]; got != 0 {
-		t.Errorf("key actions minGas: got %d, want 0", got)
+	// 21_000 база + 3×135_000 ключевых действия.
+	want := uint64(21_000 + 3*135_000)
+	if got := ch.minGases[0]; got != want {
+		t.Errorf("minGas: got %d, want %d", got, want)
 	}
 }
