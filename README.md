@@ -1,6 +1,6 @@
 # WMS + Blockchain
 
-> Система управления складом (WMS) с **неизменяемой аудит-полосой операций на блокчейне**. Каждая физическая операция на складе фиксируется в смарт-контракте через паттерн **Outbox + CDC** — без двойной записи в приложении и без потери событий.
+> Система управления складом (WMS) с **неизменяемой аудит-полосой операций на блокчейне**. Каждый шаг, меняющий состояние товара в цепи, оператор подтверждает и **подписывает своим passkey** (WebAuthn, P-256); подписанное действие уходит в смарт-контракт через паттерн **Outbox + CDC** — без двойной записи в приложении и без потери событий.
 
 Off-chain — обычная реляционная система (PostgreSQL, бизнес-логика на Go). On-chain — детерминированный конечный автомат, который верифицирует, что товар прошёл этапы в правильном порядке. Связаны они однонаправленным потоком через CDC, так что блокчейн нельзя «обойти» из приложения.
 
@@ -14,18 +14,18 @@ WMS управляет 5 этапами жизненного цикла това
 
 **Приёмка на КПП → Приёмка на столе → Раскладка → Сборка → Отгрузка**
 
-Каждая значимая операция автоматически попадает в смарт-контракт `BatchMappingWMS`, реализующий FSM `None → Accepted → PutAway → Picked → Shipped`. Контракт — **верификатор, а не хранилище**: он подтверждает корректность переходов, а не дублирует данные склада.
+Каждый значимый шаг — закрытие грузоместа, раскладка, выгрузка корзины сборки, отгрузка — становится **подписанным действием**: оператор подписывает его passkey, контракт `SignedMappingWMS` проверяет подпись (через реестр ключей `ConsortiumRegistry`) и применяет FSM-переход каждого товара `None → Accepted → PutAway → Picked → Shipped`. Контракт — **верификатор, а не хранилище**: он подтверждает корректность переходов и подлинность подписи, а не дублирует данные склада. Модель описана в [ADR-0001](docs/adr/0001-signed-actions.md).
 
 ### Архитектура потока данных
 
 ```mermaid
 flowchart LR
-    UI[React / Vite] -->|REST| WMS[WMS-монолит<br/>Go]
-    WMS -->|операции + outbox| PG[(PostgreSQL<br/>3 схемы)]
+    UI[React / Vite] -->|draft + подпись passkey| WMS[WMS-монолит<br/>Go]
+    WMS -->|подписанные действия + outbox| PG[(PostgreSQL<br/>3 схемы)]
     PG -->|WAL| DBZ[Debezium<br/>CDC]
     DBZ -->|wms.events.v1| K[Apache Kafka]
     K --> LA[Ledger Adapter<br/>Go]
-    LA -->|подписанная tx| BC[Avalanche Subnet-EVM<br/>BatchMappingWMS]
+    LA -->|applyActions / applyKeyActions| BC[Avalanche Subnet-EVM<br/>SignedMappingWMS + ConsortiumRegistry]
     LA -->|статус| OE[(onchain_events)]
     OE -.->|reconcile| LA
 ```
@@ -66,7 +66,7 @@ blockchain_project/
 ├── ledger-adapter/           # мост в блокчейн (Go)
 │   ├── cmd/adapter/          #   точка входа
 │   ├── internal/             #   consumer, batch-flusher, reconcile, idempotency
-│   └── contracts/            #   BatchMappingWMS.sol (+ Foundry-тесты)
+│   └── contracts/            #   ConsortiumRegistry.sol, SignedMappingWMS.sol (+ Foundry-тесты)
 │
 ├── frontend/                 # веб-клиент (React 19, Vite, TypeScript, Zustand)
 │
@@ -200,16 +200,18 @@ cd ledger-adapter/contracts && forge test   # тесты смарт-контра
 ### Интеграция WMS ↔ блокчейн
 | Документ | О чём |
 |----------|-------|
-| [Маппинг WMS → блокчейн](docs/integration/blockchain-mapping.md) | Какая операция что пишет на чейн, полный путь события |
-| [Контракт данных](docs/integration/data-contract.md) | Формат outbox → Kafka → adapter → onchain_events |
-| [BatchMappingWMS](docs/integration/batch-mapping-approach.md) | Смарт-контракт: FSM, batch-функции, производительность |
+| [Маппинг WMS → блокчейн](docs/integration/blockchain-mapping.md) | Какой шаг какое действие пишет в цепь: FSM, детали, отклонения, лимиты |
+| [Контракт данных](docs/integration/data-contract.md) | Формат outbox → Kafka → adapter → onchain_events подписанного действия |
+| [Управление ключами](docs/integration/key-management.md) | Регистрация и отзыв ключей, роли, корень доверия консорциума |
+| [Процедура аудита](docs/integration/audit-procedure.md) | CLI-сверка `wms/cmd/audit` и страница `/audit` для аудитора |
+| [ADR-0001](docs/adr/0001-signed-actions.md) | Принятое решение: подписанные действия (первоисточник модели) |
 
 ### Референсы разработчика (hand-off)
 | Документ | О чём |
 |----------|-------|
 | [WMS Reference](docs/developer/wms-reference.md) | Пакеты, модули, сервисы, репозитории, запись outbox |
 | [Ledger Adapter Reference](docs/developer/ledger-adapter-reference.md) | Consumer, batch-flusher, reconcile, идемпотентность |
-| [Smart Contract Reference](docs/developer/smart-contract-reference.md) | FSM, сигнатуры, события, storage layout, UUID→uint256 |
+| [Smart Contract Reference](docs/developer/smart-contract-reference.md) | Контракт старого пути (событие на товар, до #19): FSM, batch-функции, UUID→uint256 |
 | [Operations](docs/developer/operations.md) | Эксплуатация: compose, env, init БД/Kafka, Debezium, мониторинг |
 
 ### Производительность, нагрузка, гео
@@ -262,7 +264,7 @@ internal/receiving/
 | `JWT_SECRET` | Секрет подписи JWT (задать вручную, ≥32 символа) | — |
 | `RPC_URL` | RPC EVM-чейна (Avalanche Subnet-EVM или любой EVM-совместимый) | `http://localhost:8545` |
 | `PRIVATE_KEY` | Приватный ключ для подписи транзакций адаптером | — |
-| `CONTRACT_ADDR` | Адрес развёрнутого `BatchMappingWMS` | — |
+| `CONTRACT_ADDR` | Адрес развёрнутого `SignedMappingWMS` (реестр — `REGISTRY_ADDR`) | — |
 
 ## Лицензия
 

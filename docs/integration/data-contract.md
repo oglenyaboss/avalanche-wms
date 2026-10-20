@@ -1,7 +1,7 @@
 # Контракт данных: WMS ↔ Kafka ↔ Ledger Adapter ↔ Blockchain
 
-**Дата:** 2026-03-30
-**Статус:** согласовано, готово к реализации
+**Версия:** 2.0
+**Первоисточник:** [ADR-0001 «Подписанные складские действия»](../adr/0001-signed-actions.md) (§9 — конверт и outbox, §6 — исходы, §10 — размер)
 
 ---
 
@@ -10,232 +10,146 @@
 Этот документ фиксирует формат данных на каждом этапе пайплайна:
 
 ```
-WMS (Go) → outbox_events (PG) → Debezium → Kafka → Ledger Adapter (Go) → BatchMappingWMS (Solidity)
+WMS (Go) → outbox_events (PG) → Debezium → Kafka (wms.events.v1) → Ledger Adapter (Go) → onchain_events (PG) → SignedMappingWMS / ConsortiumRegistry
 ```
 
-Цель: обе стороны (WMS и Ledger Adapter) могут реализовываться **независимо**, опираясь на этот контракт.
+Единица записи — **подписанное действие**: одна строка outbox на одну часть операции (ADR-0001 §10), а не на товар. Ключевые действия (регистрация/отзыв ключа оператора) едут тем же конвертом.
 
 ---
 
-## 1. outbox_events (WMS → PostgreSQL)
+## 1. outbox_events: строка подписанного действия
 
-WMS пишет в `outbox_events` **в той же транзакции**, что и бизнес-операцию.
+WMS пишет строку в **той же транзакции**, что и бизнес-операцию (`wms/internal/signedops/repository.go`, `WriteActions`; ключевые действия — `wms/internal/passkeys/actions_repository.go`, `SubmitKeyAction`):
 
 ```sql
-INSERT INTO outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
-VALUES (
-  gen_random_uuid(),    -- уникальный ID события
-  :product_id,          -- ВСЕГДА product_id (для всех 4 процессов)
-  :aggregate_type,      -- lowercase: receiving / putaway / picking / shipping
-  :event_type,          -- wms.{aggregate_type}.v1
-  :payload_hash         -- sha256(JSON payload) — для integrity check
-);
+INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash, payload)
+VALUES ($1, $1, 'signed_action', 'wms.action.v1', $2, $3::jsonb)
+--      actionId  actionId                                hex(challenge)  конверт (§2)
 ```
 
-### Правило: 1 outbox event = 1 product
+| Колонка | Значение для действия |
+|---|---|
+| `event_id` | `actionId` (UUIDv7), он же ключ идемпотентности |
+| `aggregate_id` | тот же `actionId` |
+| `aggregate_type` | строго `signed_action` |
+| `event_type` | `wms.action.v1` |
+| `payload_hash` | challenge действия в hex (не sha256 от payload) |
+| `payload` | конверт действия (§2) |
 
-| Процесс | Когда создаётся outbox event | aggregate_id | aggregate_type |
-|---------|------------------------------|-------------|----------------|
-| Приёмка на столе | `CLOSE_CARGO` — по одному event на каждый product в грузоместе | product_id | `receiving` |
-| Раскладка | При размещении товара в ячейку | product_id | `putaway` |
-| Сборка | При подборе товара (status → DONE) | product_id | `picking` |
-| Отгрузка | При отгрузке товара | product_id | `shipping` |
+У ключевых действий строка та же: `action_id` из `key_actions` становится `event_id/aggregate_id`.
 
-**Приёмка на КПП (receiving_gate):** outbox events **НЕ создаются**. КПП — логистическая операция, товары (`products`) ещё не существуют.
+## 2. Конверт (payload)
 
-### Значения aggregate_type (СТРОГО lowercase)
+Точное соответствие — `wms/internal/signedops/operation.go` (`envelopeDoc`) и `wms/internal/passkeys/envelope.go` (`keyActionEnvelopeDoc`); поля блока `webauthn` — `wms/internal/signedaction/envelope.go` (`EnvelopeWebAuthn`); парсер — `ledger-adapter/internal/consumer/message.go` (`parseSignedAction`).
+
+```json
+{
+  "version": 1,
+  "actionId": "01929c5e-6f00-7000-8000-000000001002",
+  "actionType": 1,
+  "itemIds": ["7c9e6679-7425-40de-944b-e07fc1f90ae7"],
+  "detailsHash": "0x…",
+  "keyId": "0x…",
+  "webauthn": {
+    "authenticatorData": "0x…",
+    "clientDataJSON": "{\"type\":\"webauthn.get\",…}",
+    "challengeIndex": 23,
+    "typeIndex": 1,
+    "r": "0x…",
+    "s": "0x…"
+  }
+}
+```
+
+| Поле | Складское (1–4) | Ключевое (5–6) |
+|---|---|---|
+| `version` | `1` | `1` |
+| `actionId` | UUID действия | UUID действия |
+| `actionType` | 1–4 | 5–6 |
+| `itemIds` | UUID товаров по возрастанию `itemId` | `[]` (пустой) |
+| `detailsHash` | `0x` + 32 байта | **отсутствует** (контракт считает `keccak256(abi.encode(qx, qy))` сам) |
+| `subjectKey` `{qx, qy}` | **отсутствует** | публичный ключ, который регистрируют/отзывают |
+| `keyId` | ключ **подписанта** | ключ **админа-подписанта** |
+| `webauthn` | assertion админ/оператора | assertion админа |
+
+`keyId` во всех случаях — ключ подписанта; у ключевых действий он админ, а `subjectKey` — чей ключ регистрируется/отзывается.
+
+## 3. Debezium EventRouter → Kafka
+
+Конфигурация: `deploy/debezium/connectors/postgres-connector.json`.
 
 ```
-receiving   →  topic: wms.receiving.v1   →  контракт: batchAccept
-putaway     →  topic: wms.putaway.v1     →  контракт: batchPutAway
-picking     →  topic: wms.picking.v1     →  контракт: batchPick
-shipping    →  topic: wms.shipping.v1    →  контракт: batchShip
-```
-
-Kafka topic формируется Debezium по формуле: `wms.${aggregate_type}.v1`. Если aggregate_type написан в другом регистре или с другим именем — роутинг сломается.
-
-### payload_hash
-
-SHA-256 хеш JSON-представления бизнес-данных. Формат JSON не стандартизируется — хеш используется только для integrity/dedup на уровне аудита. Ledger Adapter **не парсит** payload_hash.
-
----
-
-## 2. Debezium EventRouter → Kafka
-
-Конфигурация: `deploy/debezium/connectors/postgres-connector.json`
-
-Debezium читает WAL PostgreSQL, ловит INSERT в `outbox_events` и трансформирует через EventRouter:
-
-### Kafka message format
-
-```
-Topic:   wms.{aggregate_type}.v1       (из aggregate_type)
-Key:     aggregate_id                   (product_id как строка UUID)
-Value:   payload_hash                   (строка SHA-256 хеша)
+Topic:   wms.events.v1                  (фиксирован, один для всех событий)
+Key:     aggregate_id                   (actionId как строка UUID)
+Value:   payload, сериализованный как JSON-строка
 Headers:
-  id:    event_id                       (строка UUID)
+  id:              event_id              (actionId как строка UUID)
+  aggregate_type:  "signed_action"
 ```
 
-### Маппинг полей outbox_events → Kafka
+- EventRouter берёт value из колонки `payload` (ADR-0001 §9). Value — JSON-строка, внутри которой конверт: парсер адаптера распаковывает её дважды (`json.Unmarshal` в `raw string`, затем в конверт; `message.go` `parseSignedAction`).
+- Топик один, партиция одна (`deploy/kafka-init.sh`): порядок в цепи равен порядку коммитов в БД, на этом держится сериализация отзыва ключа (ADR-0001 §7).
 
-| Поле outbox_events | Куда попадает в Kafka | Назначение |
-|--------------------|-----------------------|------------|
-| `aggregate_type` | Topic routing: `wms.${value}.v1` | Определяет какой batch-функции вызвать |
-| `aggregate_id` | Message key | product_id → itemId для контракта |
-| `payload_hash` | Message value | Integrity check (Ledger Adapter не использует) |
-| `event_id` | Header `id` | eventId для контракта + idempotency |
-| `event_type` | Header (опционально) | Не используется в routing |
+## 4. Ledger Adapter: чтение и отправка
 
-### Партиционирование
+Код: `ledger-adapter/internal/consumer/` (`message.go`, `flusher_actions.go`).
 
-Kafka key = `product_id`. Все события одного товара попадают в одну партицию → **ordering гарантирован** для одного товара. Это важно: нельзя получить `PutAway` раньше `Accept` для одного itemId.
+Правила разбора (`Parse`):
 
----
+1. `aggregate_type` обязателен и равен `signed_action` — всё прочее идёт в DLQ (старого пути на товар после #19 нет).
+2. Header `id` — UUID `actionId`; Kafka key обязан совпадать с `id`.
+3. `version` конверта — только 1; `actionId` внутри конверта обязан совпадать с header `id`.
+4. `actionType` 1–4 → складское действие (`chain.WarehouseAction`), 5–6 → ключевое (`chain.KeyAction`, обязателен `subjectKey`).
 
-## 3. Ledger Adapter: чтение из Kafka
+Отправка:
 
-Ledger Adapter — Kafka consumer, подписан на 4 топика:
-- `wms.receiving.v1`
-- `wms.putaway.v1`
-- `wms.picking.v1`
-- `wms.shipping.v1`
-
-### Что Ledger Adapter извлекает из сообщения
-
-```go
-// Из Kafka message:
-eventIDStr := message.Headers["id"]       // UUID string
-productIDStr := string(message.Key)        // UUID string (product_id)
-topic := message.Topic                     // определяет batch-функцию
-
-// Конвертация в uint256 для контракта:
-eventID  := uint256(keccak256([]byte(eventIDStr)))
-itemID   := uint256(keccak256([]byte(productIDStr)))
-```
-
-### Batch accumulation
-
-Ledger Adapter накапливает сообщения и группирует по topic:
-
-```
-Условие flush:
-  - Размер batch ≥ 10 сообщений (configurable)
-  - ИЛИ timeout ≥ 100ms с момента первого сообщения в batch
-
-Группировка по topic:
-  wms.receiving.v1 → batchAccept(eventIds[], itemIds[])
-  wms.putaway.v1   → batchPutAway(eventIds[], itemIds[])
-  wms.picking.v1   → batchPick(eventIds[], itemIds[])
-  wms.shipping.v1  → batchShip(eventIds[], itemIds[])
-```
-
-### Idempotency
-
-Перед обработкой Ledger Adapter проверяет:
-```sql
-SELECT 1 FROM onchain_events WHERE event_id = :event_id
-```
-Если запись существует — сообщение пропускается (уже обработано или в процессе).
-
----
-
-## 4. Конвертация UUID → uint256
-
-**Единый стандарт для всего проекта:**
-
-```
-uint256(keccak256(bytes(uuid_string)))
-```
-
-Где `uuid_string` — каноническая строковая форма UUID (например `"550e8400-e29b-41d4-a716-446655440000"`).
-
-Применяется к:
-- `event_id` → `eventId` (параметр контракта)
-- `product_id` (через `aggregate_id`) → `itemId` (параметр контракта)
-
-Конвертация **детерминистична** и **однонаправлена** (из uint256 нельзя восстановить UUID, но один UUID всегда даёт один uint256).
-
----
+- Окно сообщений режется на **подряд идущие сегменты одного вида**: складские действия → `SignedMappingWMS.applyActions(actions[])`, ключевые → `ConsortiumRegistry.applyKeyActions(actions[])`. Внутри сегмента порядок не меняется (отзыв ключа нельзя переставить раньше действий, которые были до него).
+- Сегмент жадно пакуется в транзакции по **≤ 120 000 байт calldata** (`maxActionCalldata`); один signer, одна nonce-цепочка — порядок Kafka сохраняется.
+- `itemId = uint256(keccak256(bytes(uuid)))` — порядок `itemIds` адаптер не меняет.
 
 ## 5. onchain_events (Ledger Adapter → PostgreSQL)
-
-После отправки batch-транзакции Ledger Adapter обновляет `onchain_events`:
 
 ### Жизненный цикл записи
 
 ```
-1. Kafka message получено     → INSERT (event_id, aggregate_type, status=PENDING)
-2. TX отправлена в блокчейн   → UPDATE SET tx_hash='0x...', status=SENT
-3. TX подтверждена (receipt)   → UPDATE SET status=COMMITTED
-4. TX ревертнулась             → UPDATE SET status=FAILED, error_message='...'
+1. Сообщение получено            → INSERT (event_id, status=PENDING)
+2. TX отправлена в блокчейн      → status=SENT, tx_hash
+3. receipt: действие Applied     → status=COMMITTED
+4. receipt: действие Rejected    → status=FAILED, reject_reason=<код ADR-0001 §6>
+5. TX ревертнулась целиком       → status=FAILED, error_message
 ```
 
-### Batch: один tx_hash → несколько event_id
+Схема: `wms/migrations/0001_init.up.sql` (`onchain_event_status = PENDING/SENT/COMMITTED/FAILED`), `reject_reason smallint` добавлен в `0015_key_actions.up.sql`.
 
-При batch=10 одна транзакция содержит 10 items. Все 10 записей в `onchain_events` получают **один и тот же** `tx_hash`. Это корректно и ожидаемо.
+### Что видит WMS
 
-### Таблица onchain_events
+Статус действия WMS выводит из `onchain_events` (`wms/internal/signedaction/envelope.go`, `ConfirmationStateOf`): `NULL` → `SENT` (в outbox), `COMMITTED` → `APPLIED`, `FAILED` + причина → `REJECTED` с кодом, `FAILED` без причины → `FAILED`. Эндпоинт статуса операции — `GET /signed-actions/operations/{operationID}`.
 
-```sql
--- Существующая схема (миграция 0001), изменений НЕ требуется
-CREATE TABLE public.onchain_events (
-  id             bigserial PRIMARY KEY,
-  event_id       uuid NOT NULL UNIQUE,
-  aggregate_type text NOT NULL,
-  tx_hash        text,
-  status         onchain_event_status NOT NULL DEFAULT 'PENDING',
-  error_message  text,
-  created_at     timestamptz NOT NULL DEFAULT now(),
-  updated_at     timestamptz NOT NULL DEFAULT now()
-);
-```
+Застрявшие `SENT` подтягивает reconcile-loop адаптера (`reconcile.go`).
 
----
+## 6. warehouse_actions / key_actions: что читают гейты и аудит
 
-## 6. BatchMappingWMS (Ledger Adapter → Blockchain)
+`public.warehouse_actions` (миграция 0016) — по строке на часть операции:
 
-### Контракт (Solidity)
+| Колонка | Кем используется |
+|---|---|
+| `action_id` | join с `onchain_events.event_id` (гейты, статус операции, аудит) |
+| `operation_id`, `part_index` | сборка операции, порядок частей |
+| `action_type` (1–4) | выбор типа действия в гейтах |
+| `item_ids uuid[]` | гейты: какие товары затронуло действие (`item_ids && …`, `item_ids @> …`) |
+| `salt`, `details`, `details_hash` | аудит: пересчёт `detailsHash` из доменных таблиц |
+| `challenge` | воспроизведение challenge сверки |
+| `submitted_at` | черновик vs отправленное; гейты учитывают только отправленные |
+| `signer_credential_id`, `created_by` | аудит: подписант и оператор |
 
-```solidity
-contract BatchMappingWMS {
-    enum Status { None, Accepted, PutAway, Picked, Shipped }
+`public.key_actions` (миграция 0015) — ключевые действия: `action_id`, `org_id`, `action_type` (5/6), `target_credential_id` (чей ключ), `signer_credential_id`, `challenge`, `submitted_at`. По ним WMS проверяет «нет ли действия в работе» и сериализует отзыв ключа со складскими действиями (`wms/internal/signedops/repository.go`, `LockSigner`).
 
-    mapping(uint256 => Status) public itemStatus;
-    mapping(uint256 => bool)   public processedEventIds;
+### Гейты (`wms/internal/ledger/chain_status.go`)
 
-    event ItemTransition(
-        uint256 indexed eventId,
-        uint256 indexed itemId,
-        Status previousStatus,
-        Status nextStatus,
-        address actor,
-        uint256 timestamp
-    );
+- `CheckChainStatus(productIDs, aggregate)` — есть ли среди товаров `FAILED`-действие этого этапа → 409 `CHAIN_EVENT_REJECTED`.
+- `UnconfirmedProducts(productIDs, aggregate)` — товары без `COMMITTED`-действия этапа (отгрузка требует подтверждённой сборки → 409 `PICKING_NOT_CONFIRMED`).
 
-    function batchAccept(uint256[] calldata eventIds, uint256[] calldata itemIds) external;
-    function batchPutAway(uint256[] calldata eventIds, uint256[] calldata itemIds) external;
-    function batchPick(uint256[] calldata eventIds, uint256[] calldata itemIds) external;
-    function batchShip(uint256[] calldata eventIds, uint256[] calldata itemIds) external;
-}
-```
-
-### Маппинг topic → функция
-
-| Kafka topic | Batch-функция | Переход статуса |
-|---|---|---|
-| `wms.receiving.v1` | `batchAccept` | None → Accepted |
-| `wms.putaway.v1` | `batchPutAway` | Accepted → PutAway |
-| `wms.picking.v1` | `batchPick` | PutAway → Picked |
-| `wms.shipping.v1` | `batchShip` | Picked → Shipped |
-
-### Защита от ошибок
-
-- `processedEventIds[eventId] == true` → revert `DuplicateEventId`
-- Неверный переход (например `Accept` для товара в статусе `PutAway`) → revert
-- Один невалидный item в batch → **вся транзакция ревертится**
-- Митигация: Ledger Adapter валидирует items перед отправкой + отправляет ошибочные в DLQ (`wms.dlq.v1`)
-
----
+Оба читают `warehouse_actions ⋈ onchain_events`; статус `PENDING/SENT` гейт не блокирует.
 
 ## 7. Диаграмма полного пайплайна
 
@@ -246,59 +160,27 @@ sequenceDiagram
     participant WMS as WMS (Go)
     participant PG as PostgreSQL
     participant DZ as Debezium
-    participant KF as Kafka
+    participant KF as Kafka (wms.events.v1)
     participant LA as Ledger Adapter
-    participant BC as BatchMappingWMS
+    participant BC as SignedMappingWMS
 
-    Op->>WMS: HTTP: операция с товаром
+    Op->>WMS: POST …/draft
+    WMS-->>Op: части действия (actionId, challenge)
+    Op->>WMS: POST …/submit (assertions passkey)
     WMS->>PG: BEGIN TX
-    WMS->>PG: UPDATE products (status change)
-    WMS->>PG: INSERT ops table (receiving_table / putaways / ...)
-    WMS->>PG: INSERT outbox_events (event_id, product_id, type)
+    WMS->>PG: INSERT ops table (receiving_table / putaways / …)
+    WMS->>PG: INSERT warehouse_actions (N частей)
+    WMS->>PG: INSERT outbox_events (event_id = actionId, payload = конверт)
     WMS->>PG: COMMIT
-    WMS-->>Op: 200 OK (операция завершена)
+    WMS-->>Op: 200 OK + operationId
 
-    Note over PG,DZ: Async (CDC, ~5 сек)
-    DZ->>PG: Читает WAL (logical replication)
-    DZ->>KF: Publish to wms.{type}.v1
+    Note over PG,DZ: CDC
+    DZ->>KF: key = actionId, headers id + aggregate_type, value = конверт
 
-    Note over KF,LA: Async (consumer, batch window)
-    LA->>KF: Poll messages
-    LA->>LA: Accumulate batch (10 msgs / 100ms)
-    LA->>PG: INSERT onchain_events (status=PENDING)
-    LA->>BC: batchAccept/PutAway/Pick/Ship(eventIds[], itemIds[])
+    LA->>KF: Poll
+    LA->>PG: INSERT onchain_events (status=PENDING) → SENT
+    LA->>BC: applyActions(actions[]) / applyKeyActions(actions[])
 
-    Note over BC: Blockchain block (~2 сек)
-    BC-->>LA: TX receipt (success/revert)
-
-    alt TX confirmed
-        LA->>PG: UPDATE onchain_events SET status=COMMITTED, tx_hash=0x...
-    else TX reverted
-        LA->>PG: UPDATE onchain_events SET status=FAILED
-        LA->>KF: Publish to wms.dlq.v1
-    end
+    BC-->>LA: receipt: ActionApplied / ActionRejected
+    LA->>PG: COMMITTED или FAILED + reject_reason
 ```
-
----
-
-## 8. Что НЕ требует изменений
-
-| Компонент | Статус |
-|---|---|
-| Таблица `outbox_events` (схема) | Подходит as-is |
-| Таблица `onchain_events` (схема) | Подходит as-is |
-| Debezium connector config | Подходит as-is |
-| Kafka топики | Уже созданы |
-
----
-
-## 9. Что требует реализации
-
-| Компонент | Что сделать |
-|---|---|
-| WMS: receiving service | Писать N outbox events (по product_id) при CLOSE_CARGO |
-| WMS: putaway/assembly/shipping services | Писать 1 outbox event per product в той же TX |
-| Solidity: BatchMappingWMS.sol | Написать контракт, тесты, задеплоить |
-| Ledger Adapter | Полный переписв: Kafka consumer → batch → chain client |
-| aggregate_type values | Зафиксировать lowercase: receiving/putaway/picking/shipping |
-| UUID→uint256 conversion | Реализовать `uint256(keccak256(uuid_string))` в Go и Solidity |
