@@ -63,3 +63,6 @@ docs/blockchain-wms-research/
 *.crt
 *.pem
 *.jar
+
+# ── Stress provisioning output (private keys) ──────────
+tests/stress/.signed/
