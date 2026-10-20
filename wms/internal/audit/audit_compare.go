@@ -25,7 +25,6 @@ func (a *Auditor) stage(ctx context.Context, db *Action, applied *ChainAction, r
 			Signature:   CheckSkipped,
 			Findings:    []Finding{},
 		}
-		s.Findings = append(s.Findings, Finding{Kind: KindMissingInDB, Detail: "action is on chain but not in DB"})
 		switch {
 		case applied != nil:
 			s.ActionID = applied.ActionID
@@ -40,6 +39,7 @@ func (a *Auditor) stage(ctx context.Context, db *Action, applied *ChainAction, r
 			s.RejectReason = rejected.Reason
 			s.TxHash = rejected.TxHash.Hex()
 		}
+		s.Findings = append(s.Findings, Finding{ActionID: s.ActionID, Kind: KindMissingInDB, Detail: "action is on chain but not in DB"})
 		return s, nil
 	case applied != nil:
 		return a.appliedStage(ctx, db, applied)

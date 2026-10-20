@@ -168,6 +168,13 @@ func signedPutawayFixture(t *testing.T, ctx context.Context, env *env) auditFixt
 	}
 
 	require.Equal(t, productCount, placeToStorageBinSigned(t, env, op, run.productIDs, sc.StorageBinID).ProductsPlaced)
+	t.Cleanup(func() {
+		if _, err := env.db.Exec(context.Background(), `
+			UPDATE wms_inventory.products SET status = 'SHIPPED'
+			WHERE product_id = ANY($1)`, run.productIDs); err != nil {
+			t.Logf("signedPutawayFixture cleanup: %v", err)
+		}
+	})
 
 	fx := auditFixture{op: op, productIDs: run.productIDs, storageBinID: sc.StorageBinID}
 	var err error

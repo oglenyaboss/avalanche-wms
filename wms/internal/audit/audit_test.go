@@ -385,8 +385,10 @@ func TestAudit_Product_MissingInDB(t *testing.T) {
 	if stage.Status != StatusMissingInDB {
 		t.Errorf("status = %s, want MISSING_IN_DB", stage.Status)
 	}
-	if findFinding(report.Findings(), KindMissingInDB) == nil {
+	if fd := findFinding(report.Findings(), KindMissingInDB); fd == nil {
 		t.Errorf("no %s finding in %v", KindMissingInDB, report.Findings())
+	} else if fd.ActionID != f.actionID {
+		t.Errorf("finding action = %s, want %s", fd.ActionID, f.actionID)
 	}
 	if stage.ActionType != 2 || stage.BlockNumber != 42 || stage.KeyID != hexKey([32]byte(f.action.KeyID)) {
 		t.Errorf("chain fields not filled: %+v", stage)
