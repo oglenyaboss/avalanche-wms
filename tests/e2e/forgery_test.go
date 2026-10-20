@@ -133,12 +133,14 @@ func word32(v *big.Int) [32]byte {
 
 // sendApplyActions packs the actions into applyActions calldata, sends it with
 // the owner key straight to SignedMappingWMS (around the backend) and returns
-// the receipt of the successful transaction.
+// the receipt of the successful transaction; the adapter signs with the same
+// deployer key, so it is recreated to reseed its local nonce.
 func sendApplyActions(t *testing.T, ctx context.Context, env *env, actions ...directAction) *types.Receipt {
 	t.Helper()
 	data, err := wmsABIForTest(t).Pack("applyActions", actions)
 	require.NoError(t, err, "pack applyActions")
 	txHash := sendOwnerRegistryTx(t, ctx, env, ownerKeyForTest(t, ctx), common.HexToAddress(env.contractAddr), data)
+	recreateAdapterWithEnv(t, ctx, env, nil)
 
 	client, err := ethclient.DialContext(ctx, env.rpcURL)
 	require.NoError(t, err)
