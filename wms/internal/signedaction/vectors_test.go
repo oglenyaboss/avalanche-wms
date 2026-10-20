@@ -2,9 +2,11 @@ package signedaction_test
 
 import (
 	"bytes"
+	"crypto/elliptic"
 	"encoding/asn1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"os"
 	"slices"
@@ -321,6 +323,60 @@ func TestVectors_VerifyVectorSignature(t *testing.T) {
 		if got.R != [32]byte(a.WebAuthn.R) || got.S != [32]byte(a.WebAuthn.S) {
 			t.Errorf("%s: r/s = %x/%x, want %x/%x", a.Name, got.R, got.S, a.WebAuthn.R, a.WebAuthn.S)
 		}
+	}
+}
+
+func onchainTuple(a vectorAction) signedaction.WebAuthn {
+	return signedaction.WebAuthn{
+		AuthenticatorData: a.WebAuthn.AuthenticatorData,
+		ClientDataJSON:    string(a.WebAuthn.ClientDataJSONHex),
+		ChallengeIndex:    a.WebAuthn.ChallengeIndex,
+		TypeIndex:         a.WebAuthn.TypeIndex,
+		R:                 [32]byte(a.WebAuthn.R),
+		S:                 [32]byte(a.WebAuthn.S),
+	}
+}
+
+func TestVerifyOnChain_Vectors(t *testing.T) {
+	v := loadVectors(t)
+	qx, qy := [32]byte(v.Signer.QX), [32]byte(v.Signer.QY)
+	for _, a := range v.Actions {
+		if err := signedaction.VerifyOnChain(onchainTuple(a), [32]byte(a.Challenge), qx, qy); err != nil {
+			t.Errorf("%s: VerifyOnChain: %v", a.Name, err)
+		}
+	}
+
+	a := v.Actions[0]
+	cases := []struct {
+		name   string
+		mutate func(wa *signedaction.WebAuthn, challenge *[32]byte)
+	}{
+		{"flipped challenge", func(_ *signedaction.WebAuthn, challenge *[32]byte) {
+			challenge[0] ^= 0xff
+		}},
+		{"high s", func(wa *signedaction.WebAuthn, _ *[32]byte) {
+			s := new(big.Int).SetBytes(wa.S[:])
+			s.Sub(elliptic.P256().Params().N, s)
+			s.FillBytes(wa.S[:])
+		}},
+		{"no user verification flag", func(wa *signedaction.WebAuthn, _ *[32]byte) {
+			wa.AuthenticatorData = slices.Clone(wa.AuthenticatorData)
+			wa.AuthenticatorData[32] &^= 0x04
+		}},
+		{"flipped r", func(wa *signedaction.WebAuthn, _ *[32]byte) {
+			wa.R[0] ^= 0xff
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wa := onchainTuple(a)
+			challenge := [32]byte(a.Challenge)
+			tc.mutate(&wa, &challenge)
+			err := signedaction.VerifyOnChain(wa, challenge, qx, qy)
+			if !errors.Is(err, signedaction.ErrInvalidAssertion) {
+				t.Fatalf("VerifyOnChain = %v, want ErrInvalidAssertion", err)
+			}
+		})
 	}
 }
 
