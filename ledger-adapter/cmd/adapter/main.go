@@ -75,7 +75,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	client, err := chain.NewClientWithSigner(cfg.RpcURL, cfg.ContractAddr, signer)
+	client, err := chain.NewClientWithSigner(cfg.RpcURL, signer)
 	if err != nil {
 		return fmt.Errorf("chain client: %w", err)
 	}

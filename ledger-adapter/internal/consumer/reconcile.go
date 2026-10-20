@@ -38,8 +38,8 @@ type reconcileStore interface {
 // reconcileReceipt делает РОВНО ОДНУ проверку receipt'а уже отправленной tx (без
 // polling'а, без resubmit'а) и применяет терминальный результат к ids:
 //
-//   - tx mined + success → MarkCommitted (для signed_action — разбор исходов
-//     через resolver: Applied → COMMITTED, отклонённые → MarkRejected);
+//   - tx mined + success → разбор исходов подписанных действий через резолверы
+//     (Applied → COMMITTED, отклонённые → MarkRejected с reject_reason);
 //   - tx mined + revert  → MarkFailed   (terminal=true)
 //   - tx ещё не mined     → no-op, строка остаётся как есть (terminal=false)
 //
@@ -52,7 +52,6 @@ func reconcileReceipt(
 	st terminalMarker,
 	ids []uuid.UUID,
 	txHash string,
-	aggregate string,
 	resolvers []ActionResolver,
 	log *slog.Logger,
 ) (terminal bool, err error) {
@@ -65,19 +64,12 @@ func reconcileReceipt(
 		return false, fmt.Errorf("reconcile receipt %s: %w", txHash, err)
 	}
 	if receipt.Status == types.ReceiptStatusSuccessful {
-		if aggregate == aggregateSignedAction && len(resolvers) > 0 {
-			// Ошибка резолверов возвращается: строки остаются SENT, reconcile
-			// повторит их на следующем tick'е (не терминальный исход).
-			if err := applyActionOutcomes(ctx, resolvers, st, receipt, ids, txHash); err != nil {
-				return false, fmt.Errorf("reconcile action outcomes: %w", err)
-			}
-			log.Info("reconciled signed actions from contract", "tx", txHash, "n", len(ids))
-			return true, nil
+		// Ошибка резолверов возвращается: строки остаются SENT, reconcile
+		// повторит их на следующем tick'е (не терминальный исход).
+		if err := applyActionOutcomes(ctx, resolvers, st, receipt, ids, txHash); err != nil {
+			return false, fmt.Errorf("reconcile action outcomes: %w", err)
 		}
-		if err := st.MarkCommitted(ctx, ids); err != nil {
-			return false, fmt.Errorf("reconcile mark committed: %w", err)
-		}
-		log.Info("reconciled to committed", "tx", txHash, "n", len(ids))
+		log.Info("reconciled signed actions from contract", "tx", txHash, "n", len(ids))
 		return true, nil
 	}
 	// NOTE: reconcile-sourced FAILED НЕ публикуется в DLQ (в отличие от синхронного
@@ -257,17 +249,15 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 	}
 
 	byTx := make(map[string][]uuid.UUID, len(rows))
-	aggByTx := make(map[string]string, len(rows))
 	for _, row := range rows {
 		byTx[row.TxHash] = append(byTx[row.TxHash], row.EventID)
-		aggByTx[row.TxHash] = row.AggregateType // одна tx = один агрегат (batch либо applyKeyActions)
 	}
 	r.log.Info("reconcile sweep", "stuck_rows", len(rows), "distinct_tx", len(byTx))
 
 	errCount := 0
 	for txHash, ids := range byTx {
 		// Один битый tx (например receipt RPC-блип) не должен останавливать sweep.
-		if _, err := reconcileReceipt(ctx, r.chain, r.store, ids, txHash, aggByTx[txHash], r.actionResolvers(), r.log); err != nil {
+		if _, err := reconcileReceipt(ctx, r.chain, r.store, ids, txHash, r.actionResolvers(), r.log); err != nil {
 			errCount++
 			r.log.Error("reconcile tx failed", "tx", txHash, "err", err)
 		}

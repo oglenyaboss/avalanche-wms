@@ -2,7 +2,7 @@ package chain
 
 import _ "embed"
 
-// ContractABI — ABI SignedMappingWMS (контракт v2: старые batch-функции и applyActions),
+// ContractABI — ABI SignedMappingWMS (applyActions, itemStatus, actionState),
 // сгенерирован через `forge build` +
 // `jq -c '.abi' out/SignedMappingWMS.sol/SignedMappingWMS.json`.
 // Обновлять при изменении контракта.

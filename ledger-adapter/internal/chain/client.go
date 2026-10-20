@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -49,13 +48,10 @@ const (
 )
 
 // gasLimitHeadroomNum/Den масштабируют estimateGas вверх. Под пайплайном tx
-// оценивается, пока prior-stage transition того же товара ещё in-flight (не в
-// блоке): estimateGas видит item в раннем статусе → считает по дешёвому
-// skip-пути контракта (ItemTransitionFailed), а к моменту майнинга item уже
-// Accepted/PutAway → реальный SSTORE-путь дороже → OutOfGas без запаса
-// (full-FSM smoke: ~28k skip vs ~32k real putaway → 807/2000 OOG). ×3/2
-// покрывает разрыв с маржой, не раздувая лимит чрезмерно (упаковка блока).
-// Серийный flusher этого не ловил — prior tx домайнивался до estimate.
+// оценивается, пока предыдущее действие с теми же товарами ещё in-flight:
+// estimateGas видит товар в раннем статусе и идёт по пути отклонения
+// (ActionRejected), а к майнингу товар уже в нужном статусе и действие
+// применяется с записью на каждый товар — дороже. ×3/2 — запас на этот разрыв.
 const (
 	gasLimitHeadroomNum = 3
 	gasLimitHeadroomDen = 2
@@ -83,8 +79,6 @@ type ethBackend interface {
 type Client struct {
 	eth          ethBackend
 	signer       TxSigner
-	contractAddr common.Address
-	parsedABI    abi.ABI
 	sendMu       sync.Mutex
 	nonce        uint64 // следующий nonce для отправки; guarded by sendMu
 	nonceSeeded  bool   // seed произошёл; guarded by sendMu
@@ -92,33 +86,24 @@ type Client struct {
 
 // NewClient подключается к RPC и подписывает локальным hex-ключом (static-режим).
 // КМС-режим использует NewClientWithSigner.
-func NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error) {
+func NewClient(rpcURL, privateKeyHex string) (*Client, error) {
 	signer, err := NewStaticSigner(privateKeyHex)
 	if err != nil {
 		return nil, err
 	}
-	return NewClientWithSigner(rpcURL, contractAddr, signer)
+	return NewClientWithSigner(rpcURL, signer)
 }
 
 // NewClientWithSigner подключается к RPC и подписывает через внешний TxSigner
 // (static-ключ или удалённый KMS — Client'у без разницы).
-func NewClientWithSigner(rpcURL, contractAddr string, signer TxSigner) (*Client, error) {
+func NewClientWithSigner(rpcURL string, signer TxSigner) (*Client, error) {
 	eth, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("dial rpc %q: %w", rpcURL, err)
 	}
-
-	parsed, err := abi.JSON(strings.NewReader(ContractABI))
-	if err != nil {
-		eth.Close()
-		return nil, fmt.Errorf("parse abi: %w", err)
-	}
-
 	return &Client{
-		eth:          eth,
-		signer:       signer,
-		contractAddr: common.HexToAddress(contractAddr),
-		parsedABI:    parsed,
+		eth:    eth,
+		signer: signer,
 	}, nil
 }
 
@@ -127,51 +112,6 @@ func (c *Client) Close() { c.eth.Close() }
 
 // FromAddress — адрес, из-под которого клиент подписывает tx.
 func (c *Client) FromAddress() common.Address { return c.signer.Address() }
-
-// aggregateToMethod маппит WMS aggregate_type в solidity-методы SignedMappingWMS.
-var aggregateToMethod = map[string]string{
-	"receiving": "batchAccept",
-	"putaway":   "batchPutAway",
-	"picking":   "batchPick",
-	"shipping":  "batchShip",
-}
-
-// AggregateTypes returns the set of aggregate_type strings known to the chain layer.
-func AggregateTypes() []string {
-	out := make([]string, 0, len(aggregateToMethod))
-	for k := range aggregateToMethod {
-		out = append(out, k)
-	}
-	return out
-}
-
-// BatchCall отправляет batch-tx по aggregate_type. Диспатчер для flusher.
-func (c *Client) BatchCall(ctx context.Context, aggregateType string, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	method, ok := aggregateToMethod[aggregateType]
-	if !ok {
-		return common.Hash{}, fmt.Errorf("unknown aggregate_type: %s", aggregateType)
-	}
-	return c.sendMethod(ctx, method, eventIDs, itemIDs)
-}
-
-// BatchAccept / BatchPutAway / BatchPick / BatchShip — explicit wrappers.
-// Удобнее для ручного использования (тесты, CLI, ad-hoc) чем BatchCall по строке.
-
-func (c *Client) BatchAccept(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	return c.sendMethod(ctx, "batchAccept", eventIDs, itemIDs)
-}
-
-func (c *Client) BatchPutAway(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	return c.sendMethod(ctx, "batchPutAway", eventIDs, itemIDs)
-}
-
-func (c *Client) BatchPick(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	return c.sendMethod(ctx, "batchPick", eventIDs, itemIDs)
-}
-
-func (c *Client) BatchShip(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	return c.sendMethod(ctx, "batchShip", eventIDs, itemIDs)
-}
 
 // TransactionReceipt проксирует ethclient — нужно чтобы Client удовлетворял
 // ReceiptFetcher интерфейсу из receipt.go.
@@ -184,19 +124,11 @@ func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
 	return c.eth.BlockNumber(ctx)
 }
 
-func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (common.Hash, error) {
-	data, err := c.parsedABI.Pack(method, args...)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("pack %s: %w", method, err)
-	}
-	return c.send(ctx, c.contractAddr, data, method)
-}
-
-// SendCalldata отправляет произвольные готовые calldata на указанный адрес —
-// вызовы вне SignedMappingWMS (например ConsortiumRegistry.applyKeyActions,
-// пакуемые отдельным RegistryABI). Идёт по тому же nonce/gas/sign/send-пути,
-// что и sendMethod: одна nonce-последовательность подписанта и те же классы
-// ошибок (ErrChainTransient/ErrChainRevert).
+// SendCalldata отправляет произвольные готовые calldata на указанный адрес:
+// applyActions на SignedMappingWMS и applyKeyActions на ConsortiumRegistry
+// пакуются заранее (PackApplyActions / PackApplyKeyActions). Идёт по общему
+// nonce/gas/sign/send-пути send: одна nonce-последовательность подписанта и те
+// же классы ошибок (ErrChainTransient/ErrChainRevert).
 func (c *Client) SendCalldata(ctx context.Context, to common.Address, data []byte) (common.Hash, error) {
 	return c.send(ctx, to, data, "calldata")
 }
@@ -243,8 +175,8 @@ func (c *Client) send(ctx context.Context, to common.Address, data []byte, label
 		}
 		return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainTransient, label, err)
 	}
-	// Запас на gas-лимит против skip→real разрыва под пайплайном (см.
-	// gasLimitHeadroomNum/Den) — иначе stale skip-оценка → OutOfGas-реверт.
+	// Запас на gas-лимит против разрыва отклонение→применение под пайплайном (см.
+	// gasLimitHeadroomNum/Den) — иначе stale-оценка → OutOfGas-реверт.
 	gasLimit = gasLimit * gasLimitHeadroomNum / gasLimitHeadroomDen
 
 	chainID, err := c.eth.ChainID(ctx)

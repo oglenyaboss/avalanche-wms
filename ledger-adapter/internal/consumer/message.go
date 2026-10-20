@@ -51,40 +51,28 @@ type ActionEnvelope struct {
 	} `json:"webauthn"`
 }
 
-// Message — распарсенное kafka-сообщение с идентификаторами event/product и
-// типом агрегата (из Kafka header aggregate_type, проставленного Debezium
-// EventRouter). KafkaMsg храним полностью для commit-of-offset и DLQ-republish.
-// Для подписанных действий задано ровно одно из Action (ключевое) /
-// WarehouseAction (складское); для них ProductID = uuid.Nil
-// (key = actionId, не product_id).
+// Message — распарсенное kafka-сообщение подписанного действия: идентификатор
+// actionId (EventID, из Kafka header "id"; key = actionId) и тип агрегата
+// "signed_action" (header проставлен Debezium EventRouter). KafkaMsg храним
+// полностью для commit-of-offset и DLQ-republish. Задано ровно одно из
+// Action (ключевое действие) / WarehouseAction (складское).
 //
 // Передавать только через pointer (gocritic hugeParam: kafka.Message ~152 байт).
 type Message struct {
 	EventID         uuid.UUID
-	ProductID       uuid.UUID
-	AggregateType   string // "receiving"/"putaway"/"picking"/"shipping"/"signed_action"
+	AggregateType   string // всегда "signed_action"
 	Action          *chain.KeyAction
 	WarehouseAction *chain.WarehouseAction
 	Topic           string
 	KafkaMsg        kafka.Message
 }
 
-// validAggregates derived from fsmOrder — single source of truth for known types.
-var validAggregates = func() map[string]bool {
-	m := make(map[string]bool, len(fsmOrder)+1)
-	for _, a := range fsmOrder {
-		m[a] = true
-	}
-	m[aggregateSignedAction] = true
-	return m
-}()
-
-// Parse извлекает EventID из header "id", ProductID из m.Key (Debezium outbox
-// aggregate_id), AggregateType из header "aggregate_type" (добавлен через
-// transforms.outbox.table.fields.additional.placement). Для signed_action key
-// обязан совпадать с id (это сам actionId), а value (JSON-строка с конвертом)
-// раскладывается в chain.KeyAction. Невалидное сообщение — error; вызывающий
-// должен коммитнуть offset и отправить в DLQ.
+// Parse извлекает EventID из header "id" и AggregateType из header
+// "aggregate_type" (добавлен через transforms.outbox.table.fields.additional.placement).
+// Поддержан единственный aggregate_type — "signed_action": key обязан совпадать
+// с id (это сам actionId), а value (JSON-строка с конвертом) раскладывается в
+// chain.KeyAction либо chain.WarehouseAction. Невалидное сообщение — error;
+// вызывающий должен коммитнуть offset и отправить в DLQ.
 func Parse(m *kafka.Message) (*Message, error) {
 	eventIDStr := headerValue(m.Headers, "id")
 	if eventIDStr == "" {
@@ -99,29 +87,10 @@ func Parse(m *kafka.Message) (*Message, error) {
 	if agg == "" {
 		return nil, fmt.Errorf("missing 'aggregate_type' header")
 	}
-	if !validAggregates[agg] {
+	if agg != aggregateSignedAction {
 		return nil, fmt.Errorf("unknown aggregate_type: %s", agg)
 	}
-
-	if agg == aggregateSignedAction {
-		return parseSignedAction(m, eventID, eventIDStr)
-	}
-
-	if len(m.Key) == 0 {
-		return nil, fmt.Errorf("missing kafka key (expected product_id UUID)")
-	}
-	productID, err := uuid.Parse(string(m.Key))
-	if err != nil {
-		return nil, fmt.Errorf("parse product_id %q: %w", string(m.Key), err)
-	}
-
-	return &Message{
-		EventID:       eventID,
-		ProductID:     productID,
-		AggregateType: agg,
-		Topic:         m.Topic,
-		KafkaMsg:      *m,
-	}, nil
+	return parseSignedAction(m, eventID, eventIDStr)
 }
 
 // parseSignedAction разбирает подписанное действие (контракт §2): value —
