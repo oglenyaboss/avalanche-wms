@@ -9,7 +9,7 @@
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
 export PATH="$HOME/.foundry/bin:$PATH"
-export COMPOSE_PROJECT_NAME=stresstest
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-stresstest}"
 
 VUS="${1:-70}"; SKU_COUNT="${SKU_COUNT:-70}"; N_ITEMS="${N_ITEMS:-24000}"
 PER_CP="${PER_CP:-10}"                       # товаров на грузоместо (реалистичная паллета)
