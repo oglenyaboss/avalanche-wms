@@ -10,12 +10,19 @@
  *   - Сборку и отгрузку
  *   - Outbox events → Kafka → Blockchain (асинхронно, не ждём)
  *
+ * Финальные вызовы стадий (close-cargoplace, scan-storage-bin, scan-shipping-buffer,
+ * ship) — подписанные пары draft → P-256 WebAuthn-подпись → submit (lib/signedflow.js).
+ * Шип в teardown ретраит чанками 200 → 50 → 10 на PICKING_NOT_CONFIRMED.
+ *
  * Модель нагрузки: closed-model (shared-iterations).
  * Каждая итерация получает уникальный UUID грузоместа через exec.scenario.iterationInTest,
  * что гарантирует отсутствие коллизий и «409 уже закрыто» в рамках одного прогона.
  *
  * Требования:
  *   - tests/stress/setup/stress-seed.sql выполнен
+ *   - tests/stress/.signed/operators.json — операторы с ACTIVE-ключами
+ *     (`cd tests/e2e && go run ./cmd/stress-provision -operators 100`):
+ *     один оператор на VU (своя корзина сборки и свой ключ подписи)
  *   - Переменные окружения:
  *       RECEIVING_BIN_ID   — UUID ячейки BUFFER-01
  *       STORAGE_BIN_ID     — UUID ячейки A-01-01
@@ -38,6 +45,15 @@ import exec from 'k6/execution';
 import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
+import { importSigner } from './lib/signer.js';
+import { loadOperators, signedPost } from './lib/signedflow.js';
+
+// Операторы с активными ключами (stress-provision): VU i подписывает оператором i.
+const OPERATORS = loadOperators();
+const VUS = Number(__ENV.VUS) || 30;
+
+// Чанки подписанной отгрузки (teardown): первый — 200, это лимит WMS на один ship.
+const SHIP_CHUNKS = [200, 50, 10];
 
 // UUID грузомест STRESS-FLOW-CP-0001..2000 (0-indexed, порядок по cargoplace_code).
 // Файл генерируется run-all.sh перед запуском теста.
@@ -50,7 +66,7 @@ export const options = {
       // closed-model: каждая итерация — уникальное грузоместо.
       // VUS/ITERS env-настраиваемы (smoke на малом масштабе перед полным прогоном).
       executor: 'shared-iterations',
-      vus: Number(__ENV.VUS) || 30,
+      vus: VUS,
       iterations: Number(__ENV.ITERS) || 2000,
       maxDuration: __ENV.MAX_DURATION || '15m',
     },
@@ -95,17 +111,19 @@ export function setup() {
     exec.test.abort(msg);
   }
 
-  // Пул операторов: каждый VU логинится своим оператором, чтобы корзины сборки
-  // (assembly_tasks.operator_id) не делились между конкурентными VU. Раздельные
-  // операторы — корневой фикс: scan-shipping-buffer (WHERE operator_id=$1) теперь
-  // двигает в буфер только товары своего VU.
-  const OPERATOR_COUNT = 30;
+  // Пул операторов: каждый VU — свой оператор с ACTIVE-ключом (stress-provision).
+  // Корзины сборки (assembly_tasks.operator_id) не делятся между VU, и у каждого
+  // VU свой ключ подписи. Сидовые операторы без ключей больше не годятся.
+  if (OPERATORS.length < VUS) {
+    exec.test.abort('[07-full-flow] ABORT: нет операторов с ключами: ' +
+      'прогони cd tests/e2e && go run ./cmd/stress-provision -operators 100');
+  }
   const tokens = [];
-  for (let i = 1; i <= OPERATOR_COUNT; i++) {
-    const username = `stress-op-${pad(i, 2)}`;
-    const t = login(username, 'stressop');
+  for (let i = 0; i < VUS; i++) {
+    const op = OPERATORS[i];
+    const t = login(op.username, op.password);
     if (!t) {
-      exec.test.abort(`setup: не удалось залогинить ${username}. Применён ли stress-seed.sql (раздел 0.1 операторов)?`);
+      exec.test.abort(`setup: не удалось залогинить ${op.username} (прогони stress-provision, проверь стек)`);
     }
     tokens.push(t);
   }
@@ -118,6 +136,7 @@ export function setup() {
 
   return {
     tokens,
+    operators: OPERATORS,
     receivingBinId: __ENV.RECEIVING_BIN_ID,
     storageBinId:   __ENV.STORAGE_BIN_ID,
     destinationId:  __ENV.DESTINATION_ID,
@@ -126,11 +145,18 @@ export function setup() {
   };
 }
 
-export default function (data) {
-  const { tokens, receivingBinId, storageBinId, destinationId, shippingBinId } = data;
-  // Каждый VU работает под своим оператором из пула (своя корзина сборки).
-  const token = tokens[(__VU - 1) % tokens.length];
+// Подписант VU — импортируется один раз и кэшируется в переменной уровня модуля
+// (инит-контекст у каждого VU свой → кэш живёт на VU).
+let vuSigner = null;
+
+export default async function (data) {
+  const { tokens, operators, receivingBinId, storageBinId, destinationId, shippingBinId } = data;
+  // Каждый VU работает своим оператором из пула (своя корзина сборки + свой ключ).
+  const opIdx = (__VU - 1) % operators.length;
+  const token = tokens[opIdx];
   if (!token) return;
+  if (!vuSigner) vuSigner = await importSigner(operators[opIdx]);
+  const signer = vuSigner;
 
   // 404 = ресурс не найден; 409 = конфликт (закрытое грузоместо, рейс уже AT_GATE);
   // 422 = нет NEW-заказов или STORED-товаров.
@@ -156,6 +182,11 @@ export default function (data) {
 
   let productId = null;
   let pickedProductIds = []; // product IDs actually picked in assembly (may differ from productId)
+  // Флаги выноса подписанных вызовов из group(): async-колбэк group теряет
+  // group-теги, поэтому подписанная пара зовётся сразу после своего group.
+  let closeCargoplace = false;
+  let readyToPlace = false;
+  let cartToFlush = false;
 
   // ── БЛОК 1: Receiving table ──────────────────────────────────────────────
   group('receiving_table', () => {
@@ -221,16 +252,18 @@ export default function (data) {
       productId = null; // bin_id не установлен → putaway пропустить
     }
 
-    // close-cargoplace → receiving outbox event → Kafka → blockchain (async)
+    // close-cargoplace — подписанная пара, зовётся после group (см. флаги выше).
     // Вызываем всегда: receiving-событие записывается даже если scan-buffer упал.
-    http.post(
-      `${BASE_URL}/receiving/table/close-cargoplace`,
-      JSON.stringify({ cargoplace_id: cargoplaceId }),
-      { headers: H },
-    );
+    closeCargoplace = true;
 
     check(qrRes, { 'receiving_table: product created': () => !!productId });
   });
+
+  if (closeCargoplace) {
+    await signedPost(H, signer,
+      '/receiving/table/close-cargoplace/draft', '/receiving/table/close-cargoplace/submit',
+      { cargoplace_id: cargoplaceId });
+  }
 
   if (!productId) return;
   sleep(0.05);
@@ -251,19 +284,22 @@ export default function (data) {
     check(scanProdRes, { 'putaway: scan-product 200': (r) => r.status === 200 });
     if (scanProdRes.status !== 200) return; // продукт не в буфере → scan-storage-bin не имеет смысла
 
-    // scan-storage-bin → putaway outbox event → Kafka → blockchain (async)
-    const storeBinRes = http.post(
-      `${BASE_URL}/putaway/scan-storage-bin`,
-      JSON.stringify({ product_ids: [productId], storage_bin_id: storageBinId }),
-      { headers: H },
-    );
+    // scan-storage-bin — подписанная пара, зовётся после group (см. флаги выше).
+    readyToPlace = true;
+  });
+
+  if (readyToPlace) {
+    const store = await signedPost(H, signer,
+      '/putaway/scan-storage-bin/draft', '/putaway/scan-storage-bin/submit',
+      { product_ids: [productId], storage_bin_id: storageBinId });
+    const storeBinRes = store.submitRes || store.draftRes;
     check(storeBinRes, {
       'putaway: scan-storage-bin 200': (r) => r.status === 200,
       'putaway: product STORED': (r) => {
         try { return JSON.parse(r.body).data.products_placed >= 1; } catch (_) { return false; }
       },
     });
-  });
+  }
 
   sleep(0.05);
 
@@ -310,13 +346,17 @@ export default function (data) {
 
     if (pickedProductIds.length === 0) return;
 
-    const shipBufRes = http.post(
-      `${BASE_URL}/assembly/scan-shipping-buffer`,
-      JSON.stringify({ buffer_bin_id: shippingBinId }),
-      { headers: H },
-    );
-    check(shipBufRes, { 'assembly: scan-shipping-buffer 200': (r) => r.status === 200 });
+    // scan-shipping-buffer — подписанная пара, зовётся после group (см. флаги выше).
+    cartToFlush = true;
   });
+
+  if (cartToFlush) {
+    const flush = await signedPost(H, signer,
+      '/assembly/scan-shipping-buffer/draft', '/assembly/scan-shipping-buffer/submit',
+      { buffer_bin_id: shippingBinId });
+    const shipBufRes = flush.submitRes || flush.draftRes;
+    check(shipBufRes, { 'assembly: scan-shipping-buffer 200': (r) => r.status === 200 });
+  }
 
   sleep(0.05);
 
@@ -328,16 +368,26 @@ export default function (data) {
 }
 
 // teardown — однопоточная (k6 вызывает один раз) пакетная отгрузка накопленного
-// буфера READY_TO_SHIP. Гонок за рейс нет: грузим один рейс пакетами по CHUNK
-// товаров, при опустошении буфера он переходит в DEPARTED.
-export function teardown(data) {
-  const { tokens, shippingBinId, dispatchCodes } = data;
+// буфера READY_TO_SHIP. Гонок за рейс нет: грузим один рейс чанками, при
+// опустошении буфера он переходит в DEPARTED.
+export async function teardown(data) {
+  const { tokens, operators, shippingBinId, dispatchCodes } = data;
   if (!tokens || tokens.length === 0 || !dispatchCodes || dispatchCodes.length === 0) {
     return;
   }
+  // teardown идёт на отдельном VU: свой response-callback, иначе ожидаемые 409
+  // (PICKING_NOT_CONFIRMED, уехавший рейс) попадут в http_req_failed.
+  http.setResponseCallback(http.expectedStatuses(
+    { min: 200, max: 299 },
+    404,
+    409,
+    422,
+  ));
   const H = authHeaders(tokens[0]);
-  const CHUNK = 200; // WMS ограничивает product_ids ≤ 200 на один /shipping/ship.
+  const signer = await importSigner(operators[0]);
   const dispatchCode = dispatchCodes[0];
+  // Дедлайн хвоста: сборка ещё не подтверждена в цепи → ждём и повторяем.
+  const deadline = Date.now() + ((Number(__ENV.TAIL_DEADLINE_S) || 300) * 1000);
 
   // Подаём рейс к воротам (SCHEDULED → AT_GATE).
   const drvRes = http.post(
@@ -353,9 +403,13 @@ export function teardown(data) {
   try { dispatchId = JSON.parse(drvRes.body).data.dispatch_id; } catch (_) {}
   if (!dispatchId) return;
 
-  // Грузим буфер пакетами, пока он не опустеет (последний ship → рейс DEPARTED).
+  // Грузим буфер чанками, пока он не опустеет (последний ship → рейс DEPARTED).
   let shippedTotal = 0;
   for (let guard = 0; guard < 1000; guard++) {
+    if (Date.now() > deadline) {
+      console.warn('teardown: дедлайн хвоста истёк — часть товаров осталась в буфере');
+      break;
+    }
     const bufRes = http.post(
       `${BASE_URL}/shipping/scan-buffer`,
       JSON.stringify({ buffer_bin_id: shippingBinId }),
@@ -366,17 +420,42 @@ export function teardown(data) {
     try { products = JSON.parse(bufRes.body).data.products || []; } catch (_) {}
     if (products.length === 0) break;
 
-    const chunk = products.slice(0, CHUNK).map((p) => p.product_id);
-    const shipRes = http.post(
-      `${BASE_URL}/shipping/ship`,
-      JSON.stringify({ buffer_bin_id: shippingBinId, dispatch_id: dispatchId, product_ids: chunk }),
-      { headers: H },
-    );
-    if (shipRes.status !== 200) {
-      console.warn(`teardown: ship → ${shipRes.status}: ${shipRes.body}`);
-      break;
+    const outcome = await shipChunk(H, signer, shippingBinId, dispatchId, products);
+    if (outcome.outcome === 'shipped') {
+      shippedTotal += outcome.shipped;
+      continue;
     }
-    try { shippedTotal += JSON.parse(shipRes.body).data.products_shipped || 0; } catch (_) {}
+    if (outcome.outcome === 'pending') {
+      // Сборка хвоста ещё не подтверждена в цепи (PICKING_NOT_CONFIRMED даже на
+      // чанке 10) → ждём и повторяем тот же рейс.
+      sleep(2);
+      continue;
+    }
+    console.warn('teardown: ship отказал — отгрузка остановлена');
+    break;
   }
   console.log(`teardown: отгружено ${shippedTotal} товаров рейсом ${dispatchCode}`);
+}
+
+// shipChunk — подписанная отгрузка первых товаров буфера чанками 200 → 50 → 10
+// (в порядке скана буфера). 409 PICKING_NOT_CONFIRMED означает, что сборка части
+// товаров ещё не подтверждена в цепи → пробуем меньший чанк:
+//   {outcome:'shipped', shipped} — чанк отгружен;
+//   {outcome:'pending'}  — не подтверждено даже на чанке 10 (повторим позже);
+//   {outcome:'stuck'}    — другой отказ (рейс/буфер/подпись), повтор бессмыслен.
+async function shipChunk(H, signer, binId, dispatchId, products) {
+  for (const size of SHIP_CHUNKS) {
+    const chunk = products.slice(0, size).map((p) => p.product_id);
+    if (chunk.length === 0) return { outcome: 'stuck' };
+    const res = await signedPost(H, signer,
+      '/shipping/ship/draft', '/shipping/ship/submit',
+      { buffer_bin_id: binId, dispatch_id: dispatchId, product_ids: chunk });
+    if (res.submitRes && res.submitRes.status === 200) {
+      let shipped = 0;
+      try { shipped = JSON.parse(res.submitRes.body).data.products_shipped || 0; } catch (_) {}
+      return { outcome: 'shipped', shipped };
+    }
+    if (res.draftError !== 'PICKING_NOT_CONFIRMED') return { outcome: 'stuck' };
+  }
+  return { outcome: 'pending' };
 }

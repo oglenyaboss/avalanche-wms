@@ -4,7 +4,7 @@
 #
 # Точка входа переопределена на /tests/stress/run-all.sh,
 # который монтируется как том из ./tests/stress.
-FROM grafana/k6:latest
+FROM grafana/k6:1.8.2
 
 USER root
 RUN apk add --no-cache postgresql-client curl

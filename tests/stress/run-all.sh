@@ -7,6 +7,7 @@
 #   2. Засев данных (stress-seed.sql)
 #   3. Генерация JSON-файлов UUID грузомест и продуктов для SharedArray
 #   4. Разрешение UUID ячеек и рейсов через psql
+#   4.5. Проверка операторов с ACTIVE-ключами для подписанных тестов 05–08
 #   5. Последовательный запуск тестов 01–08
 #   6. Мониторинг blockchain pipeline после теста 08
 #   7. Итоговый отчёт
@@ -239,10 +240,33 @@ echo "  DESTINATION_ID_07 = ${DESTINATION_ID_07} (SHOP-5, тест 07)"
 echo "  SHIPPING_BIN_ID_07= ${SHIPPING_BIN_ID_07}"
 echo "  DISPATCH_CODE_07  = ${DISPATCH_CODE_07}"
 
+# ── 4.5. Операторы с ACTIVE-ключами для подписанных 05–08 ──────────────────
+# 05–08 бьют подписанный API (draft → P-256 подпись → submit): нужны операторы из
+# tests/stress/.signed/operators.json (готовит stress-provision). Файл лежит на
+# хосте и виден контейнеру через ro-том — изнутри его не создать.
+OPERATORS_FILE=/tests/stress/.signed/operators.json
+OPERATORS_COUNT=0
+if [ -f "${OPERATORS_FILE}" ]; then
+    OPERATORS_COUNT=$(grep -o '"username"' "${OPERATORS_FILE}" | wc -l | tr -d '[:space:]')
+fi
+SIGNED_SKIP=0
+if [ "${OPERATORS_COUNT:-0}" -lt 100 ]; then
+    SIGNED_SKIP=1
+    echo ""
+    echo "[OPERATORS] WARN: ${OPERATORS_FILE}: операторов ${OPERATORS_COUNT}, нужно ≥100." >&2
+    echo "[OPERATORS] Тесты 05–08 (подписанный API) будут пропущены." >&2
+    echo "[OPERATORS] Подготовьте операторов на хосте:" >&2
+    echo "            cd tests/e2e && go run ./cmd/stress-provision -operators 100" >&2
+    echo "            затем перезапустите: make stress" >&2
+else
+    echo "[OPERATORS] ${OPERATORS_FILE}: ${OPERATORS_COUNT} операторов с ключами — ок."
+fi
+
 # ── 5. Функция запуска одного теста ──────────────────────────────────────────
 # Принимает имя файла как $1, остальные аргументы передаются в k6.
 # Не прерывает прогон при превышении порогов — собирает счётчик сбоев.
 FAILED=0
+SKIPPED=0
 
 run_test() {
     NAME="$1"; shift
@@ -259,7 +283,7 @@ run_test() {
     fi
 }
 
-# ── 6. Прогон сценариев 01–07 ─────────────────────────────────────────────────
+# ── 6. Прогон сценариев 01–04 ─────────────────────────────────────────────────
 
 run_test "01-smoke.js"
 
@@ -269,14 +293,25 @@ run_test "03-auth.js"
 
 run_test "04-receiving-gate.js"
 
-run_test "05-receiving-table.js" \
+# ── 6.1. Прогон сценариев 05–08 (подписанный API) ─────────────────────────────
+# run_signed — как run_test, но без операторов с ACTIVE-ключами тест
+# бессмыслен (draft ответит SIGNER_KEY_NOT_ACTIVE) — пропускаем и считаем в итоге.
+run_signed() {
+    if [ "${SIGNED_SKIP}" -eq 0 ]; then
+        run_test "$@"
+    else
+        SKIPPED=$((SKIPPED + 1))
+    fi
+}
+
+run_signed "05-receiving-table.js" \
     -e "RECEIVING_BIN_ID=${RECEIVING_BIN_ID}"
 
-run_test "06-assembly.js" \
+run_signed "06-assembly.js" \
     -e "DESTINATION_ID=${DESTINATION_ID}" \
     -e "SHIPPING_BIN_ID=${SHIPPING_BIN_ID}"
 
-run_test "07-full-flow.js" \
+run_signed "07-full-flow.js" \
     -e "RECEIVING_BIN_ID=${RECEIVING_BIN_ID}" \
     -e "STORAGE_BIN_ID=${STORAGE_BIN_ID}" \
     -e "DESTINATION_ID=${DESTINATION_ID_07}" \
@@ -284,87 +319,108 @@ run_test "07-full-flow.js" \
     -e "DISPATCH_CODE=${DISPATCH_CODE_07}"
 
 # ── 7. Blockchain TPS: тест 08 + мониторинг pipeline ─────────────────────────
-# Тест 08 генерирует 5000 putaway-событий через WMS API (синхронная часть).
-# После завершения теста run-all.sh ждёт 60s и измеряет, сколько событий
-# прошло через весь pipeline (Debezium → Kafka → ledger-adapter → blockchain).
-echo ""
-echo "══════════════════════════════════════════"
-echo "  Blockchain TPS — подготовка мониторинга"
-echo "══════════════════════════════════════════"
-
-OUTBOX_BEFORE=$(psql_q "SELECT count(*) FROM public.outbox_events")
-ONCHAIN_COMMITTED_BEFORE=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status = 'COMMITTED'")
-TIME_BEFORE=$(date +%s)
-
-echo "  Baseline: outbox_events=${OUTBOX_BEFORE}, onchain_COMMITTED=${ONCHAIN_COMMITTED_BEFORE}"
-
-run_test "08-blockchain-tps.js" \
-    -e "RECEIVING_BIN_ID=${RECEIVING_BIN_ID}" \
-    -e "STORAGE_BIN_ID=${STORAGE_BIN_ID}"
-
-TIME_AFTER_TEST=$(date +%s)
-TEST_DURATION=$((TIME_AFTER_TEST - TIME_BEFORE))
-OUTBOX_AFTER=$(psql_q "SELECT count(*) FROM public.outbox_events")
-OUTBOX_DELTA=$((OUTBOX_AFTER - OUTBOX_BEFORE))
-WMS_EPS=$(echo "scale=1; if (${TEST_DURATION} > 0) ${OUTBOX_DELTA} / ${TEST_DURATION} else 0" \
-    | bc 2>/dev/null || echo "n/a")
-
-echo ""
-echo "══════════════════════════════════════════"
-echo "  Blockchain pipeline: результаты"
-echo "══════════════════════════════════════════"
-echo ""
-echo "  [WMS — синхронная часть]"
-echo "    outbox_events создано : ${OUTBOX_DELTA}"
-echo "    время теста 08        : ${TEST_DURATION}s"
-echo "    WMS event rate        : ${WMS_EPS} events/s"
-echo ""
-echo "  Ожидание async pipeline (60s)..."
-echo "  (Debezium CDC → Kafka → ledger-adapter → Subnet-EVM contract)"
-sleep 60
-
-ONCHAIN_COMMITTED_AFTER=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status = 'COMMITTED'")
-ONCHAIN_PENDING=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status IN ('PENDING', 'SENT')")
-ONCHAIN_FAILED=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status = 'FAILED'")
-OUTBOX_BACKLOG=$(psql_q "
-  SELECT count(*) FROM public.outbox_events oe
-  WHERE NOT EXISTS (
-    SELECT 1 FROM public.onchain_events oc WHERE oc.event_id = oe.event_id
-  )")
-ONCHAIN_DELTA=$((ONCHAIN_COMMITTED_AFTER - ONCHAIN_COMMITTED_BEFORE))
-TIME_ELAPSED=$(( $(date +%s) - TIME_BEFORE ))
-CHAIN_EPS=$(echo "scale=1; if (${TIME_ELAPSED} > 0) ${ONCHAIN_DELTA} / ${TIME_ELAPSED} else 0" \
-    | bc 2>/dev/null || echo "n/a")
-
-echo ""
-echo "  [Blockchain — асинхронная часть, +60s после теста]"
-echo "    onchain COMMITTED     : +${ONCHAIN_DELTA} (всего ${ONCHAIN_COMMITTED_AFTER})"
-echo "    blockchain commit rate: ${CHAIN_EPS} events/s (за ${TIME_ELAPSED}s)"
-echo "    onchain PENDING/SENT  : ${ONCHAIN_PENDING}"
-echo "    onchain FAILED        : ${ONCHAIN_FAILED}"
-echo "    outbox backlog        : ${OUTBOX_BACKLOG} (не обработаны Debezium/Kafka)"
-echo ""
-if [ "${ONCHAIN_DELTA}" -gt 0 ]; then
-    echo "  ✓ Blockchain pipeline активен: ${ONCHAIN_DELTA} событий подтверждено"
-elif [ "${OUTBOX_BACKLOG}" -gt 0 ]; then
-    echo "  ✗ Blockchain pipeline не обработал события за ${TIME_ELAPSED}s"
-    echo "    Проверьте:"
-    echo "      1. Debezium-коннектор запущен (docker ps | grep debezium)"
-    echo "      2. PRIVATE_KEY задан в .env (не нулевой ключ)"
-    echo "      3. CONTRACT_ADDR задан в .env"
-    echo "      4. RPC_URL доступен из контейнера ledger-adapter"
+# Тест 08 размещает 5000 товаров подписанными действиями через WMS API (синхронная
+# часть). После завершения run-all.sh ждёт 60s и измеряет, сколько ТОВАРОВ прошло
+# через весь pipeline (Debezium → Kafka → ledger-adapter → blockchain). Единица
+# измерения — товары в warehouse_actions.item_ids, а не строки outbox: одно
+# подписанное действие пишет одну outbox-строку на много товаров.
+if [ "${SIGNED_SKIP}" -eq 1 ]; then
+    SKIPPED=$((SKIPPED + 1))
+    echo ""
+    echo "[SKIP] 08-blockchain-tps.js и мониторинг pipeline — нет операторов с ключами."
 else
-    echo "  ─ Blockchain pipeline: нет новых событий для обработки"
+    echo ""
+    echo "══════════════════════════════════════════"
+    echo "  Blockchain TPS — подготовка мониторинга"
+    echo "══════════════════════════════════════════"
+
+    ITEMS_GEN_BEFORE=$(psql_q "SELECT COALESCE(sum(cardinality(item_ids)),0)
+                               FROM public.warehouse_actions
+                               WHERE submitted_at IS NOT NULL")
+    ITEMS_COMMITTED_BEFORE=$(psql_q "SELECT COALESCE(sum(cardinality(wa.item_ids)),0)
+                                     FROM public.warehouse_actions wa
+                                     JOIN public.onchain_events oe ON oe.event_id = wa.action_id
+                                     WHERE oe.status = 'COMMITTED'")
+    TIME_BEFORE=$(date +%s)
+
+    echo "  Baseline: товаров в подписанных действиях=${ITEMS_GEN_BEFORE}, товаров COMMITTED=${ITEMS_COMMITTED_BEFORE}"
+
+    run_test "08-blockchain-tps.js" \
+        -e "RECEIVING_BIN_ID=${RECEIVING_BIN_ID}" \
+        -e "STORAGE_BIN_ID=${STORAGE_BIN_ID}"
+
+    TIME_AFTER_TEST=$(date +%s)
+    TEST_DURATION=$((TIME_AFTER_TEST - TIME_BEFORE))
+    ITEMS_GEN_AFTER=$(psql_q "SELECT COALESCE(sum(cardinality(item_ids)),0)
+                              FROM public.warehouse_actions
+                              WHERE submitted_at IS NOT NULL")
+    ITEMS_GEN_DELTA=$((ITEMS_GEN_AFTER - ITEMS_GEN_BEFORE))
+    WMS_IPS=$(echo "scale=1; if (${TEST_DURATION} > 0) ${ITEMS_GEN_DELTA} / ${TEST_DURATION} else 0" \
+        | bc 2>/dev/null || echo "n/a")
+
+    echo ""
+    echo "══════════════════════════════════════════"
+    echo "  Blockchain pipeline: результаты"
+    echo "══════════════════════════════════════════"
+    echo ""
+    echo "  [WMS — синхронная часть]"
+    echo "    товаров размещено     : ${ITEMS_GEN_DELTA}"
+    echo "    время теста 08        : ${TEST_DURATION}s"
+    echo "    WMS item rate         : ${WMS_IPS} товаров/с"
+    echo ""
+    echo "  Ожидание async pipeline (60s)..."
+    echo "  (Debezium CDC → Kafka → ledger-adapter → Subnet-EVM contract)"
+    sleep 60
+
+    ITEMS_COMMITTED_AFTER=$(psql_q "SELECT COALESCE(sum(cardinality(wa.item_ids)),0)
+                                    FROM public.warehouse_actions wa
+                                    JOIN public.onchain_events oe ON oe.event_id = wa.action_id
+                                    WHERE oe.status = 'COMMITTED'")
+    ONCHAIN_PENDING=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status IN ('PENDING', 'SENT')")
+    ONCHAIN_FAILED=$(psql_q "SELECT count(*) FROM public.onchain_events WHERE status = 'FAILED'")
+    OUTBOX_BACKLOG=$(psql_q "
+      SELECT count(*) FROM public.outbox_events oe
+      WHERE NOT EXISTS (
+        SELECT 1 FROM public.onchain_events oc WHERE oc.event_id = oe.event_id
+      )")
+    ITEMS_COMMITTED_DELTA=$((ITEMS_COMMITTED_AFTER - ITEMS_COMMITTED_BEFORE))
+    TIME_ELAPSED=$(( $(date +%s) - TIME_BEFORE ))
+    CHAIN_IPS=$(echo "scale=1; if (${TIME_ELAPSED} > 0) ${ITEMS_COMMITTED_DELTA} / ${TIME_ELAPSED} else 0" \
+        | bc 2>/dev/null || echo "n/a")
+
+    echo ""
+    echo "  [Blockchain — асинхронная часть, +60s после теста]"
+    echo "    товаров COMMITTED     : +${ITEMS_COMMITTED_DELTA} (всего ${ITEMS_COMMITTED_AFTER})"
+    echo "    blockchain commit rate: ${CHAIN_IPS} товаров/с (за ${TIME_ELAPSED}s)"
+    echo "    onchain PENDING/SENT  : ${ONCHAIN_PENDING} (события)"
+    echo "    onchain FAILED        : ${ONCHAIN_FAILED} (события)"
+    echo "    outbox backlog        : ${OUTBOX_BACKLOG} (события без onchain-записи)"
+    echo ""
+    if [ "${ITEMS_COMMITTED_DELTA}" -gt 0 ]; then
+        echo "  ✓ Blockchain pipeline активен: ${ITEMS_COMMITTED_DELTA} товаров подтверждено"
+    elif [ "${OUTBOX_BACKLOG}" -gt 0 ]; then
+        echo "  ✗ Blockchain pipeline не обработал события за ${TIME_ELAPSED}s"
+        echo "    Проверьте:"
+        echo "      1. Debezium-коннектор запущен (docker ps | grep debezium)"
+        echo "      2. PRIVATE_KEY задан в .env (не нулевой ключ)"
+        echo "      3. CONTRACT_ADDR задан в .env"
+        echo "      4. RPC_URL доступен из контейнера ledger-adapter"
+    else
+        echo "  ─ Blockchain pipeline: нет новых событий для обработки"
+    fi
+    echo "══════════════════════════════════════════"
 fi
-echo "══════════════════════════════════════════"
 
 # ── 8. Итог ───────────────────────────────────────────────────────────────────
+TOTAL_TESTS=8
 echo ""
 echo "=========================================="
-if [ "${FAILED}" -eq 0 ]; then
-    echo "  Все 8 тестов пройдены успешно."
+if [ "${FAILED}" -eq 0 ] && [ "${SKIPPED}" -eq 0 ]; then
+    echo "  Все ${TOTAL_TESTS} тестов пройдены успешно."
+elif [ "${FAILED}" -eq 0 ]; then
+    echo "  Пройдено $((TOTAL_TESTS - SKIPPED)) из ${TOTAL_TESTS}, пропущено ${SKIPPED} (05–08: нет операторов с ключами)."
 else
-    echo "  Завершено: ${FAILED} из 8 тестов не прошли пороговые значения."
+    echo "  Завершено: ${FAILED} из ${TOTAL_TESTS} тестов не прошли пороговые значения, пропущено ${SKIPPED}."
 fi
 echo "=========================================="
 
