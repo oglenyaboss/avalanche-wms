@@ -53,6 +53,14 @@ var (
 	consortiumOnce     sync.Once
 	consortiumShared   *consortiumOrg
 	consortiumSetupErr error
+	// consortiumSetupActive is true while the one-time consortium setup is
+	// running. The setup itself recreates the adapter, but at that point no
+	// WMS-registered key is ACTIVE yet (so no valid signed action exists) and
+	// requireConsortium would re-enter the setup Once — waitAdapterConsuming
+	// skips its warmup then; the key-register action the setup submits right
+	// after is the first message the adapter must consume. Read/written only
+	// from sequential test goroutines (no t.Parallel in this suite).
+	consortiumSetupActive bool
 )
 
 // requireConsortium returns the shared consortium organization, creating it on
@@ -62,6 +70,8 @@ var (
 func requireConsortium(t *testing.T, ctx context.Context, env *env) *consortiumOrg {
 	t.Helper()
 	consortiumOnce.Do(func() {
+		consortiumSetupActive = true
+		defer func() { consortiumSetupActive = false }()
 		// The sentinel is overwritten on success; if setup aborts via require
 		// (Goexit), later callers still report a meaningful error.
 		consortiumSetupErr = errors.New("consortium org setup did not complete")
