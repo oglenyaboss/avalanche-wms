@@ -1,99 +1,92 @@
 # Ledger Adapter
 
-Kafka→EVM мост. Читает outbox-события WMS из Kafka, батчит, отправляет одну транзакцию на batch в `SignedMappingWMS`. Адаптер EVM-агностичен: локально работает против Avalanche Subnet-EVM, но подойдёт любой EVM-совместимый RPC. Idempotent, at-least-once, DLQ при фейлах.
+Kafka→EVM-мост между outbox WMS и контрактами консорциума. Читает единственный топик `wms.events.v1`, принимает только подписанные действия (`aggregate_type = signed_action`), режет окно сообщений на сегменты складских и ключевых действий и отправляет их одной nonce-цепочкой в `SignedMappingWMS.applyActions` и `ConsortiumRegistry.applyKeyActions`. Исход каждого действия пишется в `public.onchain_events`.
 
-## Архитектура
+Модель подписанных действий — [ADR-0001](../docs/adr/0001-signed-actions.md), внутреннее устройство (пайплайн, конфиг, гочи) — [docs/developer/ledger-adapter-reference.md](../docs/developer/ledger-adapter-reference.md), контракты — [docs/developer/smart-contract-reference.md](../docs/developer/smart-contract-reference.md).
+
+## Пайплайн
 
 ```
-┌──────────┐  outbox   ┌────────┐   WMS topics    ┌──────────────┐   batch tx   ┌──────────────┐
-│  WMS DB  │───────────▶│Debezium│────────────────▶│    Consumer  │──────────────▶│  BatchMap    │
-└──────────┘           └────────┘                 │    + Batcher │              │  WMS.sol     │
-                                                  │    + Flusher │              └──────────────┘
-                                                  └──────┬───────┘                     │
-                                                         │                             │ receipt
-                                                         ▼                             ▼
-                                                 ┌──────────────┐             ┌──────────────┐
-                                                 │onchain_events│◀────────────│ WaitReceipt  │
-                                                 │    (pg)      │  MarkCommit │  (polling)   │
-                                                 └──────────────┘             └──────────────┘
-                                                         │
-                                                         │ fail → MarkFailed
-                                                         ▼
-                                                 ┌──────────────┐
-                                                 │  wms.dlq.v1  │
-                                                 └──────────────┘
+WMS DB ──outbox_events──▶ Debezium ──▶ Kafka wms.events.v1 ──▶ Consumer
+                                                                 │ Parse: только signed_action
+                                                                 ▼
+                                                        Batcher (окно)
+                                                                 ▼
+                                              Flusher.Send: сегменты + чанки
+                                                 │                      │
+                                   applyActions(SignedMappingWMS)  applyKeyActions(ConsortiumRegistry)
+                                                 │                      │
+                                                 ▼                      ▼
+                                     Pipeline → Confirm: receipt + логи → onchain_events
+                                                                 │
+                                                       DLQ wms.dlq.v1 (терминальные фейлы)
 ```
 
-Pipeline на batch:
-1. **Idempotency**: `Exists(event_id)` в `onchain_events` → пропускаем дубли
-2. **InsertPending**: запись `(event_id, aggregate_type, PENDING)`
-3. **BatchCall**: `batchAccept/PutAway/Pick/Ship(eventIds[], itemIds[])` (UUID→uint256 keccak256)
-4. **MarkSent**(tx_hash): фиксируем что tx отправлена
-5. **WaitReceipt**: polling с exponential backoff 50ms→2s, потолок `RECEIPT_POLL_TIMEOUT`
-6. **MarkCommitted** если `receipt.Status==1`, иначе **MarkFailed** + публикация в DLQ
+1. **Parse.** Из Kafka-заголовков берутся `id` (UUID действия) и `aggregate_type`, из value — конверт действия (колонка `payload` в `outbox_events`, ADR-0001 §9). Всё, что не `signed_action` и не парсится, уходит в DLQ.
+2. **Idempotency-фильтр.** По `onchain_events`: `COMMITTED` и `FAILED` без `tx_hash` пропускаются, новые строки вставляются как `PENDING`, строка с `tx_hash` один раз сверяется с receipt'ом без переотправки.
+3. **Сегменты.** Окно режется на подряд идущие сегменты одного вида: складские действия → `SignedMappingWMS.applyActions`, ключевые → `ConsortiumRegistry.applyKeyActions`. Порядок внутри сегмента сохраняется: отзыв ключа не переставится раньше действий, которые были до него (ADR-0001 §9).
+4. **Чанки.** Действия жадно упаковываются в транзакцию ≤ 120 000 байт calldata: узел subnet-evm отклоняет tx больше 131 072 байт. Действие, не влезающее в лимит в одиночку, — терминальный фейл одного действия.
+5. **Отправка.** Один signer на весь адаптер: локальный монотонный nonce, gas price = `SuggestGasPrice × 3`, gas limit = `EstimateGas × 3/2`, legacy-tx. Revert на estimate — терминально, RPC/сеть/KMS-недоступность — retry без траты nonce.
+6. **Confirm.** Окно in-flight tx подтверждается receipt'ами (поллинг с backoff до `RECEIPT_POLL_TIMEOUT`). Исход берётся из логов: `ActionApplied` → `COMMITTED`, `ActionRejected` → `FAILED` + `reject_reason` (код причины), revert → `FAILED`. Kafka-offsets коммитятся только после терминального исхода.
+7. **Reconcile.** Раз в `RECONCILE_INTERVAL` фоновый loop подтягивает застрявшие `SENT`-строки по `tx_hash` и никогда не переотправляет транзакции.
 
-Delivery guarantees:
-- **At-least-once**: kafka offsets коммитятся ТОЛЬКО после успешного `MarkCommitted`/`MarkFailed`. Crash до коммита → пересчитаем через Exists при рестарте.
-- **Idempotency on-chain**: `processedEventIds` в контракте reject'ит дубли. Adapter дублирует защиту на уровне БД (`Exists`) чтобы не тратить газ.
+Гарантии: at-least-once из Kafka (offsets после терминального исхода), двойная идемпотентность (`event_id` уникален в `onchain_events`, на цепи — `actionState(actionId)`), порядок действий в цепи = порядок коммитов в БД (одна партиция `wms.events.v1` + один signer).
 
-## Топики Kafka → методы контракта
+## Контракты
 
-| Topic | aggregate_type | Solidity method |
+| Контракт | Метод | Env |
 |---|---|---|
-| `wms.receiving.v1` | receiving | `batchAccept(uint256[], uint256[])` |
-| `wms.putaway.v1` | putaway | `batchPutAway(...)` |
-| `wms.picking.v1` | picking | `batchPick(...)` |
-| `wms.shipping.v1` | shipping | `batchShip(...)` |
+| `SignedMappingWMS` | `applyActions(Action[])` | `CONTRACT_ADDR` |
+| `ConsortiumRegistry` | `applyKeyActions(KeyAction[])` | `REGISTRY_ADDR` (без него ключевые действия фейлятся терминально, `/registry/keys/{keyId}` отвечает 502) |
 
-Формат сообщения (от Debezium outbox):
-- `key` = `product_id` (UUID string) → `itemId` uint256
-- `headers["id"]` = `event_id` (UUID string) → `eventId` uint256
-- value — произвольный JSON payload (не используется адаптером, сохраняется для DLQ)
+ABI встроены через `//go:embed` (`internal/chain/SignedMappingWMS.abi.json`, `internal/chain/ConsortiumRegistry.abi.json`) и обновляются вручную после изменения контрактов — команды в [docs/developer/README.md](../docs/developer/README.md) (`forge build` + `jq`, вторая копия для аудита в `wms/internal/audit/`).
 
 ## Структура пакетов
 
 ```
 ledger-adapter/
-├── cmd/adapter/main.go        # slog + config → pool → chain → dlq → Flusher → N consumer goroutines + HTTP
-│
+├── cmd/adapter/               # точка входа: config → pool → signer → chain → DLQ → Flusher/Reconciler → consumer + HTTP
+├── cmd/kms-init/              # bootstrap KMS-профиля: ключи в Web3Signer, фондирование, allow-list, публикация identifier'ов
+├── cmd/registry-cli/          # CLI владельца консорциума: register-org / add-admin-key / list
 ├── internal/
-│   ├── config/                # Load() (*Config, error) с _FILE override для secrets
-│   ├── chain/                 # go-ethereum wrappers
-│   │   ├── client.go          # BatchAccept/PutAway/Pick/Ship + BatchCall dispatcher
-│   │   ├── abi.go             # go:embed SignedMappingWMS.abi.json
-│   │   ├── convert.go         # UUIDToUint256 (keccak256)
-│   │   └── receipt.go         # WaitReceipt — exponential backoff
+│   ├── config/                # Load() (*Config, error), <NAME>_FILE override, стартовые инварианты
+│   ├── chain/                 # client.go (SendCalldata: nonce/gas/sign/send), ABI (go:embed), резолверы исходов
+│   ├── consumer/              # Parse, Batcher, Flusher (сегменты/чанки), Pipeline (окно), Confirm, Reconciler
 │   ├── store/                 # pgx pool + onchain_events Repository
-│   ├── consumer/              # Message/Parse + Batcher + Flusher + Consumer
-│   ├── dlq/                   # kafka.Writer для wms.dlq.v1
-│   └── handler/               # /health, /onchain/tx/{hash}, /registry/keys/{keyId}
-│
-└── contracts/
-    └── SignedMappingWMS.sol   # Solidity контракт v2 (компилируется в contract-deploy)
+│   ├── dlq/                   # kafka.Writer в wms.dlq.v1
+│   ├── handler/               # GET /health, /onchain/tx/{hash}, /registry/keys/{keyId}
+│   └── kms/                   # подпись через Web3Signer
+└── contracts/                 # ConsortiumRegistry.sol, SignedMappingWMS.sol, SignedAction.sol + тесты и скрипты
 ```
 
 ## Конфигурация
 
-Все обязательные поля поддерживают `<NAME>_FILE` override (читает путь к файлу вместо прямого env). Нужно для test-профиля, где `contract-deploy` сервис пишет артефакты в shared volume.
+Все переменные читаются `config.Load()`. Для любой переменной, читаемой через `GetRequired`/`GetOptional`, работает `<NAME>_FILE`: если файл существует, берётся его trim-содержимое (так test-профиль подставляет артефакты `contract-deploy` из тома `shared_state`).
 
 | Переменная | Обязательно | Default | Описание |
 |---|---|---|---|
-| `KAFKA_BROKERS` | ✓ | — | CSV broker list, `kafka:9092` |
+| `KAFKA_BROKERS` | ✓ | — | CSV брокеров, `kafka:9092`. Override: `KAFKA_BROKERS_FILE` |
+| `DB_URL` | ✓ | — | pgx DSN. Override: `DB_URL_FILE` |
+| `RPC_URL` | ✓ | — | RPC EVM-узла (локально — Avalanche Subnet-EVM). Override: `RPC_URL_FILE` |
+| `CONTRACT_ADDR` | ✓ | — | адрес `SignedMappingWMS`. Override: `CONTRACT_ADDR_FILE` |
+| `REGISTRY_ADDR` | | — | адрес `ConsortiumRegistry`; невалидный адрес — ошибка старта. Override: `REGISTRY_ADDR_FILE` |
+| `SIGNER_MODE` | | `static` | `static` — локальный ключ из env (**только локальная разработка**); `kms` — подпись во внешнем Web3Signer |
+| `PRIVATE_KEY` | ✓ (static) | — | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE`; в kms-режиме не читается |
+| `PRIVATE_KEYS` | | — | устаревшая CSV-форма; signer ровно один — при >1 значении старт падает |
+| `KMS_URL` | ✓ (kms) | — | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
+| `KMS_PUBLIC_KEYS` | ✓ (kms) | — | identifier единственного ключа (uncompressed X\|\|Y из `GET /api/v1/eth1/publicKeys`); дубликаты и >1 ключа отклоняются. Override: `KMS_PUBLIC_KEYS_FILE` |
+| `PORT` | | `8085` | HTTP-порт эндпоинтов адаптера |
 | `KAFKA_GROUP_ID` | | `ledger-adapter` | consumer group |
-| `DB_URL` | ✓ | — | pgx DSN `postgres://user:pw@host/db` |
-| `RPC_URL` | ✓ | — | RPC EVM-узла (локально — Avalanche Subnet-EVM; подойдёт любой EVM-совместимый) |
-| `CONTRACT_ADDR` | ✓ | — | Адрес `SignedMappingWMS` |
-| `REGISTRY_ADDR` | | — | Адрес `ConsortiumRegistry`; без него `GET /registry/keys/{keyId}` отвечает 502. Override: `REGISTRY_ADDR_FILE` |
-| `PRIVATE_KEY` | ✓ (static) | — | Hex signer key (0x-prefixed ok); не нужен в kms-режиме |
-| `SIGNER_MODE` | | `static` | `static` — **только локальная разработка**: приватник в env открытым текстом; `kms` — подпись во внешнем Web3Signer (ключ адаптеру не нужен) |
-| `KMS_URL` | ✓ (kms) | — | Базовый URL Web3Signer (eth1 mode), напр. `http://web3signer:9000` |
-| `KMS_PUBLIC_KEYS` | ✓ (kms) | — | Identifier единственного ключа (uncompressed X\|\|Y public key из `GET /api/v1/eth1/publicKeys`); больше одного адаптер отклоняет на старте. Override: `KMS_PUBLIC_KEYS_FILE` |
-| `BATCH_SIZE` | | `10` | Events per tx |
-| `BATCH_TIMEOUT` | | `100ms` | Flush by time если batch не набрался |
-| `DLQ_TOPIC` | | `wms.dlq.v1` | |
-| `RECEIPT_POLL_TIMEOUT` | | `30s` | Макс время ожидания receipt |
-| `PORT` | | `8085` | HTTP: /health, /onchain/tx, /registry/keys |
-| `LOG_LEVEL` | | `info` | (reserved, slog default) |
+| `DLQ_TOPIC` | | `wms.dlq.v1` | топик для failed/непарсящихся сообщений |
+| `BATCH_SIZE` | | `10` | макс. сообщений в окне |
+| `BATCH_TIMEOUT` | | `100ms` | макс. время накопления окна |
+| `PIPELINE_WINDOW` | | `3` | сколько batch-tx держать in-flight; зажимается до `8` (50% от `TxPoolAccountSlots`) |
+| `RECEIPT_POLL_TIMEOUT` | | `30s` | макс. ожидание receipt'а |
+| `RECONCILE_INTERVAL` | | `30s` | период фоновой сверки; должен быть `> 0` |
+| `RECONCILE_MIN_AGE` | | `1m` | мин. возраст stuck-строки; должен быть `> RECEIPT_POLL_TIMEOUT` |
+| `LOG_LEVEL` | | `info` | зарезервирован (slog пишет всё) |
+
+Стартовые инварианты: signer ровно один, `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT`, `RECONCILE_INTERVAL > 0`.
 
 ## Запуск
 
@@ -101,91 +94,49 @@ ledger-adapter/
 
 ```bash
 docker compose --profile test up -d
-# contract-deploy one-shot → пишет RPC_URL / CONTRACT_ADDR / PRIVATE_KEY в shared volume
-# ledger-adapter читает их через *_FILE env vars
+# contract-deploy one-shot → пишет rpc_url.txt / registry_addr.txt / contract_addr.txt / deployer_key.txt
+# в том shared_state; ledger-adapter читает их через *_FILE env vars
 ```
 
 ### KMS profile (ключ адаптера во внешнем Web3Signer)
 
 ```bash
 make kms-up   # = docker compose -f docker-compose.yaml -f docker-compose.kms.yaml --profile test up -d
-# kms-init: генерит ключи в Web3Signer (file-raw, том kms_keys — адреса стабильны),
-#           фондирует их с ewoq, выдаёт роль Enabled в tx-allow-list (если он включён в genesis),
+# web3signer: eth1-режим, ключи в томе kms_keys (file-raw, dev-режим), порт только на loopback
+# kms-init: генерит ключи (идемпотентно — адреса стабильны между рестартами тома), фондирует их с ewoq,
+#           выдаёт роль Enabled в tx-allow-list (если он включён в genesis),
 #           публикует identifier'ы в /shared/kms_public_keys.txt
 # ledger-adapter: SIGNER_MODE=kms — приватник в процесс адаптера не попадает вообще
-make kms-down # том kms_keys выживает — рефанд не нужен при следующем старте
+make kms-down # том kms_keys выживает — рефондирование при следующем старте не нужно
 ```
 
-Prod-путь без изменения адаптера — конфиги Web3Signer `type: "hashicorp"`
-(ключ в Vault KV v2) или `type: "aws-kms"`.
+Prod-путь без изменения адаптера — конфиги Web3Signer `type: "hashicorp"` (ключ в Vault KV v2) или `type: "aws-kms"`.
 
-### Локально без docker (unit-dev)
+## Тесты
 
 ```bash
-export KAFKA_BROKERS=kafka:9092
-export DB_URL="postgres://root:root@localhost/wms_blockchain_db?sslmode=disable"
-export RPC_URL=https://api.avax-test.network/ext/bc/C/rpc
-export CONTRACT_ADDR=0x...
-export PRIVATE_KEY=0x...
-
 cd ledger-adapter
-go run ./cmd/adapter/
+go test ./...            # или make test-ledger (go test -race -count=1 ./...)
 ```
 
-## CLI владельца консорциума
-
-`registry-cli` (бинарь в образе адаптера) регистрирует организации в `ConsortiumRegistry`, добавляет ключи админа и показывает реестр. Транзакции `registerOrganization` и `registerAdminKey` подписывает `OWNER_KEY` (ключ деплоера, в стенде — `/shared/deployer_key.txt`).
+Контракты (`forge` + `forge-std`, который не вендорится — `ledger-adapter/contracts/lib/` в `.gitignore`):
 
 ```bash
-make registry-cli ARGS="register-org --file org.json"   # путь — относительно корня репо
-make registry-cli ARGS="add-admin-key --file org.json"
-make registry-cli ARGS="list"
+cd ledger-adapter/contracts
+git clone --depth 1 https://github.com/foundry-rs/forge-std lib/forge-std   # один раз
+forge test               # контрактные тесты + тест-векторы testdata/signed-actions/vectors.v1.json
 ```
 
-Формат `org.json` (общий с WMS, менять нельзя):
+Газ подписанного действия в `forge test` не показателен: precompile secp256r1 (`0x100`) в Foundry нет. Мерить только на узле — `ledger-adapter/contracts/script/GasBench.s.sol` (команда и таблица замеров — [docs/developer/README.md](../docs/developer/README.md), ADR-0001 §11).
 
-```json
-{"orgId":"0190f2a0-0000-7000-8000-000000000a0a","name":"Org A","qx":"0x<64 hex>","qy":"0x<64 hex>"}
-```
+## registry-cli
 
-`qx`/`qy` — координаты публичного P-256 ключа админа организации. Перед отправкой CLI проверяет, что организация и ключ ещё не зарегистрированы.
-
-`add-admin-key` берёт файл того же формата и добавляет ключ админа в уже зарегистрированную организацию, например взамен отозванного. Перед отправкой CLI проверяет, что организация есть, а ключа ещё нет.
-
-После изменения Go-кода нужен `docker compose build ledger-adapter`.
-
-Статус ключа читается эндпоинтом адаптера `GET /registry/keys/{keyId}` (внутренняя сеть, без аутентификации, как `/onchain/tx`): `{"found":false}` или `{"found":true,"org_id":"…","role":"admin|operator","active":true|false}`.
-
-## Тестирование
+CLI владельца консорциума (бинарь `/registry-cli` в образе адаптера): регистрирует организацию с ключом админа, добавляет админа и печатает содержимое реестра. Запуск из репозитория при поднятом стеке:
 
 ```bash
-# Unit tests (быстро, ~5s)
-go test -race ./...
-
-# Integration tests (требуют Docker — testcontainers-go/postgres)
-go test -tags integration -race -timeout 180s ./internal/store/...
+make registry-cli ARGS="register-org --file org.json"   # регистрация организации + ключ админа
+make registry-cli ARGS="add-admin-key --file org.json"  # дополнительный ключ админа
+make registry-cli ARGS="list"                           # организации и ключи (роль, активен/отозван)
 ```
 
-Покрытие:
-- `config/`: 9 tests — defaults, missing required, env, `_FILE` override (file missing, file wins, valid trim), invalid int/duration.
-- `chain/`: 9 tests — UUIDToUint256 vectors (cast keccak cross-check), determinism, ABI parses+includes methods+event, WaitReceipt (happy/retry/timeout/non-NotFound/cancel).
-- `store/`: 2 unit + 5 integration (testcontainers-pg).
-- `consumer/`: 17 tests — Parse (valid + 4 errors), topic-map, Batcher (empty/size/timeout/drain/concurrent), Flusher (happy/duplicates/revert→DLQ/receipt-zero→DLQ/transient/partial).
-
-## Troubleshooting
-
-| Симптом | Причина | Фикс |
-|---|---|---|
-| `config: missing required env: KAFKA_BROKERS` | env не задан | см. таблицу выше |
-| `chain client: dial rpc: ...` | RPC URL некорректный или узел недоступен | проверь `cast chain-id --rpc-url $RPC_URL` |
-| `chain client: parse private key` | Ключ некорректный или кривой формат | 64 hex chars с/без `0x` |
-| `chain call failed: execution reverted: Duplicate eventId` | Идемпотентность сработала на chain-уровне после рестарта БД | Проверь что `onchain_events` волюм не был убит отдельно от состояния контракта; нужно `down -v` обоих |
-| `receipt timeout` в логах, затем DLQ | RPC slow / blockchain congested | Увеличь `RECEIPT_POLL_TIMEOUT` или разберись с инфрой |
-| DLQ растёт | Смотри headers `reason` и `original_topic` в `wms.dlq.v1` |
-
-## Полезные ссылки
-
-- [go-ethereum book](https://goethereumbook.org/)
-- [SignedMappingWMS.sol](contracts/SignedMappingWMS.sol) — контракт (v2)
-- [Issue #20](https://git.miem.hse.ru/2340/blockchain_project/-/issues/20) — постановка задачи
-- [docs/ADR](../docs/ADR/) — архитектурные решения WMS
+`org.json` — `{"orgId","name","qx","qy"}`: выгружается кнопкой «Скачать ключ админа» на странице «Ключи организации» WMS. Транзакции подписывает ключ из `OWNER_KEY` (`make` подставляет `/shared/deployer_key.txt`); перед отправкой CLI проверяет, что организация и ключ ещё не зарегистрированы, и падает с понятной ошибкой, если `OWNER_KEY` не владелец реестра.
