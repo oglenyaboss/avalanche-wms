@@ -77,11 +77,11 @@ type ethBackend interface {
 // несколько tx in-flight в одном блоке без per-send PendingNonceAt — иначе
 // pipeline сериализовался бы на скорости майнинга блоков (старое поведение).
 type Client struct {
-	eth          ethBackend
-	signer       TxSigner
-	sendMu       sync.Mutex
-	nonce        uint64 // следующий nonce для отправки; guarded by sendMu
-	nonceSeeded  bool   // seed произошёл; guarded by sendMu
+	eth         ethBackend
+	signer      TxSigner
+	sendMu      sync.Mutex
+	nonce       uint64 // следующий nonce для отправки; guarded by sendMu
+	nonceSeeded bool   // seed произошёл; guarded by sendMu
 }
 
 // NewClient подключается к RPC и подписывает локальным hex-ключом (static-режим).
