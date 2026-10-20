@@ -6,6 +6,8 @@
 
 **Ключевое:** в MVP нет системных ограничений на то, куда класть товар. Работник сам решает.
 
+Chain-gate: если receiving-действие товара `FAILED` в цепи, размещение отклоняется (`409 CHAIN_EVENT_REJECTED`). Гейт проверяется дважды — на `/draft` и на `/submit` (между ними событие могло стать `FAILED`).
+
 ## Диаграмма последовательности
 
 ```mermaid
@@ -32,20 +34,28 @@ sequenceDiagram
 
     Note over Op: Физически кладёт товары на тележку и идёт к мезонину
 
-    Note over Op,PG: === Шаг 3: Сканирование ячейки хранения ===
+    Note over Op,PG: === Шаг 3: Размещение в ячейку (подписанное действие) ===
     Op->>UI: Сканирует ячейку на мезонине
-    UI->>WMS: POST /putaway/scan-storage-bin {product_ids[], storage_bin_id}
+    UI->>WMS: POST /putaway/scan-storage-bin/draft {product_ids[], storage_bin_id}
     WMS->>WMS: Валидация: ячейка существует, товары в "корзине"
+    WMS->>WMS: Товары сортируются по itemId, операция режется на части (≤2000 товаров)
+    WMS->>PG: INSERT warehouse_actions (строка на часть: action_id, salt, challenge, details)
+    WMS-->>UI: Черновик: operation_id + части (action_id, challenge)
+    UI->>Op: Запрос passkey-подписи для каждой части
+    Op->>UI: Подтверждает каждую часть
+    UI->>WMS: POST /putaway/scan-storage-bin/submit {operation_id, assertions[]}
+    WMS->>WMS: Проверка WebAuthn-подписи каждой части
+    WMS->>PG: BEGIN TX
 
     loop Для каждого товара в "корзине"
         WMS->>PG: UPDATE products SET bin_id = storage_bin_id, status = STORED
-        WMS->>PG: INSERT putaways (product_id, bin_id, operator_id, onchain_status=PENDING_ONCHAIN)
+        WMS->>PG: INSERT putaways (product_id, bin_id, operator_id, action_id)
     end
 
-    loop Для каждого товара
-        WMS->>PG: INSERT outbox_events (event_id, aggregate_id=product_id, aggregate_type='putaway')
+    loop Для каждой части операции
+        WMS->>PG: INSERT outbox_events (event_id=action_id, aggregate_type='signed_action', event_type='wms.action.v1', payload=конверт)
     end
-    Note over WMS,PG: N outbox events → Kafka → batchPutAway → Accepted → PutAway
+    Note over WMS,PG: 1 outbox-строка на действие → Kafka wms.events.v1 → SignedMappingWMS.applyActions → FSM на каждый товар: Accepted → PutAway
     WMS->>PG: COMMIT
     WMS-->>UI: Размещено 3 товара в ячейку M2-A-03 ✓
 
@@ -89,8 +99,9 @@ stateDiagram-v2
 | Таблица | Операция | Что меняется |
 |---------|----------|-------------|
 | `products` | UPDATE | bin_id: buffer → storage, status: RECEIVED → STORED |
-| `putaways` | INSERT | Запись о размещении (product_id, bin_id, operator_id) |
-| `outbox_events` | INSERT | 1 event per product (aggregate_id=product_id, aggregate_type='putaway') |
+| `putaways` | INSERT | Запись о размещении (product_id, bin_id, operator_id, action_id — ссылка на подписанное действие) |
+| `warehouse_actions` | INSERT | Строка на каждую часть операции (draft): action_id, item_ids, salt, challenge, details |
+| `outbox_events` | INSERT | 1 строка на действие-часть при submit (event_id = action_id, aggregate_type='signed_action', event_type='wms.action.v1') |
 
 ## Почему "нет системных ограничений"
 

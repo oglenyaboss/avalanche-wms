@@ -83,8 +83,9 @@ unauthorized
 
 | Гейт | Кто проходит | Где |
 |------|--------------|-----|
-| ADMIN-only | только `ADMIN` | `POST /auth/register` |
-| `RequireAdminOrOperator` | `ADMIN` или `OPERATOR` | `POST /assembly/allocate` (issue #39) |
+| ADMIN-only | только `ADMIN` | `POST /auth/register` (проверка роли внутри сервиса) |
+| `RequireAdmin` | только `ADMIN` | `GET /passkeys/organization`, `GET /passkeys/organization/admin-key`, `POST /passkeys/organization/keys/reject`, `POST /passkeys/actions/*` |
+| `RequireAdminOrOperator` | `ADMIN` или `OPERATOR` | `POST /assembly/allocate` (issue #39), `GET /passkeys/me`, `POST /passkeys/registration/*`, `GET /signed-actions/operations/{operation_id}` |
 | `RequireOperator` | только `OPERATOR` | все остальные защищённые эндпоинты |
 
 `ADMIN`, вызывающий OPERATOR-only эндпоинт, получает `403`. Сообщения 401/403 в
@@ -103,8 +104,10 @@ unauthorized
 
 ## Сводка эндпоинтов
 
-Всего **28 операций** на 27 путях (на `/dispatches/` висят GET и POST). RBAC указан
+Всего **42 операции** на 41 пути (на `/dispatches/` висят GET и POST). RBAC указан
 после auth-гейта. Полные тела, ошибки и примеры — в [`openapi.yaml`](openapi.yaml).
+Разделы **Passkeys** и **Signed actions** описаны по `RegisterRoutes`
+(`wms/internal/passkeys`, `wms/internal/signedops`): в `openapi.yaml` этих путей пока нет.
 
 ### System
 
@@ -138,7 +141,8 @@ unauthorized
 | POST | `/receiving/table/scan-qr` | OPERATOR | Создать товар (`RECEIVED`) с уникальным QR. |
 | POST | `/receiving/table/close-box` | OPERATOR | Коробка → `CLOSED`. |
 | POST | `/receiving/table/scan-buffer` | OPERATOR | Товары из `CLOSED` коробок → буфер. |
-| POST | `/receiving/table/close-cargoplace` | OPERATOR | Грузоместо → `TABLE_CLOSED` + **outbox** (`receiving`). |
+| POST | `/receiving/table/close-cargoplace/draft` | OPERATOR | Черновик Receive-действия: части по ≤2000 товаров с `challenge` для passkey. |
+| POST | `/receiving/table/close-cargoplace/submit` | OPERATOR | Подписи частей → `TABLE_CLOSED` + **по строке `outbox_events` на часть**. |
 
 ### Putaway
 
@@ -146,7 +150,8 @@ unauthorized
 |-------|------|------|-----------|
 | POST | `/putaway/scan-buffer` | OPERATOR | Получить `RECEIVED` товары из буфера (read-only). |
 | POST | `/putaway/scan-product` | OPERATOR | Проверить товар + `cart_size` (read-only). |
-| POST | `/putaway/scan-storage-bin` | OPERATOR | Разместить (`STORED`) + **outbox** (`putaway`). Chain-gate. |
+| POST | `/putaway/scan-storage-bin/draft` | OPERATOR | Черновик PutAway-действия (`STORED` ещё не пишется). Chain-gate. |
+| POST | `/putaway/scan-storage-bin/submit` | OPERATOR | Подписи частей → `STORED` + **по строке `outbox_events` на часть**. Chain-gate. |
 
 ### Assembly
 
@@ -154,8 +159,9 @@ unauthorized
 |-------|------|------|-----------|
 | POST | `/assembly/allocate` | **ADMIN или OPERATOR** | Аллокация на заказы; недостача → `insufficient_orders` (всё ещё `200`). |
 | GET | `/assembly/tasks` | OPERATOR | Список задач сборки (query: `destination_id`*, `operator_id`, `status`). |
-| POST | `/assembly/pick` | OPERATOR | Пик: товар → `ASSEMBLED`, задача → `DONE`, **outbox** (`picking`). Chain-gate. |
-| POST | `/assembly/scan-shipping-buffer` | OPERATOR | Собранное → `READY_TO_SHIP` в буфер отгрузки. |
+| POST | `/assembly/pick` | OPERATOR | Пик: товар → `ASSEMBLED`, задача → `DONE`. **Outbox не пишется.** Chain-gate. |
+| POST | `/assembly/scan-shipping-buffer/draft` | OPERATOR | Черновик Pick-действия: корзина → части с `challenge`. |
+| POST | `/assembly/scan-shipping-buffer/submit` | OPERATOR | Подписи частей → `READY_TO_SHIP` в буфер + **по строке `outbox_events` на часть**. |
 
 ### Dispatches (внутренние ошибки → `503`)
 
@@ -177,7 +183,28 @@ unauthorized
 |-------|------|------|-----------|
 | POST | `/shipping/scan-buffer` | OPERATOR | Осмотр буфера отгрузки (read-only). |
 | POST | `/shipping/scan-driver` | OPERATOR | Рейс → `AT_GATE` (идемпотентно). |
-| POST | `/shipping/ship` | OPERATOR | Отгрузка (bulk/spot) + **outbox** (`shipping`); рейс → `DEPARTED`. |
+| POST | `/shipping/ship/draft` | OPERATOR | Черновик Ship-действия: буфер/spot → части с `challenge`. Гейт `PICKING_NOT_CONFIRMED`. |
+| POST | `/shipping/ship/submit` | OPERATOR | Подписи частей → `SHIPPED` + **по строке `outbox_events` на часть**; рейс → `DEPARTED`. |
+
+### Passkeys (открытый ключ P-256 вместо пароля для подписи действий)
+
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| POST | `/passkeys/registration/begin` | ADMIN или OPERATOR | Опции WebAuthn-регистрации (`protocol.CredentialCreation`, JSON `publicKey`); у пользователя не больше одного живого ключа. |
+| POST | `/passkeys/registration/finish` | ADMIN или OPERATOR | Attestation → строка `passkey_credentials` в `PENDING`. |
+| GET | `/passkeys/me` | ADMIN или OPERATOR | Свой passkey (статус подтягивается из реестра цепи). |
+| GET | `/passkeys/organization` | **ADMIN** | Обзор организации: ключи сотрудников и их статусы. |
+| GET | `/passkeys/organization/admin-key` | **ADMIN** | Экспорт ключа админа для регистрации в `ConsortiumRegistry`. |
+| POST | `/passkeys/organization/keys/reject` | **ADMIN** | Отклонить `PENDING`-регистрацию passkey (`{target_key_id}` → `REJECTED`). |
+| POST | `/passkeys/actions/key-register/draft` | **ADMIN** | Черновик `KeyRegister` (action_type 5) для ключа оператора своей организации. |
+| POST | `/passkeys/actions/key-revoke/draft` | **ADMIN** | Черновик `KeyRevoke` (action_type 6) для `ACTIVE`-ключа оператора. |
+| POST | `/passkeys/actions/{action_id}/submit` | **ADMIN** | Подпись админа → `submitted_at` + **строка `outbox_events`** на ключевое действие. |
+
+### Signed actions (состояние подписанной операции в цепи)
+
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-----------|
+| GET | `/signed-actions/operations/{operation_id}` | ADMIN или OPERATOR | Статус каждой части операции: `action_id`, `state` (`SENT`/`APPLIED`/`REJECTED`/`FAILED`), `reject_reason`. |
 
 \* `destination_id` — обязательный query-параметр.
 
@@ -191,35 +218,48 @@ unauthorized
   `data.dispatch`. У `GET /dispatches/{id}` — та же обёртка.
 - **`/dispatches` 404 → `message` это строка-сентинел** (`DESTINATION_NOT_FOUND` /
   `DISPATCH_NOT_FOUND`), а не фраза. `code` при этом `NOT_FOUND`.
-- **`/putaway/scan-storage-bin`: BUFFER/SHIPPING_BUFFER-ячейка → `404
+- **`/putaway/scan-storage-bin/draft`: BUFFER/SHIPPING_BUFFER-ячейка → `404
   STORAGE_BIN_NOT_FOUND`** (не 400). Контринтуитивно.
 - **`/assembly/allocate` никогда не отдаёт ошибку при нехватке остатка** — частичная
   аллокация это `200` с заполненным `insufficient_orders`.
-- **`product_ids` — это JSON-массив** в `/putaway/scan-storage-bin` и `/shipping/ship`
-  (максимум 200 элементов). В `ship` пустой/отсутствующий → bulk-режим.
-- **`/shipping/ship` `buffer_remaining` считается по всей SHIPPING_BUFFER-зоне пункта
-  назначения**, не по одной ячейке. Рейс отбывает только когда зона пуста.
+- **`product_ids` — это JSON-массив** в `/putaway/scan-storage-bin/draft` и
+  `/shipping/ship/draft` (максимум 200 элементов). В `ship/draft` пустой/отсутствующий → bulk-режим.
+- **`buffer_remaining` в `/shipping/ship/submit` считается по всей SHIPPING_BUFFER-зоне
+  пункта назначения**, не по одной ячейке. Рейс отбывает (`DEPARTED`) только когда зона пуста.
 - **`progress.not_received` всегда `0`** в ответе `gate/scan-cargoplace`; симметрично
   `summary.remaining` всегда `0` в `gate/accept-shipment`.
-- **Только `close-cargoplace`, `scan-storage-bin`, `pick`, `ship` пишут в
-  `public.outbox_events`** — это точки интеграции с блокчейном. `aggregate_type` для
-  стадии сборки — **`picking`**, не `assembly`.
+- **Только `/receiving/table/close-cargoplace/submit`, `/putaway/scan-storage-bin/submit`,
+  `/assembly/scan-shipping-buffer/submit`, `/shipping/ship/submit` и
+  `/passkeys/actions/{action_id}/submit` пишут в `public.outbox_events`** — это точки
+  интеграции с блокчейном. `aggregate_type` у них всегда **`signed_action`**, а не
+  имя этапа: этап определяется по `warehouse_actions.action_type` (или по
+  `key_actions.action_type` для ключевых действий).
 
 ---
 
 ## Outbox / блокчейн (сводка)
 
-| Эндпоинт | `aggregate_type` | `event_type` | Переход товара |
-|----------|------------------|--------------|----------------|
-| `receiving/table/close-cargoplace` | `receiving` | `wms.receiving.v1` | товары созданы со статусом `RECEIVED` |
-| `putaway/scan-storage-bin` | `putaway` | `wms.putaway.v1` | `RECEIVED → STORED` |
-| `assembly/pick` | `picking` | `wms.picking.v1` | `ALLOCATED → ASSEMBLED` |
-| `shipping/ship` | `shipping` | `wms.shipping.v1` | `READY_TO_SHIP → SHIPPED` |
+Складские действия — двухшаговый поток: `POST …/draft` строит части операции (≤2000
+товаров) с `challenge`, браузер подписывает каждую passkey оператора (WebAuthn P-256),
+`POST …/submit` проверяет все подписи и в одной транзакции применяет операцию и пишет
+**одну строку `outbox_events` на каждую часть-действие** (`event_id = aggregate_id =
+action_id`, `event_type = wms.action.v1`, `payload` — конверт, ADR-0001 §9).
 
-`aggregate_id` всегда `= product_id` (1 событие = 1 товар). Детали маршрута событий —
+| Эндпоинт (draft → submit) | `action_type` | `aggregate_type` | Топик | Переход товара в цепи |
+|---------------------------|---------------|------------------|-------|------------------------|
+| `POST /receiving/table/close-cargoplace/{draft,submit}` | `1` Receive | `signed_action` | `wms.events.v1` | None → Accepted |
+| `POST /putaway/scan-storage-bin/{draft,submit}` | `2` PutAway | `signed_action` | `wms.events.v1` | Accepted → PutAway |
+| `POST /assembly/scan-shipping-buffer/{draft,submit}` | `3` Pick | `signed_action` | `wms.events.v1` | PutAway → Picked |
+| `POST /shipping/ship/{draft,submit}` | `4` Ship | `signed_action` | `wms.events.v1` | Picked → Shipped |
+| `POST /passkeys/actions/{key-register,key-revoke}/draft` → `/passkeys/actions/{id}/submit` | `5`/`6` KeyRegister/KeyRevoke | `signed_action` | `wms.events.v1` | — (ключевое действие в `ConsortiumRegistry`) |
+
+`/assembly/pick` (подбор с полки) в outbox **не пишет**: Pick-действие создаётся при
+выгрузке корзины в буфер. Debezium публикует всё в один топик `wms.events.v1` (key =
+`action_id`), Ledger Adapter вызывает `SignedMappingWMS.applyActions` /
+`ConsortiumRegistry.applyKeyActions` и ведёт `onchain_events`
+(`PENDING → SENT → COMMITTED / FAILED`, `reject_reason` при отказе). Детали маршрута событий —
 [`../integration/blockchain-mapping.md`](../integration/blockchain-mapping.md),
-[`../integration/data-contract.md`](../integration/data-contract.md),
-[`../integration/batch-mapping-approach.md`](../integration/batch-mapping-approach.md).
+[`../integration/data-contract.md`](../integration/data-contract.md).
 
 ---
 
