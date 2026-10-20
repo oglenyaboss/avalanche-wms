@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -147,6 +148,21 @@ func TestUsernames(t *testing.T) {
 	require.Equal(t, "stress-sop-a1b2c3-001", ops[0])
 	require.Equal(t, "stress-sop-a1b2c3-099", ops[98])
 	require.Equal(t, "stress-sop-a1b2c3-120", ops[119])
+}
+
+// TestDefaultOutDirFromRepoRoot: без явного -out ключи пишутся в гит-игнорируемый
+// tests/stress/.signed от корня репозитория, а не от cwd; явный -out не трогаем.
+func TestDefaultOutDirFromRepoRoot(t *testing.T) {
+	root, err := repoRoot()
+	require.NoError(t, err)
+	require.True(t, filepath.IsAbs(root), "repo root must be absolute: %s", root)
+
+	got := resolveOutDir("", false, root)
+	require.True(t, filepath.IsAbs(got), "default out dir must be absolute, got %s", got)
+	require.True(t, strings.HasSuffix(got, "tests/stress/.signed"), "got %s", got)
+	require.Equal(t, filepath.Join(root, "tests/stress/.signed"), got)
+
+	require.Equal(t, "custom/dir", resolveOutDir("custom/dir", true, root))
 }
 
 func TestCallAcceptsNullError(t *testing.T) {

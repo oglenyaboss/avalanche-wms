@@ -41,7 +41,7 @@ import (
 
 const (
 	defaultOperators        = 70
-	defaultOut              = "../stress/.signed"
+	defaultOut              = "tests/stress/.signed" // от корня репозитория
 	defaultDBURL            = "postgres://root:root@localhost:5432/wms_blockchain_db?sslmode=disable"
 	defaultWMSURL           = "http://localhost:8081"
 	defaultAdapterContainer = "ledger-adapter"
@@ -626,12 +626,33 @@ func keyRecordFor(username string, key *ecdsa.PrivateKey, credID []byte, keyID [
 
 func main() {
 	nOperators := flag.Int("operators", defaultOperators, "number of OPERATOR users to provision")
-	outDir := flag.String("out", defaultOut, "output directory (relative to tests/e2e) for operators.json/admin.json")
+	outFlag := flag.String("out", "", "output directory for operators.json/admin.json (default: <repo root>/tests/stress/.signed)")
 	flag.Parse()
 
-	if err := run(context.Background(), *nOperators, *outDir); err != nil {
+	outSet := false
+	flag.Visit(func(f *flag.Flag) { outSet = outSet || f.Name == "out" })
+	root := ""
+	if !outSet {
+		r, err := repoRoot()
+		if err != nil {
+			log.Fatalf("stress-provision: resolve repo root: %v", err)
+		}
+		root = r
+	}
+
+	if err := run(context.Background(), *nOperators, resolveOutDir(*outFlag, outSet, root)); err != nil {
 		log.Fatalf("stress-provision: %v", err)
 	}
+}
+
+// resolveOutDir picks the output directory: an explicit -out is used exactly as
+// given, the default is repo-root-relative so the keys always land in the
+// gitignored tests/stress/.signed no matter which cwd the tool runs from.
+func resolveOutDir(flagValue string, flagSet bool, root string) string {
+	if flagSet {
+		return flagValue
+	}
+	return filepath.Join(root, defaultOut)
 }
 
 func envOr(key, def string) string {
@@ -686,6 +707,9 @@ func run(ctx context.Context, n int, outDir string) error {
 	}
 	if err := os.WriteFile(orgPath, append(orgJSON, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", orgPath, err)
+	}
+	if err := os.Chmod(orgPath, 0o644); err != nil {
+		return fmt.Errorf("chmod %s: %w", orgPath, err)
 	}
 	log.Printf("registering org on chain: make registry-cli ARGS=\"register-org --file %s\" (cwd %s)", fileRel, root)
 	if err := registerOrg(root, fileRel); err != nil {
@@ -759,9 +783,15 @@ func run(ctx context.Context, n int, outDir string) error {
 	if err := os.WriteFile(adminPath, append(adminJSON, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", adminPath, err)
 	}
+	if err := os.Chmod(adminPath, 0o600); err != nil {
+		return fmt.Errorf("chmod %s: %w", adminPath, err)
+	}
 	opsPath := filepath.Join(absOut, "operators.json")
 	if err := os.WriteFile(opsPath, append(opsJSON, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", opsPath, err)
+	}
+	if err := os.Chmod(opsPath, 0o600); err != nil {
+		return fmt.Errorf("chmod %s: %w", opsPath, err)
 	}
 
 	fmt.Printf("provisioned org %s: %d operators ACTIVE → %s/operators.json\n", p.orgID, n, absOut)
