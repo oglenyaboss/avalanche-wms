@@ -26,8 +26,8 @@ node-home — локальная RPC-нода (не валидатор). Сос�
   новый `BLOCKCHAIN_ID` → обновить `genesis/chain-ids.env`, перерендерить/раздать конфиги
   узлам (`track-subnets`) и рестартнуть валидаторы, передеплоить контракт
   (`contracts/deploy-geo.sh`).
-- Multi-signer-адреса адаптера (`PRIVATE_KEYS`) обязаны быть в tx-списке —
-  `fund-signers.sh` сам выдаёт signer-ам tx-роль (`setEnabled` от админа) после фондирования.
+- Адрес адаптера (`PRIVATE_KEY`) обязан быть в tx-списке — `fund-signers.sh` сам
+  выдаёт signer-у tx-роль (`setEnabled` от админа) после фондирования.
 - Добавление нового адреса на живой цепи — транзакцией админа через прекомпайл;
   полный раздел (роли, процедуры `cast`, поведение сети):
   [deploy/subnet/README.md, раздел «Allow-list»](../subnet/README.md).

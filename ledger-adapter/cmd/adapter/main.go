@@ -163,13 +163,12 @@ func run(log *slog.Logger) error {
 }
 
 // buildSigner собирает TxSigner по режиму: static — локальный ecdsa-ключ
-// из PRIVATE_KEYS/PRIVATE_KEY; kms — удалённая подпись в Web3Signer по
+// из PRIVATE_KEY; kms — удалённая подпись в Web3Signer по
 // KMS_PUBLIC_KEYS (адрес выводится из public key, приватник адаптеру
 // не нужен вообще). Signer ровно один — это валидирует config.Load.
 func buildSigner(cfg *config.Config) (chain.TxSigner, error) {
 	if cfg.SignerMode != "kms" {
-		// PRIVATE_KEYS (одно значение) приоритетнее дефолтного PRIVATE_KEY — как и раньше.
-		return chain.NewStaticSigner(cfg.PrivateKeys[0])
+		return chain.NewStaticSigner(cfg.PrivateKey)
 	}
 	hc := &http.Client{Timeout: 10 * time.Second}
 	return kms.NewSigner(cfg.KMSURL, cfg.KMSPublicKeys[0], hc)

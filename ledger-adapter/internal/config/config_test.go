@@ -291,9 +291,6 @@ func TestLoad_KMSMode(t *testing.T) {
 	if len(cfg.KMSPublicKeys) != 1 || cfg.KMSPublicKeys[0] != "0xaaa" {
 		t.Errorf("KMSPublicKeys: got %v", cfg.KMSPublicKeys)
 	}
-	if len(cfg.PrivateKeys) != 0 {
-		t.Errorf("PrivateKeys must stay empty in kms mode, got %v", cfg.PrivateKeys)
-	}
 	// Окно пайплайна при одном signer'е: дефолт 3 остаётся в пределах потолка.
 	if cfg.PipelineWindow != 3 {
 		t.Errorf("PipelineWindow default: got %d", cfg.PipelineWindow)
@@ -314,15 +311,14 @@ func TestLoad_KMSMode_TwoSignersRejected(t *testing.T) {
 	}
 }
 
-// TestLoad_StaticMultipleSignersRejected: PRIVATE_KEYS с двумя ключами —
-// та же ошибка, что и для kms.
-func TestLoad_StaticMultipleSignersRejected(t *testing.T) {
+// TestLoad_PrivateKeysIgnored: PRIVATE_KEYS больше не читается — signer
+// берётся только из PRIVATE_KEY, поэтому устаревшая переменная не ломает старт.
+func TestLoad_PrivateKeysIgnored(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("PRIVATE_KEYS", "0x111,0x222")
 
-	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "only one signer is supported") {
-		t.Fatalf("want only-one-signer error, got %v", err)
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load must ignore PRIVATE_KEYS, got %v", err)
 	}
 }
 

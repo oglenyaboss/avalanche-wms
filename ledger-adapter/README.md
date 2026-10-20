@@ -71,8 +71,7 @@ ledger-adapter/
 | `CONTRACT_ADDR` | ✓ | — | адрес `SignedMappingWMS`. Override: `CONTRACT_ADDR_FILE` |
 | `REGISTRY_ADDR` | | — | адрес `ConsortiumRegistry`; невалидный адрес — ошибка старта. Override: `REGISTRY_ADDR_FILE` |
 | `SIGNER_MODE` | | `static` | `static` — локальный ключ из env (**только локальная разработка**); `kms` — подпись во внешнем Web3Signer |
-| `PRIVATE_KEY` | ✓ (static) | — | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE`; в kms-режиме не читается |
-| `PRIVATE_KEYS` | | — | устаревшая CSV-форма; signer ровно один — при >1 значении старт падает |
+| `PRIVATE_KEY` | ✓ (static) | — | hex ECDSA-ключ (с/без `0x`) — единственный signer. Override: `PRIVATE_KEY_FILE`; в kms-режиме не читается |
 | `KMS_URL` | ✓ (kms) | — | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
 | `KMS_PUBLIC_KEYS` | ✓ (kms) | — | identifier единственного ключа (uncompressed X\|\|Y из `GET /api/v1/eth1/publicKeys`); дубликаты и >1 ключа отклоняются. Override: `KMS_PUBLIC_KEYS_FILE` |
 | `PORT` | | `8085` | HTTP-порт эндпоинтов адаптера |

@@ -272,7 +272,7 @@ EventRouter имеет статичную замену `route.topic.replacement 
 | `RECONCILE_INTERVAL` | нет | `30s` | duration | период фоновой сверки. Должен быть `> 0` |
 | `RECONCILE_MIN_AGE` | нет | `1m` | duration | мин. возраст «зависшей» SENT/FAILED-строки. Должен быть `> RECEIPT_POLL_TIMEOUT` |
 
-> **Стартовые инварианты** (`Load()` падает при нарушении): signer **ровно один** (подписанные действия держат Kafka-порядок одной nonce-цепочкой; `PRIVATE_KEYS` с >1 ключом или `KMS_PUBLIC_KEYS` с >1 identifier'ом отклоняются), `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT` (иначе reconciler гоняется с in-flight `WaitReceipt`) и `RECONCILE_INTERVAL > 0`.
+> **Стартовые инварианты** (`Load()` падает при нарушении): signer **ровно один** (подписанные действия держат Kafka-порядок одной nonce-цепочкой; `KMS_PUBLIC_KEYS` с >1 identifier'ом отклоняется), `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT` (иначе reconciler гоняется с in-flight `WaitReceipt`) и `RECONCILE_INTERVAL > 0`.
 
 ### 4.3. Init / прочее (Compose)
 
@@ -386,7 +386,7 @@ docker compose --profile test down -v
 неразрешённого адреса отбрасывается mempool-ом с ошибкой
 `cannot issue transaction from non-allow listed address`, деплой с адреса вне
 deployer-списка — в EVM (`tx.origin … is not authorized to deploy a contract`), поэтому
-ключ адаптера (`PRIVATE_KEY`, а при multi-signer — все `PRIVATE_KEYS`) обязан быть в списке.
+ключ адаптера (`PRIVATE_KEY`) обязан быть в списке.
 
 Добавить адрес на живой цепи (genesis читается один раз при `CreateChain` — список
 меняется только транзакциями админа; `cast` на хосте нет — docker-образ foundry;
