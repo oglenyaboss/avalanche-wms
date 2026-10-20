@@ -87,6 +87,7 @@ describe('labels', () => {
 
   it('translates known stages and passes through unknown ones', () => {
     expect(stageLabel('picking')).toBe('Сборка')
+    expect(stageLabel('keys')).toBe('Ключи')
     expect(stageLabel('mystery')).toBe('mystery')
   })
 

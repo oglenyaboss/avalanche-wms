@@ -75,10 +75,10 @@ func (r *Repository) resolveProduct(ctx context.Context, key string) (ProductHea
 	return h, nil
 }
 
-// Timeline returns the product header plus all of its outbox events joined to
-// their on-chain status, oldest first. Multiple rows per stage (re-putaway etc.)
-// are returned as-is. Signed warehouse actions (ADR-0001) that contain the
-// product appear as steps of their stage via warehouse_actions.item_ids.
+// Timeline returns the product header plus all steps from signed warehouse
+// actions containing the product (warehouse_actions.item_ids), each joined to
+// its on-chain status, oldest first. Multiple rows per stage (re-putaway etc.)
+// are returned as-is.
 func (r *Repository) Timeline(ctx context.Context, key string) (Timeline, error) {
 	header, err := r.resolveProduct(ctx, key)
 	if err != nil {
@@ -89,13 +89,6 @@ func (r *Repository) Timeline(ctx context.Context, key string) (Timeline, error)
 		       tx_hash, COALESCE(chain_status, 'PENDING'),
 		       chain_updated_at, error_message
 		FROM (
-			SELECT oe.aggregate_type AS stage, oe.event_type, oe.created_at, oe.event_id,
-			       onc.tx_hash, onc.status::text AS chain_status,
-			       onc.updated_at AS chain_updated_at, onc.error_message
-			FROM public.outbox_events oe
-			LEFT JOIN public.onchain_events onc USING (event_id)
-			WHERE oe.aggregate_id = $1::uuid
-			UNION ALL
 			SELECT CASE wa.action_type WHEN 1 THEN 'receiving' WHEN 2 THEN 'putaway'
 				                WHEN 3 THEN 'picking' WHEN 4 THEN 'shipping' END,
 			       oe.event_type, oe.created_at, wa.action_id,

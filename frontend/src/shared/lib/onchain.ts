@@ -31,12 +31,13 @@ export function chainStatusLabel(status: ChainStatus): string {
   return CHAIN_STATUS_LABELS[status]
 }
 
-// Russian labels for the four FSM warehouse stages (aggregate_type values).
+// Russian labels for analytics stages: the four warehouse stages and key actions.
 const STAGE_LABELS: Record<string, string> = {
   receiving: 'Приёмка',
   putaway: 'Раскладка',
   picking: 'Сборка',
   shipping: 'Отгрузка',
+  keys: 'Ключи',
 }
 
 export function stageLabel(aggregateType: string): string {
