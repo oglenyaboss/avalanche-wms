@@ -173,8 +173,8 @@ func applyActionOutcomes(ctx context.Context, resolvers []ActionResolver, st ter
 type Reconciler struct {
 	chain receiptChecker
 	store reconcileStore
-	// Резолверы исходов подписанных действий; оба nil = signed_action-строки
-	// подтверждаются как COMMITTED без разбора исходов.
+	// Резолверы исходов подписанных действий; без них исход не разобрать — sweep
+	// логирует ошибку, а строки остаются SENT до подключения контрактов.
 	warehouse ActionResolver
 	registry  ActionResolver
 	interval  time.Duration

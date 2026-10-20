@@ -14,11 +14,9 @@ import (
 // ReconcileRow — non-terminal/stuck onchain_events row that already has a broadcast
 // tx_hash. The reconcile loop re-checks its receipt to recover a true on-chain result
 // (e.g. a mined tx that the flusher wrongly marked FAILED on a receipt-poll timeout — N1).
-// AggregateType отделяет FSM-батчи от signed_action'ов: у них разные пути разбора исхода.
 type ReconcileRow struct {
-	EventID       uuid.UUID
-	AggregateType string
-	TxHash        string
+	EventID uuid.UUID
+	TxHash  string
 }
 
 // Repository — persistence слой для onchain_events.
@@ -189,11 +187,15 @@ const reconcileBatchLimit = 1000
 // дольше minAge. minAge отсекает in-flight события, которые flusher ещё дожимает
 // своим WaitReceipt — их трогать рано. Строки с reject_reason исключены: контракт
 // отклонил действие терминально, и без фильтра reconcile-loop перечитывал бы их
-// каждый интервал. Используется фоновым reconcile-loop'ом (N1).
+// каждый интервал. Только signed_action-строки: legacy-события на товар остались в
+// таблице, но их исход резолвить нечем, поэтому они навсегда застряли бы в начале
+// ORDER BY и вытесняли живые строки из окна LIMIT. Используется фоновым
+// reconcile-loop'ом (N1).
 func (r *Repository) ListReconcilable(ctx context.Context, minAge time.Duration) ([]ReconcileRow, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT event_id, aggregate_type, tx_hash FROM public.onchain_events
+		`SELECT event_id, tx_hash FROM public.onchain_events
 		 WHERE status IN ('SENT','FAILED')
+		   AND aggregate_type = 'signed_action'
 		   AND tx_hash IS NOT NULL AND tx_hash <> ''
 		   AND reject_reason IS NULL
 		   AND updated_at < now() - make_interval(secs => $1)
@@ -208,7 +210,7 @@ func (r *Repository) ListReconcilable(ctx context.Context, minAge time.Duration)
 	var out []ReconcileRow
 	for rows.Next() {
 		var row ReconcileRow
-		if err := rows.Scan(&row.EventID, &row.AggregateType, &row.TxHash); err != nil {
+		if err := rows.Scan(&row.EventID, &row.TxHash); err != nil {
 			return nil, fmt.Errorf("scan reconcilable row: %w", err)
 		}
 		out = append(out, row)
