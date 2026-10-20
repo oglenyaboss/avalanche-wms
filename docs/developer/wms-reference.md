@@ -11,7 +11,7 @@
 | Пошаговые flow по этапам | [flows/receiving-gate-flow.md](../flows/receiving-gate-flow.md), [flows/receiving-table-flow.md](../flows/receiving-table-flow.md), [flows/putaway-flow.md](../flows/putaway-flow.md), [flows/assembly-flow.md](../flows/assembly-flow.md), [flows/shipping-flow.md](../flows/shipping-flow.md) |
 | Жизненный цикл сущностей, ER-диаграмма | [data-model/entity-lifecycle.md](../data-model/entity-lifecycle.md), [data-model/er-diagram.md](../data-model/er-diagram.md) |
 | Схема БД (таблицы, колонки, enum, миграции) | [db/Database_ru_v2.md](../db/Database_ru_v2.md) |
-| Маппинг WMS → блокчейн, контракт данных | [integration/blockchain-mapping.md](../integration/blockchain-mapping.md), [integration/data-contract.md](../integration/data-contract.md), [integration/batch-mapping-approach.md](../integration/batch-mapping-approach.md) |
+| Маппинг WMS → блокчейн, контракт данных | [integration/blockchain-mapping.md](../integration/blockchain-mapping.md), [integration/data-contract.md](../integration/data-contract.md) |
 | Обзор архитектуры | [architecture/system-overview.md](../architecture/system-overview.md) |
 | Контракт HTTP API (request/response по эндпоинтам) | [api/openapi.yaml](../api/openapi.yaml) — источник истины; [api/api-contract.md](../api/api-contract.md) — компаньон |
 | Конвенции кода/git, гайд по MR | [CONVENTIONS.md](../CONVENTIONS.md), [MR_GUIDE.md](../MR_GUIDE.md) |
@@ -23,7 +23,7 @@
 
 ## 1. Обзор сервиса и структура `internal/`
 
-WMS — это **модульный монолит** на Go: один бинарь (`wms/cmd/wms`), один процесс, один пул PostgreSQL. Каждый этап склада — отдельный Go-пакет под `wms/internal/`. Между WMS и блокчейном нет синхронных вызовов на «горячем пути»: каждый этап в той же транзакции, что и бизнес-мутация, пишет строку в `public.outbox_events` (паттерн transactional outbox). Отдельный процесс `ledger-adapter` опрашивает эту таблицу и отправляет события в Avalanche Subnet-EVM.
+WMS — это **модульный монолит** на Go: один бинарь (`wms/cmd/wms`), один процесс, один пул PostgreSQL. Каждый этап склада — отдельный Go-пакет под `wms/internal/`. Между WMS и блокчейном нет синхронных вызовов на «горячем пути»: в той же транзакции, что и бизнес-мутация, WMS пишет строку в `public.outbox_events` (паттерн transactional outbox). Единица записи — **подписанное складское действие**, а не товар (ADR-0001): `POST …/draft` кладёт черновик операции (части ≤ 2000 товаров) в `public.warehouse_actions`, оператор подписывает каждую часть passkey, `POST …/submit` проверяет подписи и пишет по строке outbox на часть. Строки читает Debezium (CDC) и публикует в Kafka `wms.events.v1`; отдельный процесс `ledger-adapter` применяет их в Avalanche Subnet-EVM.
 
 ### Структура пакетов
 
@@ -32,14 +32,18 @@ wms/
 ├── cmd/wms/main.go                  Точка входа: config → pool → kafka → ledger → wiring → router
 └── internal/
     ├── auth/                        JWT-аутентификация, Middleware, регистрация пользователей
-    ├── receiving/                   Этап 1–2: приёмка на КПП + на столе (10 эндпоинтов)
-    ├── putaway/                     Этап 3: раскладка buffer → storage (3 эндпоинта)
-    ├── assembly/                    Этап 4: аллокация + сборка/пикинг (4 эндпоинта)
-    ├── shipping/                    Этап 5: отгрузка (3 эндпоинта)
+    ├── receiving/                   Этап 1–2: приёмка на КПП + на столе (11 эндпоинтов)
+    ├── putaway/                     Этап 3: раскладка buffer → storage (4 эндпоинта)
+    ├── assembly/                    Этап 4: аллокация + сборка/пикинг (5 эндпоинтов)
+    ├── shipping/                    Этап 5: отгрузка (4 эндпоинта)
     ├── dispatches/                  CRUD исходящих рейсов (3 эндпоинта, без блокчейна)
     ├── destinations/                Справочник магазинов-получателей (1 эндпоинт, read-only)
     ├── domain/                      Общие доменные модели + enum-статусы (без логики)
-    ├── ledger/                      Клиент ledger-adapter + DB-гейт CheckChainStatus
+    ├── signedaction/                WebAuthn-подпись, challenge и detailsHash, конверт действия (без БД)
+    ├── signedops/                   Черновик и части операции, черновик/приём подписей, запись outbox
+    ├── passkeys/                    passkey пользователей, регистрация в реестре, ключевые действия админа
+    ├── audit/                       Сверка БД ↔ цепь: CLI #17 и HTTP для роли AUDITOR
+    ├── ledger/                      Клиент ledger-adapter + DB-гейты CheckChainStatus/UnconfirmedProducts
     └── platform/
         ├── postgres/                Фабрика *pgxpool.Pool
         ├── kafka/                   Возвращает *kafkago.Conn (segmentio/kafka-go); не обёртка, а голое соединение
@@ -56,9 +60,9 @@ HTTP request
    ↓
 Handler   (handler.go)   — декодирование JSON, RBAC-гейт, маппинг ошибок → HTTP-статус, сериализация конверта
    ↓
-Service   (service.go)   — бизнес-логика, FSM-переходы, транзакции через repo.WithTx, гейты CheckChainStatus
+Service   (service.go)   — бизнес-логика, FSM-переходы, транзакции через repo.WithTx, гейты CheckChainStatus/UnconfirmedProducts
    ↓
-Repository (repository.go) — весь SQL, управление транзакциями, запись outbox-событий
+Repository (repository.go) — весь SQL, управление транзакциями, запись строки outbox на часть подписанного действия
    ↓
 PostgreSQL (*pgxpool.Pool)
 ```
@@ -180,15 +184,17 @@ func (c *Client) HealthCheck() error
 
 Это **единственный** эндпоинт ledger-adapter, который WMS вызывает по HTTP. Всё остальное взаимодействие — через общую БД (outbox).
 
-**`ledger.CheckChainStatus`** (`chain_status.go`) — это **свободная функция, не метод `Client`**. Чистый DB-гейт, блокирующий продвижение FSM, если у товара есть `FAILED` он-чейн-событие на нужном этапе:
+**`ledger.CheckChainStatus`** (`chain_status.go`) — это **свободная функция, не метод `Client`**. Чистый DB-гейт, блокирующий продвижение FSM, если у товара есть `FAILED` он-чейн-действие на нужном этапе:
 
 ```go
 func CheckChainStatus(ctx context.Context, q RowQuerier, productIDs []uuid.UUID, aggregateType string) error
 ```
 
-Один `SELECT EXISTS(...)` join `public.onchain_events` ⋈ `public.outbox_events` по `event_id`, фильтр `ob.aggregate_id = ANY($1)`, `ob.aggregate_type = $2`, `oe.status = 'FAILED'`. Возвращает `ErrChainEventRejected`, если найдена хоть одна `FAILED`-строка; `nil` иначе (включая случай «события ещё нет» — отсутствие = ещё не зеркалировано = пропуск). Пустой `productIDs` → сразу `nil`.
+Один `SELECT EXISTS(...)` join `public.warehouse_actions` ⋈ `public.onchain_events` по `wa.action_id = oe.event_id`, фильтр `wa.item_ids && $1::uuid[]`, `wa.action_type = $2` (номер из `actionTypeByAggregate`), `oe.status = 'FAILED'`. Возвращает `ErrChainEventRejected`, если найдена хоть одна `FAILED`-строка; `nil` иначе (включая случай «действия ещё нет» — отсутствие = ещё не зеркалировано = пропуск). Пустой `productIDs` → сразу `nil`.
 
-Константы aggregate-типов (**единственный источник истины** для гейта):
+**`ledger.UnconfirmedProducts`** — обратный гейт для отгрузки: возвращает товары, у которых нет `COMMITTED` действия нужного этапа (используется shipping — `409 PICKING_NOT_CONFIRMED`).
+
+Константы этапов (**единственный источник истины** для обоих гейтов):
 
 ```go
 const (
@@ -198,9 +204,10 @@ const (
     AggregateShipping  = "shipping"
 )
 var ErrChainEventRejected = errors.New("CHAIN_EVENT_REJECTED")
+// actionTypeByAggregate: receiving→1, putaway→2, picking→3, shipping→4
 ```
 
-> [!WARNING] aggregate_type сборки/пикинга — `"picking"`, не `"assembly"`. Использование `"assembly"` молча сломает гейт и роутинг адаптера.
+> [!WARNING] Ключ этапа сборки/пикинга — `"picking"`, не `"assembly"`. Использование `"assembly"` даст `action_type = 0` — гейт молча пропустит всё.
 
 ### 2.6 `config` — все переменные окружения
 
@@ -352,15 +359,19 @@ type UserRepository interface {
 
 | Эндпоинт | Гейт в хендлере | Допустимые роли |
 |----------|-----------------|-----------------|
-| `POST /receiving/**` (все 10) | `RequireOperator` | `OPERATOR` |
-| `POST /putaway/**` (все 3) | `RequireOperator` | `OPERATOR` |
+| `POST /receiving/**` (все 11) | `RequireOperator` | `OPERATOR` |
+| `POST /putaway/**` (все 4) | `RequireOperator` | `OPERATOR` |
 | `POST /assembly/allocate` | **`RequireAdminOrOperator`** | `ADMIN`, `OPERATOR` |
 | `GET /assembly/tasks` | `RequireOperator` | `OPERATOR` |
 | `POST /assembly/pick` | `RequireOperator` | `OPERATOR` |
-| `POST /assembly/scan-shipping-buffer` | `RequireOperator` | `OPERATOR` |
-| `POST /shipping/**` (все 3) | `RequireOperator` | `OPERATOR` |
+| `POST /assembly/scan-shipping-buffer/{draft,submit}` | `RequireOperator` | `OPERATOR` |
+| `POST /shipping/**` (все 4) | `RequireOperator` | `OPERATOR` |
 | `GET|POST /dispatches/**` (все 3) | `RequireOperator` | `OPERATOR` |
 | `GET /destinations` | `RequireOperator` | `OPERATOR` |
+| `GET /signed-actions/operations/{id}` | `RequireAdminOrOperator` | `ADMIN`, `OPERATOR` |
+| `GET /passkeys/me`, `POST /passkeys/registration/*` | `RequireAdminOrOperator` | `ADMIN`, `OPERATOR` |
+| `GET /passkeys/organization*`, `POST /passkeys/actions/*` | **`RequireAdmin`** | `ADMIN` |
+| `GET /audit/*` | `RequireAuditorOrAdmin` | `AUDITOR`, `ADMIN` |
 | `POST /auth/register` | — (проверка ADMIN внутри сервиса) | `ADMIN` |
 
 > [!NOTE] Единственное исключение из «OPERATOR-only» среди бизнес-эндпоинтов — `POST /assembly/allocate` (`RequireAdminOrOperator`). Это сознательное изменение ветки `refactor/issue-39-admin-operator-access` (MR #39): админ-координация без отдельного operator-аккаунта.
@@ -416,8 +427,8 @@ type UserRepository interface {
 | `RECEIVED` | `STORED` | putaway — `UpdateProductStorage` (ставит `bin_id` + статус) |
 | `STORED` | `ALLOCATED` | assembly — `Allocate` (ставит `order_id` + статус) |
 | `ALLOCATED` | `ASSEMBLED` | assembly — `Pick`; предусловие: `CheckChainStatus(AggregatePutaway)` не FAILED |
-| `ASSEMBLED` | `READY_TO_SHIP` | assembly — `ScanShippingBuffer` / `MoveOperatorAssembledToBuffer` |
-| `READY_TO_SHIP` | `SHIPPED` | shipping — `Ship` / `BatchUpdateProductsShipped` |
+| `ASSEMBLED` | `READY_TO_SHIP` | assembly — `SubmitUnloadToShippingBuffer` / `MoveProductsToShippingBuffer` (подписанный Pick) |
+| `READY_TO_SHIP` | `SHIPPED` | shipping — `SubmitShip` / `BatchUpdateProductsShipped` (подписанный Ship) |
 
 #### `OrderStatus` (typed, `order_status.go`) — DB-enum `wms_inventory.order_status`
 
@@ -484,23 +495,26 @@ type UserRepository interface {
 
 > [!WARNING] Для этих трёх статусов нет typed-enum в Go и нет CHECK-констрейнта на уровне domain — OpenAPI/документация должны описывать их как закрытый строковый enum вручную.
 
-#### `OutboxEvent.AggregateType` / `EventType` — роутинг в ledger
+#### Строка `outbox_events` подписанного действия
 
-`AggregateID` всегда = `product_id`. `AggregateType` — единственный источник истины — константы в `ledger/chain_status.go` (§ 2.5):
+Событий на товар больше нет: одна строка = одна **часть подписанного действия**. Её пишет `signedops.WriteActions` (или `passkeys.SubmitKeyAction` для ключевых действий) — единственные два INSERT'а в `public.outbox_events`:
 
-| Этап | aggregate_type | event_type | Кто пишет |
-|------|----------------|------------|-----------|
-| receiving | `receiving` | `wms.receiving.v1` | `receiving/repository.go` (CloseCargoplace) |
-| putaway | `putaway` | `wms.putaway.v1` | `putaway/repository.go` (ScanStorageBin) |
-| assembly/pick | `picking` | `wms.picking.v1` | `assembly/repository.go` (Pick) |
-| shipping | `shipping` | `wms.shipping.v1` | `shipping/repository.go` (Ship) |
+| Колонка | Значение |
+|---------|----------|
+| `event_id` / `aggregate_id` | `warehouse_actions.action_id` (для ключевых — `key_actions.action_id`) |
+| `aggregate_type` | всегда `signed_action` |
+| `event_type` | всегда `wms.action.v1` |
+| `payload_hash` | challenge (hex) |
+| `payload` (jsonb) | подписанный конверт действия (ADR-0001 §9) |
+
+Этап и тип действия определяются по `warehouse_actions.action_type` (1 Receive, 2 PutAway, 3 Pick, 4 Ship) или `key_actions.action_type` (5/6). Константы этапов в `ledger/chain_status.go` (§ 2.5) теперь ключи для `actionTypeByAggregate`, а не значения `aggregate_type`. `domain.OutboxEvent` — старый DTO без `payload`, в коде не используется.
 
 ### 4.3 Прочие domain-инварианты
 
 - **`User.PasswordHash` НЕ имеет `json:"-"`** (`json:"password_hash"`). Маршалинг `User` напрямую утечёт хеш — каждый хендлер обязан проецировать в DTO без этого поля (что auth и делает через `registerResponse`).
-- `Putaway`/`Shipping` domain-структуры **не содержат** колонок `onchain_status`/`payload_hash` (они в БД есть, но управляются анонимными inline-структурами в репозитории).
+- `Putaway`/`Shipping` domain-структуры **не содержат** колонок `onchain_status`/`payload_hash`; самих колонок `onchain_status` в `wms_ops` больше нет (удалены миграцией 0008), статус выводится из `onchain_events` по `action_id`.
 - `EvmAddress.OnchainRole` — `text` без enum; структура вообще не используется вне пакета domain.
-- DB-enum без Go-типа: `public.onchain_event_status` (`PENDING/SENT/COMMITTED/FAILED`), `wms_ops.operation_onchain_status` (`PENDING_ONCHAIN/ONCHAIN_COMMITTED`) — живут внутри `ledger` и репозиториев putaway/shipping.
+- DB-enum без Go-типа: `public.onchain_event_status` (`PENDING/SENT/COMMITTED/FAILED`) — живёт внутри `ledger`; `wms_ops.operation_onchain_status` удалён миграцией 0008.
 
 ---
 
@@ -519,7 +533,7 @@ type UserRepository interface {
 
 ### 5.1 `receiving` — приёмка (этапы 1–2)
 
-**Назначение:** двухфазная приёмка. Фаза «gate»: идентификация поставки по TTN и физический пересчёт грузомест на КПП. Фаза «table»: распаковка на столе — коробки, скан штрихкодов + QR, перенос в буфер, закрытие грузоместа (атомарно пишет outbox-события). Бизнес-flow: [flows/receiving-gate-flow.md](../flows/receiving-gate-flow.md), [flows/receiving-table-flow.md](../flows/receiving-table-flow.md).
+**Назначение:** двухфазная приёмка. Фаза «gate»: идентификация поставки по TTN и физический пересчёт грузомест на КПП. Фаза «table»: распаковка на столе — коробки, скан штрихкодов + QR, перенос в буфер, закрытие грузоместа подписанным Receive-действием (`draft → passkey → submit`). Бизнес-flow: [flows/receiving-gate-flow.md](../flows/receiving-gate-flow.md), [flows/receiving-table-flow.md](../flows/receiving-table-flow.md).
 
 **Request-DTO (verbatim, `handler.go`, неэкспортируемые).** Все UUID-поля приходят `string`, парсятся `uuid.Parse` в хендлере.
 
@@ -542,7 +556,9 @@ type UserRepository interface {
 | `closeBoxRequest` (table/close-box) | `BoxID` | `box_id` | `string` (UUID) |
 | `scanBufferRequest` (table/scan-buffer) | `CargoplaceID` | `cargoplace_id` | `string` (UUID) |
 | | `BufferBinID` | `buffer_bin_id` | `string` (UUID) |
-| `closeCargoplaceRequest` (table/close-cargoplace) | `CargoplaceID` | `cargoplace_id` | `string` (UUID) |
+| `closeCargoplaceDraftRequest` (table/close-cargoplace/draft) | `CargoplaceID` | `cargoplace_id` | `string` (UUID) |
+
+Тело `table/close-cargoplace/submit` — общая структура `signedops.SubmitRequest` (не локальная копия): `OperationID operation_id string`, `Assertions assertions []{ActionID action_id string, signedaction.AssertionRequest}`; `AssertionRequest` — `CredentialID credential_id`, `AuthenticatorData authenticator_data`, `ClientDataJSON client_data_json`, `Signature signature`, все четыре поля в base64url без паддинга.
 
 **Response-DTO (verbatim, `types.go`, экспортируемые):**
 
@@ -611,9 +627,10 @@ type UserRepository interface {
 | Поле | JSON-тег | Go-тип |
 |------|----------|--------|
 | `CargoplaceID` | `cargoplace_id` | `uuid.UUID` |
+| `OperationID` | `operation_id` | `uuid.UUID` |
 | `Status` | `status` | `string` |
 | `Summary` | `summary` | `CloseCargoplaceSummary` |
-| `OutboxEventsCreated` | `outbox_events_created` | `int` |
+| `OutboxEventsCreated` | `outbox_events_created` | `int` (число частей-действий, не товаров) |
 
 `CloseCargoplaceSummary`: `ProductsReceived products_received int`, `ProductsExpected products_expected int`, `Shortage shortage int`, `ShortageBySKU shortage_by_sku []ShortageBySKU`. `ShortageBySKU`: `SKUName sku_name string`, `Expected expected int`, `Received received int`, `Shortage shortage int`.
 
@@ -630,7 +647,14 @@ type UserRepository interface {
 | `ScanQR(ctx, operatorID, cargoplaceID, boxID, skuID, qrCode) (*ScanQRResult, error)` | Вставка `Product` со статусом `RECEIVED` и уникальным QR; лог `SCAN_QR`. Дубль QR → `ErrQRAlreadyExists`. |
 | `CloseBox(ctx, operatorID, boxID) (*CloseBoxResult, error)` | `OPEN`→`CLOSED`; проверка что родитель ещё `TABLE_IN_PROGRESS`. |
 | `ScanBuffer(ctx, operatorID, cargoplaceID, bufferBinID) (*ScanBufferResult, error)` | Перенос всех `RECEIVED` товаров из `CLOSED` коробок в буфер (`section=BUFFER`, case-insensitive). |
-| `CloseCargoplace(ctx, operatorID, cargoplaceID) (*CloseCargoplaceResult, error)` | Делегирует `repo.CloseCargoplaceWithOutbox`; строит summary недостач. |
+| `CloseCargoplace` | удалён: вместо него `DraftCloseCargoplace` и `SubmitCloseCargoplace` (см. ниже). |
+
+**Подписанное закрытие грузоместа** (`close_signed.go`) — двухшаговый поток вместо удалённого `CloseCargoplace`:
+
+| Сигнатура | Поведение |
+|-----------|-----------|
+| `DraftCloseCargoplace(ctx, operatorID, cargoplaceID) (*signedops.Operation, rpID string, error)` | Guard статуса `TABLE_IN_PROGRESS`, `ListClosableProductIDs` → `signedops.NewOperation(TypeReceive, …)`: товары сортируются по `itemId` и режутся на части ≤ `signedops.MaxItemsPerAction` (2000), у каждой — свой `action_id`, соль и challenge; `occurredAt` обрезан до миллисекунд. Пишет только `warehouse_actions`. |
+| `SubmitCloseCargoplace(ctx, operatorID, operationID, assertions) (*CloseCargoplaceResult, error)` | Загружает операцию, проверяет владельца и `TypeReceive`, `submitted_at IS NULL`, активный ключ-подписант; `signedops.Envelopes` верифицирует WebAuthn каждой части (type, challenge, origin, rpIdHash, UP/UV, low-s). Затем `CloseCargoplaceWithOutbox` в одной транзакции: lock грузоместа → сверка состава товаров с подписанным (`DRAFT_STALE`) → lock ключа `FOR SHARE` → `TABLE_CLOSED` → лог `CLOSE_CARGO` (с `operation_id`) → по строке `outbox_events` на каждую часть. |
 
 **Интерфейс `receivingRepository`** (`service.go`) — полный список сигнатур:
 
@@ -661,6 +685,7 @@ type receivingRepository interface {
     GetBinByID(ctx context.Context, binID uuid.UUID) (*domain.Bin, error)
     ScanBufferWithLog(ctx context.Context, cargoplaceID uuid.UUID, bufferBinID uuid.UUID, logParams *TableLogParams) (int, error)
     CloseCargoplaceWithOutbox(ctx context.Context, params *CloseCargoplaceParams) (*CloseCargoplaceTxResult, error)
+    ListClosableProductIDs(ctx context.Context, cargoplaceID uuid.UUID) ([]uuid.UUID, error)
     CountProductsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
     CountExpectedItemsByCargoplace(ctx context.Context, cargoplaceID uuid.UUID) (int, error)
     InsertReceivingGateLog(ctx context.Context, params *GateLogParams) error
@@ -689,13 +714,14 @@ func (r *Repository) CloseCargoplaceWithOutbox(ctx, params *CloseCargoplaceParam
 | `/receiving/table/scan-qr` | регистрация product + QR | — |
 | `/receiving/table/close-box` | закрытие коробки | — |
 | `/receiving/table/scan-buffer` | перенос в буфер | — |
-| `/receiving/table/close-cargoplace` | финализация грузоместа | **`receiving` / `wms.receiving.v1`** (1 событие на product) |
+| `/receiving/table/close-cargoplace/draft` | черновик Receive-действия (части с `challenge`) | пишет `warehouse_actions` |
+| `/receiving/table/close-cargoplace/submit` | подписи частей → финализация грузоместа | **`signed_action` / `wms.action.v1`**, 1 строка на часть (event_id = action_id) |
 
-**Outbox:** только `close-cargoplace`. Идемпотентность — через status-guard на `cargoplaces` (повторный вызов → `CARGOPLACE_NOT_IN_PROGRESS` до любого INSERT в outbox). Уникального констрейнта на `(aggregate_id, payload_hash)` нет.
+**Outbox:** пишется только на подписанном пути. INSERT в `public.outbox_events` есть ровно в двух местах: `wms/internal/signedops/repository.go` (`WriteActions` — все четыре складских `/submit`) и `wms/internal/passkeys/actions_repository.go` (`SubmitKeyAction`). Событий на товар больше нет. Идемпотентность — через status-guard на `cargoplaces` (повторный вызов → `CARGOPLACE_NOT_IN_PROGRESS` до любого INSERT в outbox) и `submitted_at` операции (`OPERATION_ALREADY_SUBMITTED`, 409). Уникального констрейнта на `(aggregate_id, payload_hash)` нет.
 
 ### 5.2 `putaway` — раскладка (этап 3)
 
-**Назначение:** перенос товаров из буфера в постоянную ячейку хранения; на финальном шаге `RECEIVED`→`STORED` + outbox. Business-flow: [flows/putaway-flow.md](../flows/putaway-flow.md).
+**Назначение:** перенос товаров из буфера в постоянную ячейку хранения; на финальном шаге `RECEIVED`→`STORED` подписанным PutAway-действием (`draft → passkey → submit`). Business-flow: [flows/putaway-flow.md](../flows/putaway-flow.md).
 
 **DTO (verbatim, `handler.go`, экспортируемые).** Все ID — строки UUID (в DTO нет `uuid.UUID`).
 
@@ -724,16 +750,17 @@ func (r *Repository) CloseCargoplaceWithOutbox(ctx, params *CloseCargoplaceParam
 | | `QRCode` | `qr_code` | `string` |
 | | `CartSize` | `cart_size` | `int` (DB-derived) |
 
-`ScanStorageBinRequest` → `ScanStorageBinResponse`:
+`placeDraftRequest` → `ScanStorageBinResponse` (`place_signed_handler.go`):
 
 | DTO | Поле | JSON-тег | Go-тип |
 |-----|------|----------|--------|
-| `ScanStorageBinRequest` | `ProductIDs` | `product_ids` | `[]string` (1..200) |
+| `placeDraftRequest` (scan-storage-bin/draft) | `ProductIDs` | `product_ids` | `[]string` (1..200) |
 | | `StorageBinID` | `storage_bin_id` | `string` |
-| `ScanStorageBinResponse` | `StorageBinID` | `storage_bin_id` | `string` |
+| `ScanStorageBinResponse` (submit) | `StorageBinID` | `storage_bin_id` | `string` |
 | | `StorageBinCode` | `storage_bin_code` | `string` |
 | | `ProductsPlaced` | `products_placed` | `int` |
-| | `OutboxEventsCreated` | `outbox_events_created` | `int` |
+| | `OutboxEventsCreated` | `outbox_events_created` | `int` (число частей, не товаров) |
+| | `OperationID` | `operation_id` | `string` |
 
 **Интерфейс `putawayRepository`** (`service.go`):
 
@@ -748,13 +775,15 @@ type putawayRepository interface {
     GetSKUByProductID(ctx context.Context, productID uuid.UUID) (*domain.SKU, error)
     UpdateProductStorage(ctx context.Context, productID, binID uuid.UUID) error
     InsertPutaway(ctx context.Context, params *InsertPutawayParams) error
-    InsertOutboxEvents(ctx context.Context, params *OutboxEventsParams) error
+    LockOperation(ctx context.Context, operationID, createdBy uuid.UUID) (*signedops.Operation, error)
+    LockSigner(ctx context.Context, credentialID []byte) error
+    WriteActions(ctx context.Context, op *signedops.Operation, payloads [][]byte) error
     CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error
     CountReceivedInBuffer(ctx context.Context, bufferBinID uuid.UUID) (int, error)
 }
 ```
 
-Sentinel-ошибки (`errors.go`) → HTTP: `ErrBufferBinNotFound`/`ErrStorageBinNotFound`/`ErrProductNotFound` → 404; `ErrProductNotInBuffer`/`ErrProductNotReceived` → 409; `ErrInvalidInput` → 400; `ledger.ErrChainEventRejected` → 409.
+Sentinel-ошибки (`errors.go`) → HTTP: `ErrBufferBinNotFound`/`ErrStorageBinNotFound`/`ErrProductNotFound` → 404; `ErrProductNotInBuffer`/`ErrProductNotReceived`/`ErrDraftStale` → 409; `ErrInvalidInput` → 400; `ledger.ErrChainEventRejected` → 409; `passkeys.ErrSignerKeyNotActive` → 409 `SIGNER_KEY_NOT_ACTIVE`.
 
 **Методы Service:**
 
@@ -762,9 +791,10 @@ Sentinel-ошибки (`errors.go`) → HTTP: `ErrBufferBinNotFound`/`ErrStorage
 |-----------|-----------|
 | `GetBufferProducts(ctx, operatorID, bufferBinID) (*ScanBufferResponse, error)` | Read-only: список `RECEIVED` товаров в буфере (`section=BUFFER`). |
 | `AddToPutawayCart(ctx, operatorID, productID, bufferBinID) (*ScanProductResponse, error)` | Read-only валидация product; `CartSize` — DB-derived `CountReceivedInBuffer` (не in-memory корзина). |
-| `PlaceProductsToStorageBin(ctx, operatorID, productIDs, storageBinID) (*ScanStorageBinResponse, error)` | Единственный мутирующий метод (см. эндпоинт). |
+| `DraftPlaceToStorageBin(ctx, operatorID, productIDs, storageBinID) (*signedops.Operation, rpID string, error)` | Единственный мутирующий путь — шаг 1: chain-gate, `signedops.NewOperation(TypePutAway, …)` с частями ≤ 2000, запись `warehouse_actions`. |
+| `SubmitPlaceToStorageBin(ctx, operatorID, operationID, assertions) (*ScanStorageBinResponse, error)` | Шаг 2: проверка всех assertion, повторный chain-gate на подписанном наборе, затем транзакция и запись outbox. |
 
-**Гейт chain-status:** перед транзакцией `repo.CheckChainStatus(ctx, productIDs, AggregateReceiving)` — если у товара `FAILED` receiving-событие → `ErrChainEventRejected` (409), без мутаций.
+**Гейт chain-status:** в обоих шагах `repo.CheckChainStatus(ctx, productIDs, AggregateReceiving)` — если у товара `FAILED` receiving-действие → `ErrChainEventRejected` (409), без мутаций.
 
 **Эндпоинты** (все `POST`, JWT + `RequireOperator`):
 
@@ -772,13 +802,14 @@ Sentinel-ошибки (`errors.go`) → HTTP: `ErrBufferBinNotFound`/`ErrStorage
 |---------|--------|
 | `/putaway/scan-buffer` | — (read-only) |
 | `/putaway/scan-product` | — (read-only) |
-| `/putaway/scan-storage-bin` | **`putaway` / `wms.putaway.v1`** (1 на product). Лимит `product_ids` — `maxProductIDsPerRequest = 200`. |
+| `/putaway/scan-storage-bin/draft` | — (пишет `warehouse_actions`); лимит `product_ids` — `maxProductIDsPerRequest = 200` |
+| `/putaway/scan-storage-bin/submit` | **`signed_action` / `wms.action.v1`**, 1 строка на часть (event_id = action_id) |
 
-В транзакции `scan-storage-bin`: per-product `FOR UPDATE` → проверка `BUFFER` (с дедупликацией через `verifiedBuffers`) → `UpdateProductStorage` (`STORED`) → `InsertPutaway` (`wms_ops.putaways`) → bulk `InsertOutboxEvents`. `event_id` общий между `putaways` и `outbox_events` (корреляция). `storage_bin_id` не должен быть `BUFFER`/`SHIPPING_BUFFER` и обязан иметь `volume > 0`.
+В транзакции `scan-storage-bin/submit`: блокировка товаров `FOR UPDATE` по возрастанию `product_id` → проверка буфера и статуса `RECEIVED` (иначе `DRAFT_STALE`) → `LockOperation`/`LockSigner` → `UpdateProductStorage` (`STORED`) → `InsertPutaway` (`wms_ops.putaways`, у строки — `action_id` своей части) → `WriteActions` (bulk outbox). `storage_bin_id` не должен быть `BUFFER`/`SHIPPING_BUFFER` и обязан иметь `volume > 0`.
 
 ### 5.3 `assembly` — аллокация и сборка (этап 4)
 
-**Назначение:** аллокация склада на заказы, выдача pick-листа, фиксация пика (с outbox), перенос в shipping-buffer. Business-flow: [flows/assembly-flow.md](../flows/assembly-flow.md).
+**Назначение:** аллокация склада на заказы, выдача pick-листа, фиксация пика (без outbox), выгрузка корзины в shipping-buffer подписанным Pick-действием. Business-flow: [flows/assembly-flow.md](../flows/assembly-flow.md).
 
 **DTO (verbatim, `types.go`, экспортируемые).** Все ID — строки UUID.
 
@@ -840,13 +871,16 @@ GetTasks(ctx, destinationID, operatorID uuid.UUID, status string) ([]TaskItem, e
 CheckChainStatus(ctx, productIDs []uuid.UUID, aggregateType string) error  // делегат ledger.CheckChainStatus
 MarkTaskDone(ctx, eventID, operatorID uuid.UUID) error    // WHERE status='PENDING'
 SetProductAssembled(ctx, productID uuid.UUID) error
-InsertPickOutboxEvent(ctx, productID, eventID uuid.UUID) error  // event_id = task.EventID (переиспользуется)
+InsertPickOutboxEvent — удалён; в `assembly/pick` outbox не пишется
 CountAssembledByOperator(ctx, operatorID uuid.UUID) (int, error)  // COUNT(DISTINCT product_id)
-MoveOperatorAssembledToBuffer(ctx, operatorID, bufferBinID, destinationID uuid.UUID) (productIDs, orderIDs []uuid.UUID, err error)
-UpdateOrdersToAssembled(ctx, ...) (int, error)
+ListOperatorBasket(ctx, operatorID, destinationID uuid.UUID) ([]BasketItem, error)  // read-only корзина для черновика
+LockOperatorBasket(ctx, operatorID, destinationID uuid.UUID) ([]BasketItem, error)  // FOR UPDATE в submit
+MoveProductsToShippingBuffer(ctx, productIDs []uuid.UUID, bufferBinID uuid.UUID) error
+StampTaskUnload(ctx, actionID uuid.UUID, productIDs []uuid.UUID, operatorID, destinationID uuid.UUID, occurredAt time.Time) error  // action_id + unloaded_at
+LockOperation / LockSigner / WriteActions  // подписанная операция и outbox
 ```
 
-Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrInsufficientStock`, `ErrSKUNotFound`, `ErrOrderNotNew`, `ErrNoTaskForProduct`, `ErrProductNotAllocated`, `ErrInvalidInput`, `ErrBinNotShippingBuffer`, `ErrCartEmpty`, `ErrDestinationMismatch`.
+Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrInsufficientStock`, `ErrSKUNotFound`, `ErrOrderNotNew`, `ErrNoTaskForProduct`, `ErrProductNotAllocated`, `ErrInvalidInput`, `ErrBinNotShippingBuffer`, `ErrCartEmpty`, `ErrDestinationMismatch`, `ErrDraftStale`.
 
 **Методы Service:**
 
@@ -854,8 +888,9 @@ Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrInsufficientS
 |-----------|-----------|
 | `Allocate(ctx, destinationID) (*AllocateResponse, error)` | Транзакция: `NEW`-заказы destination `FOR UPDATE`; per-order `FOR UPDATE SKIP LOCKED` FIFO по `STORED`; нехватка → заказ в `InsufficientOrders`; иначе products→`ALLOCATED`, batch-insert `assembly_tasks` (`PENDING`), order→`ALLOCATED`. Частичная аллокация — НЕ ошибка. **Outbox не пишется.** |
 | `GetTasks(ctx, destinationID, operatorID, status) (*TaskResponse, error)` | Read-only. `operatorID=Nil` → без фильтра по оператору. Default `status=PENDING`. |
-| `Pick(ctx, operatorID, productID) (*PickResponse, error)` | Pre-check `CheckChainStatus(AggregatePutaway)` (вне транзакции). Транзакция: lock task+product, product должен быть `ALLOCATED`, task→`DONE` (+`operator_id`), product→`ASSEMBLED`, **insert outbox**. После commit — `CountAssembledByOperator` для `cart_size`. |
-| `ScanShippingBuffer(ctx, operatorID, bufferBinID) (*ScanShippingBufferResponse, error)` | Транзакция: bin `section=SHIPPING_BUFFER` + есть `destination_id`; `MoveOperatorAssembledToBuffer` (атомарный UPDATE...RETURNING, предикат `task.destination_id = bin.destination_id`) → `READY_TO_SHIP`. Если подвинуто 0 строк → `CountAssembledByOperator`: у оператора есть ASSEMBLED-товары (для другого магазина) → `ErrDestinationMismatch` (отсканирован чужой буфер, защита от mis-delivery), иначе → `ErrCartEmpty`. Затем `UpdateOrdersToAssembled`. |
+| `Pick(ctx, operatorID, productID) (*PickResponse, error)` | Pre-check `CheckChainStatus(AggregatePutaway)` (вне транзакции). Транзакция: lock task+product, product должен быть `ALLOCATED`, task→`DONE` (+`operator_id`), product→`ASSEMBLED`. **Outbox НЕ пишется** (#14). После commit — `CountAssembledByOperator` для `cart_size`. |
+| `DraftUnloadToShippingBuffer(ctx, operatorID, bufferBinID) (*signedops.Operation, rpID string, error)` | Читает корзину (`ListOperatorBasket`), режет на части ≤ 2000, пишет `warehouse_actions` (`TypePick`). Никаких изменений товаров. |
+| `SubmitUnloadToShippingBuffer(ctx, operatorID, operationID, assertions) (*ScanShippingBufferResponse, error)` | Проверяет все assertion, затем транзакция: lock корзины и операции (состав должен совпасть с подписанным — иначе `DRAFT_STALE`), `MoveProductsToShippingBuffer` → `READY_TO_SHIP`, `StampTaskUnload` (по частям), `UpdateOrdersToAssembled`, `WriteActions` (outbox). |
 
 **Эндпоинты:**
 
@@ -863,10 +898,11 @@ Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrInsufficientS
 |---------|-------|------|--------|
 | `/assembly/allocate` | `POST` | **`RequireAdminOrOperator`** | — |
 | `/assembly/tasks` | `GET` | `RequireOperator` | — (read-only). Query: `destination_id` (req UUID), `operator_id` (opt), `status` (opt) |
-| `/assembly/pick` | `POST` | `RequireOperator` | **`picking` / `wms.picking.v1`** |
-| `/assembly/scan-shipping-buffer` | `POST` | `RequireOperator` | — |
+| `/assembly/pick` | `POST` | `RequireOperator` | — |
+| `/assembly/scan-shipping-buffer/draft` | `POST` | `RequireOperator` | — (пишет `warehouse_actions`) |
+| `/assembly/scan-shipping-buffer/submit` | `POST` | `RequireOperator` | **`signed_action` / `wms.action.v1`**, 1 строка на часть |
 
-> [!NOTE] Outbox-событие пика **переиспользует `task.EventID`** (созданный на Allocate), а не новый `uuid.New()` — `outbox_events.event_id == assembly_tasks.event_id`, он-чейн-событие пика прямо трассируется к строке задачи. В `GetTasks` `operatorID` из JWT извлекается и **сразу игнорируется** (`_ = operatorID`); фильтрация — только по query-параметру `operator_id`, и она нестрогая: `operator_id IS NULL OR operator_id = $3`.
+> [!NOTE] В `GetTasks` `operatorID` из JWT извлекается и **сразу игнорируется** (`_ = operatorID`); фильтрация — только по query-параметру `operator_id`, и она нестрогая: `operator_id IS NULL OR operator_id = $3`. Подбор с полки в цепь не пишет — Pick-действие создаётся только при выгрузке корзины в буфер.
 
 ### 5.4 `shipping` — отгрузка (этап 5)
 
@@ -914,6 +950,7 @@ Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrInsufficientS
 | `OrdersPartiallyShipped` | `orders_partially_shipped` | `int` |
 | `DispatchDeparted` | `dispatch_departed` | `bool` |
 | `BufferRemaining` | `buffer_remaining` | `int` |
+| `OperationID` | `operation_id` | `string` |
 
 **Интерфейс `shippingRepository`** (`service.go`) — сигнатуры:
 
@@ -925,16 +962,17 @@ ListReadyToShipProductsByBin(ctx, binID uuid.UUID) ([]ReadyToShipProduct, error)
 GetDispatchByCode(ctx, code string) (*DispatchRecord, error)
 GetDispatchForUpdate(ctx, dispatchID uuid.UUID) (*DispatchRecord, error)         // FOR UPDATE OF d
 UpdateDispatchToAtGate(ctx, dispatchCode string) (*DispatchRecord, error)        // WHERE status='SCHEDULED'
-SelectProductsForShip(ctx, binID uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error)  // FOR UPDATE
+ListProductsForShip / LockProductsForShip(ctx, binID uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error)
+UnconfirmedProducts(ctx, productIDs []uuid.UUID, aggregate string) ([]uuid.UUID, error)  // гейт PICKING_NOT_CONFIRMED
 BatchUpdateProductsShipped(ctx, productIDs []uuid.UUID) error
-BatchInsertShippings(ctx, events []shippingEvent, dispatchID, operatorID uuid.UUID) error
-BatchInsertShippingOutbox(ctx, events []shippingEvent, dispatchID uuid.UUID) (int, error)
+BatchInsertShippings(ctx, events []shippingEvent, dispatchID, operatorID uuid.UUID, occurredAt time.Time, actionID uuid.UUID) error
 UpdateOrdersShippedConditional(ctx, orderIDs []uuid.UUID) (completed, partial int, err error)  // two-statement FOR UPDATE
 CountReadyToShipProductsInBuffer(ctx, binID uuid.UUID) (int, error)              // по всей зоне destination, выведенной из bin
 UpdateDispatchDeparted(ctx, dispatchID uuid.UUID) error                         // WHERE status='AT_GATE'
+LockOperation / LockSigner / WriteActions                                        // подписанная операция и outbox
 ```
 
-Sentinel-ошибки (`errors.go`): `ErrInvalidInput`, `ErrBinNotFound`, `ErrBinNotShippingBuffer`, `ErrDispatchNotFound`, `ErrDispatchAlreadyDeparted`, `ErrDispatchCancelled`, `ErrDestinationMismatch`, `ErrDispatchNotAtGate`, `ErrBufferEmpty`, `ErrProductNotInBuffer`.
+Sentinel-ошибки (`errors.go`): `ErrInvalidInput`, `ErrBinNotFound`, `ErrBinNotShippingBuffer`, `ErrDispatchNotFound`, `ErrDispatchAlreadyDeparted`, `ErrDispatchCancelled`, `ErrDestinationMismatch`, `ErrDispatchNotAtGate`, `ErrBufferEmpty`, `ErrProductNotInBuffer`, `ErrDraftStale`, `ErrPickingNotConfirmed` (несёт `PickingNotConfirmedError`, число товаров уходит в `message`).
 
 **Методы Service:**
 
@@ -942,7 +980,8 @@ Sentinel-ошибки (`errors.go`): `ErrInvalidInput`, `ErrBinNotFound`, `ErrBi
 |-----------|-----------|
 | `ScanBuffer(ctx, operatorID, bufferBinID) (*ScanBufferResponse, error)` | Read-only: bin `SHIPPING_BUFFER` + destination; список `READY_TO_SHIP`. |
 | `ScanDriver(ctx, operatorID, dispatchCode) (*ScanDriverResponse, error)` | Условный `UPDATE ... status='AT_GATE' WHERE status='SCHEDULED'`; при 0 строк — SELECT-фолбэк: `DEPARTED`→`ErrDispatchAlreadyDeparted`, `CANCELLED`→`ErrDispatchCancelled`, `AT_GATE`→идемпотентный успех. |
-| `Ship(ctx, req ShipRequest) (*ShipResponse, error)` | Одна serializable-транзакция, 8 шагов (lock bin → lock dispatch (`AT_GATE`, destination match) → выбор products (bulk если `ProductIDs` пуст, иначе spot с точным совпадением) → `SHIPPED` → `wms_ops.shippings` → **outbox** → `UpdateOrdersShippedConditional` → `CountReadyToShipProductsInBuffer`; если 0 → `UpdateDispatchDeparted`). |
+| `DraftShip(ctx, operatorID, bufferBinID, dispatchID, productIDs) (*signedops.Operation, rpID string, error)` | Bin+dispatch+destination gates, bulk/spot выбор товаров, гейт `UnconfirmedProducts(AggregatePicking)` → `PICKING_NOT_CONFIRMED`; режет на части ≤ 2000 и пишет `warehouse_actions` (`TypeShip`). |
+| `SubmitShip(ctx, operatorID, operationID, assertions) (*ShipResponse, error)` | Проверка assertion + повторный гейт сборки; одна транзакция: lock bin/dispatch (`AT_GATE`, destination match) → lock товаров (состав = подписанный, иначе `DRAFT_STALE`) → `SHIPPED` → `wms_ops.shippings` (с `action_id` части) → заказы → `CountReadyToShipProductsInBuffer`; если 0 → `UpdateDispatchDeparted` → `WriteActions` (outbox по частям). |
 
 **Эндпоинты** (все `POST`, JWT + `RequireOperator`):
 
@@ -950,13 +989,14 @@ Sentinel-ошибки (`errors.go`): `ErrInvalidInput`, `ErrBinNotFound`, `ErrBi
 |---------|--------|
 | `/shipping/scan-buffer` | — (read-only) |
 | `/shipping/scan-driver` | — (пишет `outbound_dispatches.status='AT_GATE'` условно) |
-| `/shipping/ship` | **`shipping` / `wms.shipping.v1`** (1 на product). Лимит `product_ids` = 200. |
+| `/shipping/ship/draft` | — (пишет `warehouse_actions`). Лимит `product_ids` = 200 |
+| `/shipping/ship/submit` | **`signed_action` / `wms.action.v1`**, 1 строка на часть |
 
 > [!WARNING] Особенности shipping:
 > - `CountReadyToShipProductsInBuffer` считает по **всей зоне destination** (всем `SHIPPING_BUFFER`-ячейкам), не по одной ячейке — `dispatch_departed=true` только когда вся зона пуста.
 > - `UpdateOrdersShippedConditional` использует двухстейтментный `SELECT ... FOR UPDATE` + `UPDATE` (избежать READ COMMITTED-аномалии при конкурентных ship).
-> - **Нет chain-status гейта на отгрузке** (в отличие от putaway/pick) — известный пробел; он-чейн `Picked→Shipped` едет асинхронно через outbox.
-> - `aggregate_type='shipping'` в SQL **захардкожен строкой**, а не через `ledger.AggregateShipping` (риск дрейфа при переименовании константы; то же в receiving).
+> - Гейт на `submit` — **обратный**: `UnconfirmedProducts(AggregatePicking)` не даёт отгрузить товар, чьё Pick-действие не `COMMITTED` в цепи (`409 PICKING_NOT_CONFIRMED`). Проверяется дважды — на `draft` и на `submit`.
+> - `aggregate_type` в SQL для строки outbox теперь всегда `'signed_action'`; этапы различаются колонкой `warehouse_actions.action_type`, а не `aggregate_type`.
 
 ### 5.5 `dispatches` — CRUD исходящих рейсов
 
@@ -1041,6 +1081,79 @@ type destinationsRepository interface {
 
 > [!NOTE] Хендлер регистрируется и на `""`, и на `"/"` под `PathPrefix("/destinations").Subrouter()` — `gorilla/mux` не редиректит между `/destinations` и `/destinations/`, поэтому работают оба пути. Пустой результат отдаётся как `{"destinations": []}` (никогда `null`).
 
+### 5.7 `signedaction` + `signedops` — подписанное действие как единица записи
+
+**Назначение:** общая машинерия подписанных складских действий (ADR-0001). `signedaction` — чистая библиотека без БД: `Assertion` и `Verify` (WebAuthn P-256: `type`, challenge, origin, `rpIdHash`, флаги UP/UV, нормализация `s` к нижней половине), `Challenge(...)`, `ReceiveDetailsHash`/`PutAwayDetailsHash`/`PickDetailsHash`/`ShipDetailsHash`, `Envelope` (конверт §9), `ConfirmationState` (`SENT`/`APPLIED`/`REJECTED`/`FAILED`).
+
+`signedops` держит операцию (набор частей-действий) и её персистентность:
+
+```go
+const MaxItemsPerAction = 2000        // ADR-0001 §10
+
+type Part struct { ActionID uuid.UUID; ItemIDs []uuid.UUID; Salt, DetailsHash, Challenge [32]byte }
+type Operation struct { OperationID uuid.UUID; ActionType uint8; CreatedBy uuid.UUID;
+    SignerCredentialID []byte; Details json.RawMessage; Parts []Part; Submitted bool }
+
+func NewOperation(actionType uint8, createdBy uuid.UUID, signer *domain.Passkey, details []byte,
+    items []uuid.UUID, detailsHashFor func(salt [32]byte, partItems []uuid.UUID) [32]byte) (*Operation, error)
+func Envelopes(op *Operation, signer *domain.Passkey, assertions map[uuid.UUID]signedaction.Assertion,
+    rpID string, origins []string) ([][]byte, error)
+```
+
+`NewOperation` сортирует товары по `itemId` и режет их на части по `MaxItemsPerAction`; у каждой части свой `actionId`, соль и challenge.
+
+| Слой | Что внутри |
+|------|-------------|
+| `Repository` | `InsertOperation`, `Operation`, `LockOperation` (все части операции `FOR UPDATE` + `created_by`), `LockSigner` (`passkey_credentials FOR SHARE` + запрет на отозванный ключ), `WriteActions` (по строке outbox на часть + `submitted_at`), `OperationStatus` |
+| HTTP | `NewDraftView` (`DraftView`: `operation_id`, `action_type`, `signer_key_id`, `rp_id`, `allow_credentials`, `user_verification`, `timeout`, `parts[{action_id, item_ids, details_hash, challenge}]`), `SubmitRequest` (`operation_id` + `assertions[{action_id, credential_id, authenticator_data, client_data_json, signature}]`), `WriteError` (sentinel → HTTP) |
+
+| Маршрут | Метод | Гейт | Назначение |
+|---------|-------|------|-----------|
+| `/signed-actions/operations/{operationID}` | `GET` | `RequireAdminOrOperator` | Статус частей операции по данным `onchain_events`: `state` + `reject_reason`. До submit → `409 OPERATION_NOT_SUBMITTED`. |
+
+Sentinels (`errors.go`): `ErrOperationNotFound` → 404; `ErrOperationSubmitted`/`ErrOperationNotSubmitted`/`ErrSignerNotActive` → 409; `ErrInvalidAssertion`/`ErrInvalidRequest` → 400.
+
+### 5.8 `passkeys` — passkey и ключевые действия
+
+**Назначение:** регистрация WebAuthn-ключей пользователей и управление ими в реестре `ConsortiumRegistry` подписанными ключевыми действиями (ADR-0001 §1, §7).
+
+| Слой | Что внутри |
+|------|-------------|
+| `service.go` | `BeginRegistration`/`FinishRegistration` (attestation → `passkey_credentials`, `status=PENDING`), `MyPasskey`, `Organization`, `AdminKeyExport`, `DraftKeyRegister`/`DraftKeyRevoke`, `SubmitKeyAction`, `RejectKey` |
+| `status.go` | `syncStatus` — статус `PENDING`/`ACTIVE` ключа обновляется из цепи при чтении (`GetRegistryKey`): активен — `ACTIVE`, иначе `REVOKED`. Ошибки RPC только логируются |
+| `actions_repository.go` | `InsertKeyAction`, `KeyAction`, `SubmitKeyAction` (одна транзакция: lock действия и целевого ключа → проверка состояния → INSERT outbox (`aggregate_type=signed_action`) → `submitted_at`), `RejectPendingPasskey`, `LatestConfirmations` |
+| `envelope.go` | Конверт ключевого действия (`subjectKey`, без `itemIds` и `detailsHash` — их контракт считает сам) |
+
+Ключевое действие атомарно на одну строку `key_actions` (без частей). `SubmitKeyAction` сериализуется с складскими действиями через блокировку строки ключа (ADR-0001 §7): складское действие берёт её `FOR SHARE`, отзыв — `FOR UPDATE`.
+
+**Эндпоинты** (JWT + гейт):
+
+| Маршрут | Метод | Гейт | Назначение |
+|---------|-------|------|-----------|
+| `/passkeys/registration/begin` | `POST` | `RequireAdminOrOperator` | Опции WebAuthn-регистрации для текущего пользователя |
+| `/passkeys/registration/finish` | `POST` | `RequireAdminOrOperator` | Attestation → `passkey_credentials` в `PENDING`, `201` |
+| `/passkeys/me` | `GET` | `RequireAdminOrOperator` | Свой passkey (с синхронизацией статуса) |
+| `/passkeys/organization` | `GET` | **`RequireAdmin`** | Ключи сотрудников организации + подтверждения в цепи |
+| `/passkeys/organization/admin-key` | `GET` | **`RequireAdmin`** | Публичный ключ админа для `registerAdminKey` |
+| `/passkeys/organization/keys/reject` | `POST` | **`RequireAdmin`** | `PENDING`-регистрацию → `REJECTED` (`{target_key_id}`) |
+| `/passkeys/actions/key-register/draft` | `POST` | **`RequireAdmin`** | Черновик `KeyRegister` (5) для `PENDING`-ключа оператора своей организации |
+| `/passkeys/actions/key-revoke/draft` | `POST` | **`RequireAdmin`** | Черновик `KeyRevoke` (6) для `ACTIVE`-ключа оператора |
+| `/passkeys/actions/{actionID}/submit` | `POST` | **`RequireAdmin`** | Подпись админа → outbox + `submitted_at` |
+
+### 5.9 `audit` — сверка БД ↔ цепь
+
+**Назначение:** доказать, что записи БД и действия в цепи сходятся (ADR-0001 §4, §8). Пересчитывает `detailsHash` из доменных таблиц (а не из копии деталей) и сверяет его с цепью; ловит подмену ячейки/рейса и несовпадение состава товаров.
+
+| Слой | Что внутри |
+|------|-------------|
+| `details_repository.go` | `Action`, `ProductID`, `ActionsForProduct`, `Details` — выборка подписанных действий товара с солью и пересчёт деталей из `wms_ops`/`wms_inventory` |
+| `details.go` | Сборка деталей по типу действия (Receive/PutAway/Pick/Ship) |
+| `chain.go`, `chain_decode.go`, `abi.go` | RPC-клиент и декодирование `ItemMoved`/`ActionApplied` (встроенные ABI-файлы `SignedMappingWMS.abi.json`, `ConsortiumRegistry.abi.json`) |
+| `audit.go`, `audit_compare.go` | Сверка одного действия/товара: `Check` (`OK`/`MISMATCH`/`SKIPPED`), `Status` (`APPLIED`/`REJECTED`/`PENDING`/`MISSING_ON_CHAIN`/`MISSING_IN_DB`), `Finding` (`DETAILS_HASH_MISMATCH`, `ITEMS_MISMATCH`, `SIGNER_MISMATCH`, `BAD_SIGNATURE`, `TYPE_MISMATCH`, …) |
+| `http.go` | `GET /audit/products/{key}` (UUID или QR), гейт `RequireAuditorOrAdmin`; отдаёт **только данные БД и соль**, сверку с цепью делает клиент (страница `/audit`) или CLI |
+
+CLI: `wms/cmd/audit` — `audit [--json] product <uuid|qr>`, `action <uuid>`, `all`; окружение `RPC_URL`, `CONTRACT_ADDR`, `REGISTRY_ADDR`, `DB_*`.
+
 ---
 
 ## 6. Как добавить новый эндпоинт / модуль
@@ -1062,7 +1175,7 @@ type destinationsRepository interface {
 1. Создайте `wms/internal/<module>/` с `handler.go`, `service.go`, `repository.go`, `types.go`, `errors.go` (по образцу `putaway`/`shipping`).
 2. В `service.go` объявите **неэкспортируемый** `<module>Repository` интерфейс (минимум `WithTx` + нужные методы) и `NewService(repo <module>Repository) *Service`.
 3. В `repository.go` реализуйте `*Repository` поверх `*pgxpool.Pool`; `NewRepository(db) *Repository`; `WithTx` по образцу (begin → `fn(&Repository{db:r.db, q:tx})` → commit/rollback).
-4. Если этап пишет в блокчейн — добавьте outbox-INSERT (`aggregate_type` из `ledger`-константы, `event_type` вида `wms.<stage>.v1`, `payload_hash` = SHA-256 канонического JSON). При необходимости — `CheckChainStatus` гейт на предыдущий этап.
+4. Если этап пишет в блокчейн — это **двухшаговый подписанный путь** (ADR-0001): `draft`-метод сервиса собирает `signedops.Operation` (`NewOperation` + `ops.InsertOperation`) и отдаёт `signedops.NewDraftView`; `submit`-метод проверяет `signedops.Envelopes` и внутри `repo.WithTx` зовёт `LockOperation`/`LockSigner`/`WriteActions` (`aggregate_type = signed_action`, `event_type = wms.action.v1`, 1 строка на часть). Событий на товар/этап больше не пишем. При необходимости — `CheckChainStatus`/`UnconfirmedProducts` гейт на соседний этап.
 5. В `cmd/wms/main.go`: соберите `repo → service → handler`, смонтируйте саброутер:
    ```go
    modRouter := r.PathPrefix("/<module>").Subrouter()
@@ -1080,8 +1193,8 @@ type destinationsRepository interface {
 - **Сбой Kafka на старте → `return` из `main()`** (не `log.Fatalf`) — процесс молча исчезает, причина только в логах.
 - **Auth-ответы — plain-text, бизнес-ответы — JSON-конверт.** Клиенты должны обрабатывать обе формы.
 - **`CloseCargoplaceWithOutbox` нельзя оборачивать в `WithTx`** (своя `db.Begin`).
-- **`aggregate_type` константы — источник истины в `ledger`,** но INSERT в receiving/shipping используют строковые литералы (риск дрейфа).
-- **Нет chain-гейта на shipping.** Putaway гейтит на `receiving`, pick — на `putaway`, ship — ни на что.
+- **INSERT в `public.outbox_events` есть только в двух файлах:** `signedops/repository.go` и `passkeys/actions_repository.go` — оба пишут `aggregate_type='signed_action'`, `event_type='wms.action.v1'`, 1 строка на часть-действие.
+- **Гейты цепочки асимметричны:** putaway блокирует `FAILED` приёмки, pick — `FAILED` раскладки, ship — отсутствие `COMMITTED` сборки (`PICKING_NOT_CONFIRMED`); на приёмке гейта нет (товар только создаётся).
 - **`dispatches` — белая ворона** по формату ошибок (503, инвертированные аргументы, 200 вместо 201, обязательный trailing slash, `data:null`).
 - **`User.PasswordHash` без `json:"-"`** — не маршалить `domain.User` напрямую в ответ.
 - **Роль `CUSTOMER` без эндпоинтов** — всегда 403 на складе.

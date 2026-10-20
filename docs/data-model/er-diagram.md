@@ -28,6 +28,25 @@ erDiagram
         timestamptz updated_at
     }
 
+    organizations {
+        uuid org_id PK
+        text name
+        timestamptz created_at
+    }
+
+    passkey_credentials {
+        bytea credential_id PK
+        uuid user_id FK
+        uuid org_id FK
+        bytea qx
+        bytea qy
+        bytea key_id
+        text role
+        text status
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
     warehouses {
         bigserial warehouse_id PK
         text name
@@ -164,6 +183,7 @@ erDiagram
         text aggregate_type
         text event_type
         text payload_hash
+        jsonb payload
         timestamptz created_at
     }
 
@@ -173,9 +193,38 @@ erDiagram
         text aggregate_type
         text tx_hash
         text status
+        smallint reject_reason
         text error_message
         timestamptz created_at
         timestamptz updated_at
+    }
+
+    warehouse_actions {
+        uuid action_id PK
+        uuid operation_id
+        smallint part_index
+        smallint action_type
+        bytea signer_credential_id FK
+        uuid created_by FK
+        uuid_array item_ids
+        bytea salt
+        bytea details_hash
+        bytea challenge
+        jsonb details
+        timestamptz created_at
+        timestamptz submitted_at
+    }
+
+    key_actions {
+        uuid action_id PK
+        uuid org_id FK
+        smallint action_type
+        bytea target_credential_id FK
+        bytea signer_credential_id FK
+        bytea challenge
+        uuid created_by FK
+        timestamptz created_at
+        timestamptz submitted_at
     }
 
     receiving_gate {
@@ -194,6 +243,7 @@ erDiagram
     receiving_table {
         bigserial id PK
         uuid event_id
+        uuid operation_id
         uuid cargoplace_id FK
         uuid box_id FK
         uuid operator_id FK
@@ -214,8 +264,7 @@ erDiagram
         uuid from_bin_id FK
         uuid bin_id FK
         uuid operator_id FK
-        text onchain_status
-        text onchain_tx_hash
+        uuid action_id FK
         timestamptz occurred_at
         timestamptz created_at
     }
@@ -230,9 +279,9 @@ erDiagram
         uuid destination_id FK
         text section
         text status
-        text onchain_status
-        text onchain_tx_hash
         uuid operator_id FK
+        uuid action_id FK
+        timestamptz unloaded_at
         timestamptz occurred_at
         timestamptz created_at
         timestamptz updated_at
@@ -244,14 +293,24 @@ erDiagram
         uuid product_id FK
         uuid operator_id FK
         uuid dispatch_id FK
-        text onchain_status
-        text onchain_tx_hash
+        uuid action_id FK
         timestamptz shipped_at
         timestamptz occurred_at
         timestamptz created_at
     }
 
     %% Relationships
+    organizations ||--o{ users : "employs"
+    organizations ||--o{ passkey_credentials : "owns"
+    organizations ||--o{ key_actions : "scopes"
+    users ||--o{ passkey_credentials : "registers"
+    users ||--o{ warehouse_actions : "creates"
+    users ||--o{ key_actions : "creates"
+    passkey_credentials ||--o{ key_actions : "target or signer of"
+    passkey_credentials ||--o{ warehouse_actions : "signs"
+    warehouse_actions ||--o{ putaways : "places"
+    warehouse_actions ||--o{ assembly_tasks : "unloads"
+    warehouse_actions ||--o{ shippings : "ships"
     users ||--o{ evm_addresses : "has"
     warehouses ||--o{ bins : "contains"
     warehouses ||--o{ inbound_shipments : "receives"
@@ -342,13 +401,22 @@ graph TD
 ```mermaid
 graph TD
     subgraph public_schema["public"]
+        organizations --> users
+        organizations --> passkey_credentials
+        organizations --> key_actions
+        users --> passkey_credentials
         users --> evm_addresses
+        users --> warehouse_actions
+        passkey_credentials --> warehouse_actions
+        passkey_credentials --> key_actions
+        warehouse_actions --> outbox_events
+        key_actions --> outbox_events
         outbox_events["outbox_events\n(WMS → Kafka)"]
         onchain_events["onchain_events\n(Kafka → Blockchain)"]
     end
 ```
 
-**Назначение:** пользователи, EVM-адреса, интеграционные таблицы.
+**Назначение:** пользователи, организации и их ключи, черновики подписанных действий, EVM-адреса, интеграционные таблицы. `warehouse_actions` и `key_actions` — черновики действий (до `submitted_at`) и источник `aggregate_type`/`action_type` для строки `outbox_events`, у которой `event_id = action_id`.
 
 ---
 
@@ -379,12 +447,18 @@ orders (заказ → destination_id)
 ### Связь off-chain ↔ on-chain
 
 ```
-products.product_id
-  → outbox_events.aggregate_id (= product_id)
-    → Kafka message key (= product_id UUID string)
-      → onchain_events.event_id (= outbox_events.event_id)
-        → BatchMappingWMS.itemStatus[uint256(keccak256(product_id))]
+warehouse_actions (action_id, action_type 1..4, item_ids uuid[])
+  → outbox_events (event_id = aggregate_id = action_id, aggregate_type = 'signed_action')
+    → Kafka wms.events.v1 (key = action_id)
+      → ledger-adapter → SignedMappingWMS.applyActions
+        → onchain_events.event_id (= action_id): PENDING → SENT → COMMITTED / FAILED (+ reject_reason)
+          → SignedMappingWMS.itemStatus[uint256(keccak256(product_id))]
 ```
+
+Ключевые действия идут тем же путём, но через `key_actions` (`action_type` 5/6) и
+`ConsortiumRegistry.applyKeyActions`. Статус в цепи — **на каждый товар**
+(`itemStatus`), связь товара с действием даёт событие `ItemMoved(itemId, actionId)`,
+поэтому связки «товар → строка outbox» в БД нет (ADR-0001 §1, §8).
 
 ---
 
@@ -403,6 +477,10 @@ products.product_id
 | `outbound_dispatches` | UNIQUE(dispatch_code) | Код рейса глобально уникален |
 | `onchain_events` | UNIQUE(event_id) | Идемпотентность Ledger Adapter |
 | `expected_cargoplace_skus` | UNIQUE(cargoplace_id, sku_id) | Один SKU на грузоместо |
+| `organizations` | UNIQUE(name) | Название организации уникально |
+| `passkey_credentials` | UNIQUE(key_id) | Один ключ P-256 регистрируется один раз (даже в разных организациях) |
+| `passkey_credentials` | partial UNIQUE(user_id) WHERE status IN ('PENDING','ACTIVE') | У пользователя не больше одного живого passkey |
+| `warehouse_actions` | UNIQUE(operation_id, part_index) | Номер части уникален внутри операции |
 
 ### CHECK-ограничения и индексы
 

@@ -66,17 +66,24 @@ sequenceDiagram
     WMS->>PG: INSERT receiving_table (action=SCAN_BUFFER)
     WMS-->>UI: 10 товаров размещены в буфере T1-BUF ✓
 
-    Note over Op,PG: === Шаг 6: Завершение грузоместа ===
+    Note over Op,PG: === Шаг 6: Завершение грузоместа (подписанное действие) ===
     Op->>UI: Нажимает "Завершить работу с грузоместом"
-    UI->>WMS: POST /receiving/table/close-cargoplace {cargoplace_id}
-    WMS->>WMS: Сверка: expected_cargoplace_skus vs реальные products
+    UI->>WMS: POST /receiving/table/close-cargoplace/draft {cargoplace_id}
+    WMS->>WMS: Guard: грузоместо в TABLE_IN_PROGRESS
+    WMS->>PG: SELECT закрываемые товары (RECEIVED в коробках CLOSED)
+    WMS->>WMS: Товары сортируются по itemId, операция режется на части (≤2000 товаров)
+    WMS->>PG: INSERT warehouse_actions (строка на часть: action_id, salt, challenge, details)
+    WMS-->>UI: Черновик: operation_id + части (action_id, challenge)
+    UI->>Op: Запрос passkey-подписи для каждой части
+    Op->>UI: Подтверждает каждую часть (N касаний подряд)
+    UI->>WMS: POST /receiving/table/close-cargoplace/submit {operation_id, assertions[]}
+    WMS->>WMS: Проверка WebAuthn-подписи каждой части
     WMS->>PG: UPDATE cargoplace.status = TABLE_CLOSED
     WMS->>PG: INSERT receiving_table (action=CLOSE_CARGO)
-    WMS->>PG: SELECT product_id FROM products WHERE cargoplace_id = :cargoplace_id
-    loop Для каждого product в грузоместе
-        WMS->>PG: INSERT outbox_events (event_id, aggregate_id=product_id, aggregate_type='receiving')
+    loop Для каждой части операции
+        WMS->>PG: INSERT outbox_events (event_id=action_id, aggregate_type='signed_action', event_type='wms.action.v1', payload=конверт)
     end
-    Note over WMS,PG: N outbox events (по одному на product) → Kafka → batchAccept → None → Accepted
+    Note over WMS,PG: 1 outbox-строка на действие → Kafka wms.events.v1 → SignedMappingWMS.applyActions → FSM на каждый товар: None → Accepted
     WMS-->>UI: Грузоместо закрыто (принято: 10, ожидалось: 12, недостача: 2)
 ```
 
@@ -122,4 +129,13 @@ products (реально создано): SKU-A × 4, SKU-B × 3  (итого 7 
 | `products` | UPDATE | bin_id заполняется при SCAN_BUFFER |
 | `receiving_table` | INSERT | Лог каждого действия (append-only) |
 | `expected_cargoplace_skus` | READ | Для сверки ожидаемого vs фактического |
-| `outbox_events` | INSERT | **N events** при CLOSE_CARGO (по одному на product, aggregate_id=product_id, aggregate_type='receiving') |
+| `warehouse_actions` | INSERT | Строка на каждую часть операции (draft): `action_id`, `item_ids`, `salt`, `details_hash`, `challenge`, `details` |
+| `outbox_events` | INSERT | **1 строка на действие-часть** при SUBMIT (event_id = action_id, aggregate_type='signed_action', event_type='wms.action.v1', payload = подписанный конверт) |
+
+## Подписанное действие закрытия грузоместа
+
+Завершение грузоместа — двухшаговый подписанный поток (ADR-0001):
+
+1. **`POST /receiving/table/close-cargoplace/draft`** — сервер проверяет, что грузоместо в `TABLE_IN_PROGRESS`, берёт закрываемые товары (`RECEIVED` в коробках `CLOSED`), сортирует их по `itemId`, режет на части по ≤2000 товаров и сохраняет черновик в `warehouse_actions` (у каждой части свой `action_id`, соль и challenge). Ответ — черновик для подписания: `operation_id`, список частей с challenge и данными passkey подписанта.
+2. Браузер подписывает каждую часть passkey оператора (WebAuthn, P-256, `userVerification: required`).
+3. **`POST /receiving/table/close-cargoplace/submit`** — сервер проверяет все подписи и в одной транзакции закрывает грузоместо, считает недостачу, пишет лог и **по одной строке outbox на часть**. Статус операции в цепи — `GET /signed-actions/operations/{operation_id}`.
