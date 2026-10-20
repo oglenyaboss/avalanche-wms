@@ -5,11 +5,14 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
 	"wms/internal/ledger"
+	"wms/internal/signedaction"
+	"wms/internal/signedops"
 )
 
 // mockAssemblyRepo - мок-репозиторий для тестирования сервиса
@@ -63,30 +66,43 @@ type mockAssemblyRepo struct {
 	setProductAssembledErr error
 	assembledProducts      []uuid.UUID
 
-	// InsertPickOutboxEvent
-	insertOutboxErr error
-	outboxCalls     int
-
 	// GetTasks
 	tasksResult []TaskItem
 	tasksErr    error
+
+	// ScanShippingBuffer (draft/submit bin lookup)
+	shippingBufferBin    *domain.Bin
+	shippingBufferBinErr error
+	ordersUpdated        int
+	ordersUpdatedErr     error
+	lastOrderIDs         []uuid.UUID
+
+	// ListOperatorBasket (draft) / LockOperatorBasket (submit)
+	basket        []BasketItem
+	basketErr     error
+	lockedBasket  []BasketItem
+	lockBasketErr error
+
+	// MoveProductsToShippingBuffer / StampTaskUnload
+	moveProductsErr  error
+	movedToBuffer    []uuid.UUID
+	movedBufferBinID uuid.UUID
+	stampErr         error
+	stamps           []stampRecord
+
+	// LockOperation/LockSigner/WriteActions — tx-методы подписанного submit
+	lockedOperation          *signedops.Operation
+	lockOperationErr         error
+	lockSignerErr            error
+	writeActionsErr          error
+	writeActionsCalls        int
+	lastWriteActionsOp       *signedops.Operation
+	lastWriteActionsPayloads [][]byte
 
 	// WithTx tracking
 	withTxMu    sync.Mutex
 	withTxCalls int
 	withTxFn    func(func(assemblyRepository) error) error
-
-	// ScanShippingBuffer
-	shippingBufferBin    *domain.Bin
-	shippingBufferBinErr error
-	movedProductIDs      []uuid.UUID
-	movedOrderIDs        []uuid.UUID
-	moveErr              error
-	moveOperatorID       uuid.UUID
-	moveBufferBinID      uuid.UUID
-	moveDestinationID    uuid.UUID
-	ordersUpdated        int
-	ordersUpdatedErr     error
 
 	// CheckChainStatus (#45 chain-status gate)
 	checkChainErr error
@@ -115,7 +131,7 @@ func (m *mockAssemblyRepo) CheckChainStatus(_ context.Context, _ []uuid.UUID, ag
 // opens (no task is marked done, no product is assembled).
 func TestPick_ChainEventRejected(t *testing.T) {
 	mockRepo := &mockAssemblyRepo{checkChainErr: ledger.ErrChainEventRejected}
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 
 	_, err := svc.Pick(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, ledger.ErrChainEventRejected) {
@@ -244,14 +260,6 @@ func (m *mockAssemblyRepo) SetProductAssembled(_ context.Context, productID uuid
 	return nil
 }
 
-func (m *mockAssemblyRepo) InsertPickOutboxEvent(_ context.Context, _, _ uuid.UUID) error {
-	m.outboxCalls++
-	if m.insertOutboxErr != nil {
-		return m.insertOutboxErr
-	}
-	return nil
-}
-
 func (m *mockAssemblyRepo) GetTasks(_ context.Context, _, _ uuid.UUID, _ string) ([]TaskItem, error) {
 	if m.tasksErr != nil {
 		return nil, m.tasksErr
@@ -266,23 +274,61 @@ func (m *mockAssemblyRepo) GetShippingBufferBinByID(_ context.Context, _ uuid.UU
 	return m.shippingBufferBin, nil
 }
 
-func (m *mockAssemblyRepo) MoveOperatorAssembledToBuffer(_ context.Context, operatorID, bufferBinID, destinationID uuid.UUID) ([]uuid.UUID, []uuid.UUID, error) {
-	m.withTxMu.Lock()
-	m.moveOperatorID = operatorID
-	m.moveBufferBinID = bufferBinID
-	m.moveDestinationID = destinationID
-	m.withTxMu.Unlock()
-	if m.moveErr != nil {
-		return nil, nil, m.moveErr
+func (m *mockAssemblyRepo) ListOperatorBasket(_ context.Context, _, _ uuid.UUID) ([]BasketItem, error) {
+	if m.basketErr != nil {
+		return nil, m.basketErr
 	}
-	return m.movedProductIDs, m.movedOrderIDs, nil
+	return m.basket, nil
+}
+
+func (m *mockAssemblyRepo) LockOperatorBasket(_ context.Context, _, _ uuid.UUID) ([]BasketItem, error) {
+	if m.lockBasketErr != nil {
+		return nil, m.lockBasketErr
+	}
+	return m.lockedBasket, nil
+}
+
+func (m *mockAssemblyRepo) MoveProductsToShippingBuffer(_ context.Context, productIDs []uuid.UUID, bufferBinID uuid.UUID) error {
+	m.movedToBuffer = append(m.movedToBuffer, productIDs...)
+	m.movedBufferBinID = bufferBinID
+	return m.moveProductsErr
+}
+
+func (m *mockAssemblyRepo) StampTaskUnload(_ context.Context, actionID uuid.UUID, productIDs []uuid.UUID, operatorID, destinationID uuid.UUID, occurredAt time.Time) error {
+	m.stamps = append(m.stamps, stampRecord{
+		ActionID:      actionID,
+		ProductIDs:    productIDs,
+		OperatorID:    operatorID,
+		DestinationID: destinationID,
+		OccurredAt:    occurredAt,
+	})
+	return m.stampErr
+}
+
+func (m *mockAssemblyRepo) LockOperation(_ context.Context, _, _ uuid.UUID) (*signedops.Operation, error) {
+	if m.lockOperationErr != nil {
+		return nil, m.lockOperationErr
+	}
+	return m.lockedOperation, nil
+}
+
+func (m *mockAssemblyRepo) LockSigner(_ context.Context, _ []byte) error {
+	return m.lockSignerErr
+}
+
+func (m *mockAssemblyRepo) WriteActions(_ context.Context, op *signedops.Operation, payloads [][]byte) error {
+	m.writeActionsCalls++
+	m.lastWriteActionsOp = op
+	m.lastWriteActionsPayloads = payloads
+	return m.writeActionsErr
 }
 
 func (m *mockAssemblyRepo) CountAssembledByOperator(_ context.Context, _ uuid.UUID) (int, error) {
 	return len(m.assembledProducts), nil
 }
 
-func (m *mockAssemblyRepo) UpdateOrdersToAssembled(_ context.Context, _ []uuid.UUID) (int, error) {
+func (m *mockAssemblyRepo) UpdateOrdersToAssembled(_ context.Context, orderIDs []uuid.UUID) (int, error) {
+	m.lastOrderIDs = orderIDs
 	if m.ordersUpdatedErr != nil {
 		return 0, m.ordersUpdatedErr
 	}
@@ -325,7 +371,7 @@ func TestAllocateHappyPath(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 	result, err := svc.Allocate(context.Background(), destinationID)
 
 	if err != nil {
@@ -379,7 +425,7 @@ func TestAllocateInsufficientStock(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 	result, err := svc.Allocate(context.Background(), destinationID)
 
 	if err != nil {
@@ -429,7 +475,7 @@ func TestAllocateMultipleOrders(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 	result, err := svc.Allocate(context.Background(), destinationID)
 
 	if err != nil {
@@ -459,7 +505,7 @@ func TestPickHappyPath(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 	result, err := svc.Pick(context.Background(), operatorID, productID)
 
 	if err != nil {
@@ -477,9 +523,8 @@ func TestPickHappyPath(t *testing.T) {
 	if len(mockRepo.assembledProducts) != 1 {
 		t.Fatalf("expected product assembled, got %d", len(mockRepo.assembledProducts))
 	}
-	if mockRepo.outboxCalls != 1 {
-		t.Fatalf("expected outbox event, got %d", mockRepo.outboxCalls)
-	}
+	// #14: подбор больше не пишет outbox — событие Pick уходит в цепь одним
+	// подписанным действием выгрузки (SubmitUnloadToShippingBuffer).
 	if mockRepo.withTxCalls != 1 {
 		t.Fatalf("expected WithTx called, got %d", mockRepo.withTxCalls)
 	}
@@ -501,7 +546,7 @@ func TestPickDoesNotUpdateOrderStatus(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 	result, err := svc.Pick(context.Background(), operatorID, productID)
 
 	if err != nil {
@@ -525,7 +570,7 @@ func TestPickNoTask(t *testing.T) {
 		pendingTasksErr: ErrNoTaskForProduct,
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 	_, err := svc.Pick(context.Background(), operatorID, productID)
 
 	if !errors.Is(err, ErrNoTaskForProduct) {
@@ -549,7 +594,7 @@ func TestPickProductNotAllocated(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 	_, err := svc.Pick(context.Background(), operatorID, productID)
 
 	if !errors.Is(err, ErrProductNotAllocated) {
@@ -589,7 +634,7 @@ func TestPickRaceCondition(t *testing.T) {
 		return ErrNoTaskForProduct
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 
 	var wg sync.WaitGroup
 	var err1, err2 error
@@ -641,7 +686,7 @@ func TestPickCartSize(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 
 	result1, _ := svc.Pick(context.Background(), operatorID, productID1)
 	if result1.CartSize != 1 {
@@ -671,7 +716,7 @@ func TestGetTasksSuccess(t *testing.T) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 	result, err := svc.GetTasks(context.Background(), destinationID, operatorID, "PENDING")
 
 	if err != nil {
@@ -684,7 +729,7 @@ func TestGetTasksSuccess(t *testing.T) {
 
 // TestGetTasksInvalidInput - невалидный destinationID
 func TestGetTasksInvalidInput(t *testing.T) {
-	svc := NewService(&mockAssemblyRepo{})
+	svc := NewService(&mockAssemblyRepo{}, &mockOperationStore{}, &mockSignerSource{})
 	_, err := svc.GetTasks(context.Background(), uuid.Nil, uuid.New(), "PENDING")
 
 	if !errors.Is(err, ErrInvalidInput) {
@@ -694,7 +739,7 @@ func TestGetTasksInvalidInput(t *testing.T) {
 
 // TestAllocateInvalidInput - невалидный destinationID
 func TestAllocateInvalidInput(t *testing.T) {
-	svc := NewService(&mockAssemblyRepo{})
+	svc := NewService(&mockAssemblyRepo{}, &mockOperationStore{}, &mockSignerSource{})
 	_, err := svc.Allocate(context.Background(), uuid.Nil)
 
 	if !errors.Is(err, ErrInvalidInput) {
@@ -704,7 +749,7 @@ func TestAllocateInvalidInput(t *testing.T) {
 
 // TestPickInvalidInput - невалидные входные данные
 func TestPickInvalidInput(t *testing.T) {
-	svc := NewService(&mockAssemblyRepo{})
+	svc := NewService(&mockAssemblyRepo{}, &mockOperationStore{}, &mockSignerSource{})
 
 	_, err := svc.Pick(context.Background(), uuid.Nil, uuid.New())
 	if !errors.Is(err, ErrInvalidInput) {
@@ -723,175 +768,9 @@ func TestServiceImplementsInterface(_ *testing.T) {
 		Allocate(context.Context, uuid.UUID) (*AllocateResponse, error)
 		GetTasks(context.Context, uuid.UUID, uuid.UUID, string) (*TaskResponse, error)
 		Pick(context.Context, uuid.UUID, uuid.UUID) (*PickResponse, error)
-		ScanShippingBuffer(context.Context, uuid.UUID, uuid.UUID) (*ScanShippingBufferResponse, error)
+		DraftUnloadToShippingBuffer(context.Context, uuid.UUID, uuid.UUID) (*signedops.Operation, string, error)
+		SubmitUnloadToShippingBuffer(context.Context, uuid.UUID, uuid.UUID, map[uuid.UUID]signedaction.Assertion) (*ScanShippingBufferResponse, error)
 	} = (*Service)(nil)
-}
-
-// TestScanShippingBuffer_HappyPath - успешное размещение в буфере
-func TestScanShippingBuffer_HappyPath(t *testing.T) {
-	operatorID := uuid.New()
-	bufferBinID := uuid.New()
-	destinationID := uuid.New()
-	productID1 := uuid.New()
-	productID2 := uuid.New()
-	orderID1 := uuid.New()
-	orderID2 := uuid.New()
-
-	destID := destinationID
-	mockRepo := &mockAssemblyRepo{
-		shippingBufferBin: &domain.Bin{
-			BinID:         bufferBinID,
-			Code:          "SHIP-BUF-01",
-			Section:       stringPtr("SHIPPING_BUFFER"),
-			DestinationID: &destID,
-		},
-		movedProductIDs: []uuid.UUID{productID1, productID2},
-		movedOrderIDs:   []uuid.UUID{orderID1, orderID2},
-		ordersUpdated:   2,
-	}
-
-	svc := NewService(mockRepo)
-
-	result, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
-
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if result.BufferBinID != bufferBinID.String() {
-		t.Errorf("expected BufferBinID %s, got %s", bufferBinID.String(), result.BufferBinID)
-	}
-	if result.ProductsPlaced != 2 {
-		t.Errorf("expected ProductsPlaced 2, got %d", result.ProductsPlaced)
-	}
-	if result.OrdersAssembled != 2 {
-		t.Errorf("expected OrdersAssembled 2, got %d", result.OrdersAssembled)
-	}
-	if mockRepo.withTxCalls != 1 {
-		t.Errorf("expected WithTx called, got %d", mockRepo.withTxCalls)
-	}
-	if mockRepo.moveOperatorID != operatorID || mockRepo.moveBufferBinID != bufferBinID || mockRepo.moveDestinationID != destinationID {
-		t.Errorf("MoveOperatorAssembledToBuffer scoping: got (op=%s buf=%s dest=%s), want (op=%s buf=%s dest=%s)",
-			mockRepo.moveOperatorID, mockRepo.moveBufferBinID, mockRepo.moveDestinationID, operatorID, bufferBinID, destinationID)
-	}
-}
-
-// TestScanShippingBuffer_CartEmpty - оператор ничего не набрал вообще: derived UPDATE
-// двигает 0 строк И у оператора нет ASSEMBLED товаров (CountAssembledByOperator == 0)
-// -> 409 CART_EMPTY. Отличается от DESTINATION_MISMATCH тем, что корзина реально пуста
-// (ничего не подобрано / уже размещено дублирующим сканом).
-func TestScanShippingBuffer_CartEmpty(t *testing.T) {
-	operatorID := uuid.New()
-	bufferBinID := uuid.New()
-	destinationID := uuid.New()
-
-	destID := destinationID
-	mockRepo := &mockAssemblyRepo{
-		shippingBufferBin: &domain.Bin{
-			BinID:         bufferBinID,
-			Code:          "SHIP-BUF-01",
-			Section:       stringPtr("SHIPPING_BUFFER"),
-			DestinationID: &destID,
-		},
-		movedProductIDs:   nil,
-		assembledProducts: nil, // CountAssembledByOperator -> 0: корзина действительно пуста
-	}
-
-	svc := NewService(mockRepo)
-
-	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
-
-	if !errors.Is(err, ErrCartEmpty) {
-		t.Errorf("expected ErrCartEmpty, got %v", err)
-	}
-}
-
-// TestScanShippingBuffer_DestinationMismatch - оператор собрал товары для ДРУГОГО магазина
-// и сканирует буфер не того пункта назначения: derived UPDATE двигает 0 строк (предикат
-// t.destination_id = buffer.destination_id), но CountAssembledByOperator > 0 -> 409
-// DESTINATION_MISMATCH, а не вводящий в заблуждение CART_EMPTY. Это защита от mis-delivery:
-// ни один товар чужого магазина не попадает в этот буфер.
-func TestScanShippingBuffer_DestinationMismatch(t *testing.T) {
-	operatorID := uuid.New()
-	bufferBinID := uuid.New()
-	destinationID := uuid.New()
-
-	destID := destinationID
-	mockRepo := &mockAssemblyRepo{
-		shippingBufferBin: &domain.Bin{
-			BinID:         bufferBinID,
-			Code:          "SHIP-BUF-01",
-			Section:       stringPtr("SHIPPING_BUFFER"),
-			DestinationID: &destID,
-		},
-		// Перемещение для destination ЭТОГО буфера ничего не двигает...
-		movedProductIDs: nil,
-		// ...но оператор всё ещё несёт ASSEMBLED товары (для другого магазина).
-		assembledProducts: []uuid.UUID{uuid.New(), uuid.New()},
-	}
-
-	svc := NewService(mockRepo)
-
-	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
-
-	if !errors.Is(err, ErrDestinationMismatch) {
-		t.Errorf("expected ErrDestinationMismatch, got %v", err)
-	}
-}
-
-// TestScanShippingBuffer_BinNotShippingBuffer - ячейка не SHIPPING_BUFFER
-func TestScanShippingBuffer_BinNotShippingBuffer(t *testing.T) {
-	operatorID := uuid.New()
-	bufferBinID := uuid.New()
-
-	mockRepo := &mockAssemblyRepo{
-		shippingBufferBinErr: ErrBinNotShippingBuffer,
-	}
-
-	svc := NewService(mockRepo)
-
-	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
-
-	if !errors.Is(err, ErrBinNotShippingBuffer) {
-		t.Errorf("expected ErrBinNotShippingBuffer, got %v", err)
-	}
-}
-
-// TestScanShippingBuffer_InvalidInput - невалидные входные данные
-func TestScanShippingBuffer_InvalidInput(t *testing.T) {
-	svc := NewService(&mockAssemblyRepo{})
-
-	_, err := svc.ScanShippingBuffer(context.Background(), uuid.Nil, uuid.New())
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for nil operatorID, got %v", err)
-	}
-
-	_, err = svc.ScanShippingBuffer(context.Background(), uuid.New(), uuid.Nil)
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for nil bufferBinID, got %v", err)
-	}
-}
-
-// TestScanShippingBuffer_BinWithoutDestination - буфер без destination_id
-func TestScanShippingBuffer_BinWithoutDestination(t *testing.T) {
-	operatorID := uuid.New()
-	bufferBinID := uuid.New()
-
-	mockRepo := &mockAssemblyRepo{
-		shippingBufferBin: &domain.Bin{
-			BinID:         bufferBinID,
-			Code:          "SHIP-BUF-01",
-			Section:       stringPtr("SHIPPING_BUFFER"),
-			DestinationID: nil,
-		},
-	}
-
-	svc := NewService(mockRepo)
-
-	_, err := svc.ScanShippingBuffer(context.Background(), operatorID, bufferBinID)
-
-	if !errors.Is(err, ErrDestinationNotFound) {
-		t.Errorf("expected ErrDestinationNotFound, got %v", err)
-	}
 }
 
 // BenchmarkAllocate - бенчмарк для аллокации
@@ -920,7 +799,7 @@ func BenchmarkAllocate(b *testing.B) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -944,7 +823,7 @@ func BenchmarkPick(b *testing.B) {
 		},
 	}
 
-	svc := NewService(mockRepo)
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

@@ -11,6 +11,13 @@ import type {
   ResolvedSku,
   ShortageBySku,
 } from '@/entities/cargoplace'
+import {
+  mapSignedOperationDraft,
+  toAssertionsBody,
+  type PartAssertion,
+  type SignedOperationDraft,
+  type SignedOperationDraftResponse,
+} from '@/entities/signed-action'
 import { apiClient } from '@/shared/api'
 
 // ── Wire shapes (snake_case, as returned by the WMS API) ────────────────────
@@ -110,6 +117,7 @@ interface CloseCargoplaceResultResponse {
   status: 'TABLE_CLOSED'
   summary: CloseCargoplaceSummaryResponse
   outbox_events_created: number
+  operation_id: string
 }
 
 // ── Mappers ─────────────────────────────────────────────────────────────────
@@ -292,12 +300,30 @@ export async function scanBuffer({
   }
 }
 
-export async function closeCargoplace(
+// Drafts the signed close operation: the backend splits the close into parts
+// (one per box) with per-part challenges. Errors: CARGOPLACE_EMPTY,
+// SIGNER_KEY_NOT_ACTIVE, plus the existing receiving errors.
+export async function draftCloseCargoplace(
   cargoplaceId: string,
+): Promise<SignedOperationDraft> {
+  const { data } = await apiClient.post<
+    ApiEnvelope<SignedOperationDraftResponse>
+  >('/receiving/table/close-cargoplace/draft', { cargoplace_id: cargoplaceId })
+
+  return mapSignedOperationDraft(unwrap(data))
+}
+
+// Submits the per-part assertions produced by signOperation.
+export async function submitCloseCargoplace(
+  operationId: string,
+  assertions: PartAssertion[],
 ): Promise<ClosedCargoplace> {
   const { data } = await apiClient.post<
     ApiEnvelope<CloseCargoplaceResultResponse>
-  >('/receiving/table/close-cargoplace', { cargoplace_id: cargoplaceId })
+  >('/receiving/table/close-cargoplace/submit', {
+    operation_id: operationId,
+    assertions: toAssertionsBody(assertions),
+  })
 
   const result = unwrap(data)
 
@@ -306,5 +332,6 @@ export async function closeCargoplace(
     status: result.status,
     summary: mapSummary(result.summary),
     outboxEventsCreated: result.outbox_events_created,
+    operationId: result.operation_id,
   }
 }

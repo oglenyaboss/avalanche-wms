@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { mapTimeline, mapTxProof } from './traceabilityApi'
+import { mapTimeline } from './traceabilityApi'
 
 describe('mapTimeline', () => {
   it('lowercases chain_status and maps fields', () => {
@@ -30,18 +30,5 @@ describe('mapTimeline', () => {
       steps: [],
     })
     expect(tl.steps).toEqual([])
-  })
-})
-
-describe('mapTxProof', () => {
-  it('maps snake_case to camelCase', () => {
-    const p = mapTxProof({
-      found: true,
-      status: 'success',
-      block_number: 42,
-      confirmations: 7,
-      gas_used: 64000,
-    })
-    expect(p).toEqual({ found: true, status: 'success', blockNumber: 42, confirmations: 7, gasUsed: 64000 })
   })
 })

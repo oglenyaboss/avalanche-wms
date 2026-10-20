@@ -143,7 +143,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 // confirmAndCommit подтверждает все txs одного batch'а ПАРАЛЛЕЛЬНО (до
 // maxConfirmConcurrency одновременно) и коммитит его offsets целиком только при
-// полном успехе. Параллельность load-bearing для multi-signer throughput'а: на
+// полном успехе. Параллельность load-bearing для throughput'а окна: на
 // WAN-цепи каждый receipt ждёт своего блока, и serial-collector блокировался бы на
 // первой незамайненной tx, сериализуя всё окно (residence ≫ block cadence). batch
 // готов по max(receipt latency), а не sum. Порядок МЕЖДУ batch'ами остаётся FIFO

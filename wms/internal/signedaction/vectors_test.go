@@ -2,11 +2,14 @@ package signedaction_test
 
 import (
 	"bytes"
+	"crypto/elliptic"
 	"encoding/asn1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,13 +40,22 @@ type vectorAction struct {
 	ActionType      int      `json:"actionType"`
 	Challenge       hexBytes `json:"challenge"`
 	Details         struct {
-		QX hexBytes `json:"qx"`
-		QY hexBytes `json:"qy"`
+		QX                  hexBytes `json:"qx"`
+		QY                  hexBytes `json:"qy"`
+		Salt                hexBytes `json:"salt"`
+		CargoplaceID        string   `json:"cargoplaceId"`
+		StorageBinID        string   `json:"storageBinId"`
+		DispatchID          string   `json:"dispatchId"`
+		ShippingBufferBinID string   `json:"shippingBufferBinId"`
+		OrderIDs            []string `json:"orderIds"`
+		OperatorID          string   `json:"operatorId"`
+		OccurredAtMs        uint64   `json:"occurredAtMs"`
 	} `json:"details"`
-	DetailsHash hexBytes `json:"detailsHash"`
-	ItemsHash   hexBytes `json:"itemsHash"`
-	KeyID       hexBytes `json:"keyId"`
-	Name        string   `json:"name"`
+	DetailsHash hexBytes   `json:"detailsHash"`
+	ItemIDs     []hexBytes `json:"itemIds"`
+	ItemsHash   hexBytes   `json:"itemsHash"`
+	KeyID       hexBytes   `json:"keyId"`
+	Name        string     `json:"name"`
 	WebAuthn    struct {
 		AuthenticatorData hexBytes `json:"authenticatorData"`
 		ChallengeIndex    int      `json:"challengeIndex"`
@@ -52,6 +64,11 @@ type vectorAction struct {
 		S                 hexBytes `json:"s"`
 		TypeIndex         int      `json:"typeIndex"`
 	} `json:"webauthn"`
+}
+
+type vectorProduct struct {
+	ProductID string   `json:"productId"`
+	ItemID    hexBytes `json:"itemId"`
 }
 
 type vectorsFile struct {
@@ -63,7 +80,8 @@ type vectorsFile struct {
 		QX         hexBytes `json:"qx"`
 		QY         hexBytes `json:"qy"`
 	} `json:"signer"`
-	Actions []vectorAction `json:"actions"`
+	Products []vectorProduct `json:"products"`
+	Actions  []vectorAction  `json:"actions"`
 }
 
 func loadVectors(t *testing.T) vectorsFile {
@@ -112,6 +130,175 @@ func TestVectors_Challenge(t *testing.T) {
 	}
 }
 
+func findAction(v vectorsFile, name string) *vectorAction {
+	for i := range v.Actions {
+		if v.Actions[i].Name == name {
+			return &v.Actions[i]
+		}
+	}
+	return nil
+}
+
+func TestVectors_Items(t *testing.T) {
+	v := loadVectors(t)
+	receive := findAction(v, "receive")
+	if receive == nil {
+		t.Fatal("no receive action in vectors")
+	}
+
+	products := make([]uuid.UUID, len(v.Products))
+	for i, p := range v.Products {
+		id, err := uuid.Parse(p.ProductID)
+		if err != nil {
+			t.Fatalf("parse productId %s: %v", p.ProductID, err)
+		}
+		products[i] = id
+		if got := signedaction.ItemID(id); got != [32]byte(p.ItemID) {
+			t.Errorf("ItemID(%s) = %x, want %x", p.ProductID, got, p.ItemID)
+		}
+	}
+
+	before := slices.Clone(products)
+	sorted := signedaction.SortByItemID(products)
+	if !slices.Equal(products, before) {
+		t.Errorf("SortByItemID mutated its input")
+	}
+	if len(sorted) != len(receive.ItemIDs) {
+		t.Fatalf("sorted len = %d, want %d", len(sorted), len(receive.ItemIDs))
+	}
+	for i, want := range receive.ItemIDs {
+		if got := signedaction.ItemID(sorted[i]); got != [32]byte(want) {
+			t.Errorf("sorted[%d] = %x, want itemId %x", i, got, want)
+		}
+	}
+	if !slices.IsSortedFunc(sorted, func(a, b uuid.UUID) int {
+		aItem := signedaction.ItemID(a)
+		bItem := signedaction.ItemID(b)
+		return bytes.Compare(aItem[:], bItem[:])
+	}) {
+		t.Errorf("SortByItemID result is not ascending by ItemID")
+	}
+
+	if got := signedaction.ItemsHash(sorted); got != [32]byte(receive.ItemsHash) {
+		t.Errorf("ItemsHash = %x, want %x", got, receive.ItemsHash)
+	}
+	if got := signedaction.ItemsHash(nil); got != signedaction.NoItems {
+		t.Errorf("ItemsHash(nil) = %x, want NoItems %x", got, signedaction.NoItems)
+	}
+}
+
+func TestVectors_ReceiveDetailsHash(t *testing.T) {
+	v := loadVectors(t)
+	receive := findAction(v, "receive")
+	if receive == nil {
+		t.Fatal("no receive action in vectors")
+	}
+	cargoplaceID, err := uuid.Parse(receive.Details.CargoplaceID)
+	if err != nil {
+		t.Fatalf("parse cargoplaceId: %v", err)
+	}
+	operatorID, err := uuid.Parse(receive.Details.OperatorID)
+	if err != nil {
+		t.Fatalf("parse operatorId: %v", err)
+	}
+	got := signedaction.ReceiveDetailsHash([32]byte(receive.Details.Salt), cargoplaceID, operatorID, receive.Details.OccurredAtMs)
+	if got != [32]byte(receive.DetailsHash) {
+		t.Errorf("ReceiveDetailsHash = %x, want %x", got, receive.DetailsHash)
+	}
+}
+
+func TestVectors_PutAwayDetailsHash(t *testing.T) {
+	v := loadVectors(t)
+	putAway := findAction(v, "putAway")
+	if putAway == nil {
+		t.Fatal("no putAway action in vectors")
+	}
+	storageBinID, err := uuid.Parse(putAway.Details.StorageBinID)
+	if err != nil {
+		t.Fatalf("parse storageBinId: %v", err)
+	}
+	operatorID, err := uuid.Parse(putAway.Details.OperatorID)
+	if err != nil {
+		t.Fatalf("parse operatorId: %v", err)
+	}
+	got := signedaction.PutAwayDetailsHash([32]byte(putAway.Details.Salt), storageBinID, operatorID, putAway.Details.OccurredAtMs)
+	if got != [32]byte(putAway.DetailsHash) {
+		t.Errorf("PutAwayDetailsHash = %x, want %x", got, putAway.DetailsHash)
+	}
+}
+
+func TestVectors_PickDetailsHash(t *testing.T) {
+	v := loadVectors(t)
+	pick := findAction(v, "pick")
+	if pick == nil {
+		t.Fatal("no pick action in vectors")
+	}
+	binID, err := uuid.Parse(pick.Details.ShippingBufferBinID)
+	if err != nil {
+		t.Fatalf("parse shippingBufferBinId: %v", err)
+	}
+	operatorID, err := uuid.Parse(pick.Details.OperatorID)
+	if err != nil {
+		t.Fatalf("parse operatorId: %v", err)
+	}
+	orders := make([]uuid.UUID, 0, len(pick.Details.OrderIDs))
+	for _, s := range pick.Details.OrderIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			t.Fatalf("parse orderId %s: %v", s, err)
+		}
+		orders = append(orders, id)
+	}
+	got := signedaction.PickDetailsHash([32]byte(pick.Details.Salt), binID, orders, operatorID, pick.Details.OccurredAtMs)
+	if got != [32]byte(pick.DetailsHash) {
+		t.Errorf("PickDetailsHash = %x, want %x", got, pick.DetailsHash)
+	}
+
+	// Дубликаты и обратный порядок дают тот же хеш; вход не мутируется.
+	messy := slices.Clone(orders)
+	messy = append(messy, orders...)
+	slices.Reverse(messy)
+	wantMessy := slices.Clone(messy)
+	if got := signedaction.PickDetailsHash([32]byte(pick.Details.Salt), binID, messy, operatorID, pick.Details.OccurredAtMs); got != [32]byte(pick.DetailsHash) {
+		t.Errorf("PickDetailsHash(unsorted+dupes) = %x, want %x", got, pick.DetailsHash)
+	}
+	if !slices.Equal(messy, wantMessy) {
+		t.Errorf("PickDetailsHash mutated its input")
+	}
+}
+
+func TestVectors_ShipDetailsHash(t *testing.T) {
+	v := loadVectors(t)
+	ship := findAction(v, "ship")
+	if ship == nil {
+		t.Fatal("no ship action in vectors")
+	}
+	dispatchID, err := uuid.Parse(ship.Details.DispatchID)
+	if err != nil {
+		t.Fatalf("parse dispatchId: %v", err)
+	}
+	binID, err := uuid.Parse(ship.Details.ShippingBufferBinID)
+	if err != nil {
+		t.Fatalf("parse shippingBufferBinId: %v", err)
+	}
+	operatorID, err := uuid.Parse(ship.Details.OperatorID)
+	if err != nil {
+		t.Fatalf("parse operatorId: %v", err)
+	}
+	orders := make([]uuid.UUID, 0, len(ship.Details.OrderIDs))
+	for _, s := range ship.Details.OrderIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			t.Fatalf("parse orderId %s: %v", s, err)
+		}
+		orders = append(orders, id)
+	}
+	got := signedaction.ShipDetailsHash([32]byte(ship.Details.Salt), dispatchID, binID, orders, operatorID, ship.Details.OccurredAtMs)
+	if got != [32]byte(ship.DetailsHash) {
+		t.Errorf("ShipDetailsHash = %x, want %x", got, ship.DetailsHash)
+	}
+}
+
 func TestVectors_VerifyVectorSignature(t *testing.T) {
 	v := loadVectors(t)
 	for _, a := range v.Actions {
@@ -136,6 +323,60 @@ func TestVectors_VerifyVectorSignature(t *testing.T) {
 		if got.R != [32]byte(a.WebAuthn.R) || got.S != [32]byte(a.WebAuthn.S) {
 			t.Errorf("%s: r/s = %x/%x, want %x/%x", a.Name, got.R, got.S, a.WebAuthn.R, a.WebAuthn.S)
 		}
+	}
+}
+
+func onchainTuple(a vectorAction) signedaction.WebAuthn {
+	return signedaction.WebAuthn{
+		AuthenticatorData: a.WebAuthn.AuthenticatorData,
+		ClientDataJSON:    string(a.WebAuthn.ClientDataJSONHex),
+		ChallengeIndex:    a.WebAuthn.ChallengeIndex,
+		TypeIndex:         a.WebAuthn.TypeIndex,
+		R:                 [32]byte(a.WebAuthn.R),
+		S:                 [32]byte(a.WebAuthn.S),
+	}
+}
+
+func TestVerifyOnChain_Vectors(t *testing.T) {
+	v := loadVectors(t)
+	qx, qy := [32]byte(v.Signer.QX), [32]byte(v.Signer.QY)
+	for _, a := range v.Actions {
+		if err := signedaction.VerifyOnChain(onchainTuple(a), [32]byte(a.Challenge), qx, qy); err != nil {
+			t.Errorf("%s: VerifyOnChain: %v", a.Name, err)
+		}
+	}
+
+	a := v.Actions[0]
+	cases := []struct {
+		name   string
+		mutate func(wa *signedaction.WebAuthn, challenge *[32]byte)
+	}{
+		{"flipped challenge", func(_ *signedaction.WebAuthn, challenge *[32]byte) {
+			challenge[0] ^= 0xff
+		}},
+		{"high s", func(wa *signedaction.WebAuthn, _ *[32]byte) {
+			s := new(big.Int).SetBytes(wa.S[:])
+			s.Sub(elliptic.P256().Params().N, s)
+			s.FillBytes(wa.S[:])
+		}},
+		{"no user verification flag", func(wa *signedaction.WebAuthn, _ *[32]byte) {
+			wa.AuthenticatorData = slices.Clone(wa.AuthenticatorData)
+			wa.AuthenticatorData[32] &^= 0x04
+		}},
+		{"flipped r", func(wa *signedaction.WebAuthn, _ *[32]byte) {
+			wa.R[0] ^= 0xff
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wa := onchainTuple(a)
+			challenge := [32]byte(a.Challenge)
+			tc.mutate(&wa, &challenge)
+			err := signedaction.VerifyOnChain(wa, challenge, qx, qy)
+			if !errors.Is(err, signedaction.ErrInvalidAssertion) {
+				t.Fatalf("VerifyOnChain = %v, want ErrInvalidAssertion", err)
+			}
+		})
 	}
 }
 

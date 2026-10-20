@@ -17,3 +17,17 @@ export {
   truncateHash,
   lifecycleLabel,
 } from "./format";
+
+export {
+  REJECT_REASON_LABELS,
+  rejectReasonText,
+} from "./signedAction";
+
+export type { AssertionJSON, AssertionRequestInput } from "./webauthn";
+export {
+  base64urlToBuffer,
+  bufferToBase64url,
+  getAssertion,
+  toRequestOptions,
+  webauthnSignErrorText,
+} from "./webauthn";

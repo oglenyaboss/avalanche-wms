@@ -25,9 +25,11 @@ import (
 
 type stubChain struct {
 	mu                sync.Mutex
-	calls             []string // aggregate_type записи (BatchCall) + "signed_action" (SendCalldata)
-	calldataLens      []int    // размер data каждого SendCalldata (по порядку)
-	receiptCalls      int      // сколько раз дёрнули TransactionReceipt
+	calls             []string         // aggregate_type записи (BatchCall) + "signed_action" (SendCalldata)
+	calldataLens      []int            // размер data каждого SendCalldata (по порядку)
+	calldatas         [][]byte         // data каждого SendCalldata (копия, по порядку)
+	tos               []common.Address // адрес каждого SendCalldata (по порядку)
+	receiptCalls      int              // сколько раз дёрнули TransactionReceipt
 	callErr           error
 	callErrFor        map[string]error // per-aggregate error
 	receipt           *types.Receipt
@@ -51,11 +53,13 @@ func (s *stubChain) BatchCall(_ context.Context, aggregateType string, _, _ []*b
 	return common.HexToHash("0xdeadbeef"), nil
 }
 
-func (s *stubChain) SendCalldata(_ context.Context, _ common.Address, data []byte) (common.Hash, error) {
+func (s *stubChain) SendCalldata(_ context.Context, to common.Address, data []byte) (common.Hash, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, aggregateSignedAction)
 	s.calldataLens = append(s.calldataLens, len(data))
+	s.calldatas = append(s.calldatas, append([]byte(nil), data...))
+	s.tos = append(s.tos, to)
 	if s.callErrFor != nil {
 		if err, ok := s.callErrFor[aggregateSignedAction]; ok {
 			return common.Hash{}, err
@@ -215,17 +219,28 @@ func (s *stubStore) MarkRejected(_ context.Context, ids []uuid.UUID, _ string, r
 	return nil
 }
 
-// stubResolver — программируемые исходы подписанных действий для Confirm/reconcile.
+// stubResolver — программируемые исходы подписанных действий для Confirm/reconcile:
+// outcomes — исходы из логов receipt'а (LogOutcomes), states — известные исходы
+// по actionState (StateOutcome; отсутствующий id = State.None).
 type stubResolver struct {
 	outcomes map[uuid.UUID]chain.ActionOutcome
+	states   map[uuid.UUID]chain.ActionOutcome
 	err      error
 }
 
-func (r *stubResolver) ActionOutcomes(_ context.Context, _ *types.Receipt, ids []uuid.UUID) (map[uuid.UUID]chain.ActionOutcome, error) {
+func (r *stubResolver) LogOutcomes(_ *types.Receipt) (map[uuid.UUID]chain.ActionOutcome, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
 	return r.outcomes, nil
+}
+
+func (r *stubResolver) StateOutcome(_ context.Context, id uuid.UUID) (chain.ActionOutcome, bool, error) {
+	if r.err != nil {
+		return chain.ActionOutcome{}, false, r.err
+	}
+	o, ok := r.states[id]
+	return o, ok, nil
 }
 
 func (r *stubResolver) Address() common.Address {
@@ -256,7 +271,7 @@ func newFlusherT() (*Flusher, *stubChain, *stubStore, *stubDLQ) {
 	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
 	st := newStubStore()
 	dq := &stubDLQ{}
-	f := NewFlusher([]ChainCaller{ch}, st, dq, 2*time.Second, slog.Default())
+	f := NewFlusher(ch, st, dq, 2*time.Second, slog.Default())
 	return f, ch, st, dq
 }
 
@@ -284,6 +299,31 @@ func makeActionMessage(clientDataJSON string) *Message {
 		Action: &chain.KeyAction{
 			ActionId:   [16]byte(id),
 			ActionType: 5,
+			Auth: chain.WebAuthnAuth{
+				ChallengeIndex:    big.NewInt(23),
+				TypeIndex:         big.NewInt(1),
+				AuthenticatorData: []byte("authdata"),
+				ClientDataJSON:    clientDataJSON,
+			},
+		},
+		Topic:    "wms.events.v1",
+		KafkaMsg: kafka.Message{Topic: "wms.events.v1"},
+	}
+}
+
+// makeWarehouseMessage — Message складского действия. clientDataJSON задаёт размер
+// calldata (единственное поле заметной длины) — им управляем чанкингом в тестах.
+func makeWarehouseMessage(clientDataJSON string) *Message {
+	id := uuid.New()
+	return &Message{
+		EventID:       id,
+		AggregateType: aggregateSignedAction,
+		WarehouseAction: &chain.WarehouseAction{
+			ActionId:    [16]byte(id),
+			ActionType:  1,
+			ItemIds:     []*big.Int{chain.UUIDToUint256(uuid.New().String())},
+			DetailsHash: [32]byte{0xde},
+			KeyId:       [32]byte{0xad},
 			Auth: chain.WebAuthnAuth{
 				ChallengeIndex:    big.NewInt(23),
 				TypeIndex:         big.NewInt(1),
@@ -1040,8 +1080,9 @@ func TestFlusher_ConfirmSignedAction_Outcomes(t *testing.T) {
 	}
 }
 
-// TestFlusher_ActionsWithoutRegistry_FailedAndDLQ: без реестра действия
-// терминально фейлятся («registry not configured») и уходят в DLQ, tx не строится.
+// TestFlusher_ActionsWithoutRegistry_FailedAndDLQ: без контракта ключевые действия
+// терминально фейлятся («applyKeyActions: contract not configured») и уходят в DLQ,
+// tx не строится.
 func TestFlusher_ActionsWithoutRegistry_FailedAndDLQ(t *testing.T) {
 	f, ch, st, dq := newFlusherT() // registry не подключён
 	msgs := []*Message{makeActionMessage(`{}`), makeActionMessage(`{}`)}
@@ -1053,8 +1094,101 @@ func TestFlusher_ActionsWithoutRegistry_FailedAndDLQ(t *testing.T) {
 		t.Errorf("no chain calls without registry, got %v", ch.calls)
 	}
 	for _, m := range msgs {
-		if st.failed[m.EventID] != "registry not configured" {
-			t.Errorf("event %s: want failed with 'registry not configured', got %q", m.EventID, st.failed[m.EventID])
+		if st.failed[m.EventID] != "applyKeyActions: contract not configured" {
+			t.Errorf("event %s: want failed with 'applyKeyActions: contract not configured', got %q", m.EventID, st.failed[m.EventID])
+		}
+	}
+	if len(dq.messages) != 1 || len(dq.messages[0]) != 2 {
+		t.Errorf("expected 1 DLQ batch of 2, got %v", dq.messages)
+	}
+}
+
+// TestFlusher_SplitSegments_LegacyWarehouseKey: окно [legacy, warehouse, warehouse,
+// key, warehouse] режется на 4 сегмента в порядке следования.
+func TestFlusher_SplitSegments_LegacyWarehouseKey(t *testing.T) {
+	legacy := makeMessages(1, "receiving")
+	w1, w2, w3 := makeWarehouseMessage(`{}`), makeWarehouseMessage(`{}`), makeWarehouseMessage(`{}`)
+	k := makeActionMessage(`{}`)
+	msgs := []*Message{legacy[0], w1, w2, k, w3}
+
+	segs := splitSegments(msgs)
+	if len(segs) != 4 {
+		t.Fatalf("expected 4 segments, got %d", len(segs))
+	}
+	want := []segmentKind{segmentLegacy, segmentWarehouse, segmentKey, segmentWarehouse}
+	for i, w := range want {
+		for _, m := range segs[i] {
+			if got := segmentOf(m); got != w {
+				t.Errorf("segment %d: kind = %d, want %d", i, got, w)
+			}
+		}
+	}
+	if len(segs[0]) != 1 || len(segs[1]) != 2 || len(segs[2]) != 1 || len(segs[3]) != 1 {
+		t.Fatalf("segment sizes: got %v", []int{len(segs[0]), len(segs[1]), len(segs[2]), len(segs[3])})
+	}
+	if segs[1][0] != w1 || segs[1][1] != w2 || segs[2][0] != k || segs[3][0] != w3 {
+		t.Errorf("segment contents out of order")
+	}
+}
+
+// TestFlusher_WarehouseSegment_SendsToWMS: сегмент складских действий уходит
+// SendCalldata на адрес warehouse-резолвера, calldata анпакится в те же действия;
+// Confirm разбирает исходы этим резолвером.
+func TestFlusher_WarehouseSegment_SendsToWMS(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	w1 := makeWarehouseMessage(`{"type":"webauthn.get","a":1}`)
+	w2 := makeWarehouseMessage(`{"type":"webauthn.get","b":2}`)
+	wh := &stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		w1.EventID: {Applied: true},
+		w2.EventID: {Applied: true},
+	}}
+	f.WithWarehouseActions(wh)
+
+	inflight, err := f.Send(context.Background(), []*Message{w1, w2})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(inflight) != 1 || inflight[0].Aggregate != aggregateSignedAction {
+		t.Fatalf("expected 1 signed_action inflight tx, got %+v", inflight)
+	}
+
+	if len(ch.tos) != 1 || ch.tos[0] != wh.Address() {
+		t.Errorf("SendCalldata to = %v, want %v", ch.tos, wh.Address())
+	}
+	want, err := chain.PackApplyActions([]chain.WarehouseAction{*w1.WarehouseAction, *w2.WarehouseAction})
+	if err != nil {
+		t.Fatalf("pack want: %v", err)
+	}
+	if len(ch.calldatas) != 1 || string(ch.calldatas[0]) != string(want) {
+		t.Errorf("calldata mismatch: got %d bytes, want %d (pack of both actions)", len(ch.calldatas[0]), len(want))
+	}
+
+	if err := f.Confirm(context.Background(), &inflight[0]); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	if !st.committed[w1.EventID] || !st.committed[w2.EventID] {
+		t.Errorf("both warehouse actions committed, got %v", st.committed)
+	}
+	if len(dq.messages) != 0 {
+		t.Errorf("no DLQ expected, got %d", len(dq.messages))
+	}
+}
+
+// TestFlusher_WarehouseSegmentWithoutResolver_TerminalFail: без warehouse-резолвера
+// складские действия терминально фейлятся с именем метода в причине, tx не строится.
+func TestFlusher_WarehouseSegmentWithoutResolver_TerminalFail(t *testing.T) {
+	f, ch, st, dq := newFlusherT()
+	msgs := []*Message{makeWarehouseMessage(`{}`), makeWarehouseMessage(`{}`)}
+
+	if err := f.Flush(context.Background(), msgs); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(ch.calls) != 0 {
+		t.Errorf("no chain calls without warehouse resolver, got %v", ch.calls)
+	}
+	for _, m := range msgs {
+		if st.failed[m.EventID] != "applyActions: contract not configured" {
+			t.Errorf("event %s: want 'applyActions: contract not configured', got %q", m.EventID, st.failed[m.EventID])
 		}
 	}
 	if len(dq.messages) != 1 || len(dq.messages[0]) != 2 {

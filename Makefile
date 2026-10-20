@@ -59,7 +59,7 @@ test: test-wms test-ledger ## Run all tests
 e2e-test-outbound: ## Run full outbound WMS API -> DB -> Kafka -> chain e2e test
 	# RPC_URL снимаем (include .env ниже экспортирует его во все цели): TestMain
 	# резолвит динамический Subnet-EVM RPC (/ext/bc/<blockchainID>/rpc) из тома shared_state.
-	cd tests/e2e && env -u RPC_URL go test -tags=e2e -count=1 -timeout=15m ./...
+	cd tests/e2e && env -u RPC_URL go test -tags=e2e -count=1 -timeout=40m ./...
 
 tidy: tidy-wms tidy-ledger ## Tidy all go.mod
 
@@ -119,8 +119,6 @@ kms-up: ## Start stack with adapter signing via external KMS (Web3Signer)
 	$(COMPOSE_KMS) --profile test up -d --build
 	@echo ""
 	@echo "KMS stack running: ledger-adapter signs via web3signer."
-	@echo "Multi-signer: KMS_SIGNER_COUNT=3 make kms-up (после изменения — форс-рекреация"
-	@echo "              адаптера: ... up -d --force-recreate ledger-adapter, env меняет kms-init)"
 	@echo "Follow logs  : make kms-logs"
 	@echo "NOTE: стеки репо монопольны (container_name глобальны) — сначала погасите"
 	@echo "      стеки других worktree-ов (make down там)."

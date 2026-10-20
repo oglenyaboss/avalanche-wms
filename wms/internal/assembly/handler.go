@@ -27,7 +27,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/allocate", h.Allocate).Methods(http.MethodPost)
 	router.HandleFunc("/tasks", h.GetTasks).Methods(http.MethodGet)
 	router.HandleFunc("/pick", h.Pick).Methods(http.MethodPost)
-	router.HandleFunc("/scan-shipping-buffer", h.ScanShippingBuffer).Methods(http.MethodPost)
+	router.HandleFunc("/scan-shipping-buffer/draft", h.DraftUnloadToShippingBuffer).Methods(http.MethodPost)
+	router.HandleFunc("/scan-shipping-buffer/submit", h.SubmitUnloadToShippingBuffer).Methods(http.MethodPost)
 }
 
 // Allocate - ищет новые заказы (NEW) для магазина (destinationID)
@@ -141,34 +142,6 @@ func (h *Handler) Pick(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
-func (h *Handler) ScanShippingBuffer(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := httputil.RequireOperator(w, r)
-	if !ok {
-		return
-	}
-
-	var req ScanShippingBufferRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
-		return
-	}
-
-	bufferBinID, err := uuid.Parse(req.BufferBinID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "buffer_bin_id не uuid")
-		return
-	}
-
-	result, err := h.svc.ScanShippingBuffer(r.Context(), operatorID, bufferBinID)
-	if err != nil {
-		status, code, message := mapServiceError(err)
-		writeError(w, status, code, message)
-		return
-	}
-
-	writeSuccess(w, http.StatusOK, result)
-}
-
 type envelope struct {
 	Success bool       `json:"success"`
 	Data    any        `json:"data"`
@@ -240,6 +213,8 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "CART_EMPTY", "Корзина оператора пуста"
 	case errors.Is(err, ErrDestinationMismatch):
 		return http.StatusConflict, "DESTINATION_MISMATCH", "Буфер отгрузки другого магазина: собранные товары не для этого пункта назначения"
+	case errors.Is(err, ErrDraftStale):
+		return http.StatusConflict, "DRAFT_STALE", "Состав корзины изменился, подтвердите выгрузку заново"
 	default:
 		log.Printf("assembly: unmapped service error -> 500: %v", err)
 		return http.StatusInternalServerError, "INTERNAL_ERROR", "Внутренняя ошибка сервера"

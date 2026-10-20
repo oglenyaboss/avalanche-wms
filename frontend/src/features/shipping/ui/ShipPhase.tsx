@@ -4,6 +4,7 @@ import type {
   ShippingBufferBin,
   ShippingBufferProduct,
 } from '@/entities/shipping'
+import { OperationChainStatus } from '@/entities/signed-action'
 import {
   Alert,
   AlertDescription,
@@ -25,6 +26,9 @@ interface ShipPhaseProps {
   selectedProductIds: string[]
   destinationMismatch: boolean
   partialMessage: string | null
+  // The id of the last signed ship operation — drives the post-partial-ship
+  // chain-status panel.
+  lastOperationId: string | null
   onToggleProduct: (productId: string) => void
   onScanProduct: (value: string) => Promise<void> | void
   onClearSelection: () => void
@@ -52,6 +56,7 @@ export function ShipPhase({
   selectedProductIds,
   destinationMismatch,
   partialMessage,
+  lastOperationId,
   onToggleProduct,
   onScanProduct,
   onClearSelection,
@@ -132,9 +137,14 @@ export function ShipPhase({
       )}
 
       {partialMessage ? (
-        <Alert variant="success">
-          <AlertDescription>{partialMessage}</AlertDescription>
-        </Alert>
+        <div className="flex flex-col gap-3">
+          <Alert variant="success">
+            <AlertDescription>{partialMessage}</AlertDescription>
+          </Alert>
+          {lastOperationId ? (
+            <OperationChainStatus operationId={lastOperationId} />
+          ) : null}
+        </div>
       ) : null}
 
       {/* Buffer contents + spot selection. */}

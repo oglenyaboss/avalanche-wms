@@ -54,7 +54,7 @@ type gateFixture struct {
 	TTNCode        string
 	CargoplaceCode string // first cargoplace (the one to scan)
 	CargoplaceID   uuid.UUID
-	CP2Code        string    // second cargoplace (left EXPECTED for accept-shipment)
+	CP2Code        string // second cargoplace (left EXPECTED for accept-shipment)
 	CP2ID          uuid.UUID
 }
 
@@ -167,7 +167,7 @@ func TestReceiving_GateFlow(t *testing.T) {
 	t.Run("scan-cargoplace moves cargoplace to RECEIVED_AT_GATE", func(t *testing.T) {
 		var result scanGateCargoplaceData
 		postJSON(t, env, token, "/receiving/gate/scan-cargoplace", map[string]string{
-			"shipment_id":    fx.ShipmentID.String(),
+			"shipment_id":     fx.ShipmentID.String(),
 			"cargoplace_code": fx.CargoplaceCode,
 		}, &result)
 
@@ -286,13 +286,13 @@ func TestReceiving_ScanCargoplace_AlreadyReceived(t *testing.T) {
 	}, nil)
 
 	postJSON[scanGateCargoplaceData](t, env, token, "/receiving/gate/scan-cargoplace", map[string]string{
-		"shipment_id":    fx.ShipmentID.String(),
+		"shipment_id":     fx.ShipmentID.String(),
 		"cargoplace_code": fx.CargoplaceCode,
 	}, nil)
 
 	// Second scan of the same cargoplace must fail.
 	status, code, _ := postExpectError(t, env, token, "/receiving/gate/scan-cargoplace", map[string]string{
-		"shipment_id":    fx.ShipmentID.String(),
+		"shipment_id":     fx.ShipmentID.String(),
 		"cargoplace_code": fx.CargoplaceCode,
 	})
 	require.Equal(t, http.StatusConflict, status)

@@ -1,6 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { mapKeyActionDraft, mapKeyConfirmation, mapOrgKeys, mapPasskey } from './passkeyApi'
+const apiMocks = vi.hoisted(() => ({
+  apiClient: { post: vi.fn() },
+}))
+
+vi.mock('@/shared/api', () => apiMocks)
+
+import { draftKeyRevoke, mapKeyActionDraft, mapKeyConfirmation, mapOrgKeys, mapPasskey } from './passkeyApi'
 
 describe('mapPasskey', () => {
   it('maps snake_case to camelCase', () => {
@@ -28,13 +34,19 @@ describe('mapPasskey', () => {
 
 describe('mapKeyConfirmation', () => {
   it('maps snake_case to camelCase, keeping null reject reason', () => {
-    expect(mapKeyConfirmation({ action_id: 'a-1', state: 'SENT', reject_reason: null })).toEqual({
+    expect(
+      mapKeyConfirmation({ action_id: 'a-1', action_type: 5, state: 'SENT', reject_reason: null })
+    ).toEqual({
       actionId: 'a-1',
+      actionType: 5,
       state: 'SENT',
       rejectReason: null,
     })
-    expect(mapKeyConfirmation({ action_id: 'a-2', state: 'REJECTED', reject_reason: 5 })).toEqual({
+    expect(
+      mapKeyConfirmation({ action_id: 'a-2', action_type: 6, state: 'REJECTED', reject_reason: 5 })
+    ).toEqual({
       actionId: 'a-2',
+      actionType: 6,
       state: 'REJECTED',
       rejectReason: 5,
     })
@@ -65,6 +77,39 @@ describe('mapKeyActionDraft', () => {
   })
 })
 
+describe('draftKeyRevoke', () => {
+  it('posts the target key id to the revoke draft endpoint and maps the draft', async () => {
+    apiMocks.apiClient.post.mockResolvedValue({
+      data: {
+        success: true,
+        error: null,
+        data: {
+          action_id: '01929c5e-6f00-7000-8000-000000002001',
+          action_type: 6,
+          challenge: 'AQID',
+          rp_id: 'localhost',
+          allow_credentials: [{ type: 'public-key', id: 'AQID' }],
+          user_verification: 'required',
+          timeout: 60000,
+        },
+      },
+    })
+
+    await expect(draftKeyRevoke('0xfeed000000000000beef')).resolves.toEqual({
+      actionId: '01929c5e-6f00-7000-8000-000000002001',
+      actionType: 6,
+      challenge: 'AQID',
+      rpId: 'localhost',
+      allowCredentials: [{ type: 'public-key', id: 'AQID' }],
+      userVerification: 'required',
+      timeout: 60000,
+    })
+    expect(apiMocks.apiClient.post).toHaveBeenCalledWith('/passkeys/actions/key-revoke/draft', {
+      target_key_id: '0xfeed000000000000beef',
+    })
+  })
+})
+
 describe('mapOrgKeys', () => {
   it('maps organization, members and confirmations, keeping nulls for members without a key', () => {
     const keys = mapOrgKeys({
@@ -84,7 +129,7 @@ describe('mapOrgKeys', () => {
             status: 'PENDING',
             created_at: '2026-10-02T10:00:00Z',
           },
-          confirmation: { action_id: 'a-3', state: 'SENT', reject_reason: null },
+          confirmation: { action_id: 'a-3', action_type: 5, state: 'SENT', reject_reason: null },
         },
       ],
     })
@@ -105,7 +150,7 @@ describe('mapOrgKeys', () => {
             status: 'PENDING',
             createdAt: '2026-10-02T10:00:00Z',
           },
-          confirmation: { actionId: 'a-3', state: 'SENT', rejectReason: null },
+          confirmation: { actionId: 'a-3', actionType: 5, state: 'SENT', rejectReason: null },
         },
       ],
     })

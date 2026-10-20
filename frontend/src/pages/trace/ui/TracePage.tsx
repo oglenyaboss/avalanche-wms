@@ -1,7 +1,8 @@
 import { isAxiosError } from 'axios'
-import { useSearchParams } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 
 import { ProductTimeline, TraceLookup, useProductTimeline } from '@/features/traceability'
+import { routes } from '@/shared/config'
 
 // The query rejects with an AxiosError on non-2xx (before unwrap runs), so
 // error.message is the generic "Request failed…". Pull the backend envelope
@@ -43,7 +44,15 @@ export function TracePage() {
           ) : isError ? (
             <p className="text-sm text-status-failed">{timelineErrorText(error)}</p>
           ) : data ? (
-            <ProductTimeline timeline={data} />
+            <div className="flex flex-col gap-4">
+              <ProductTimeline timeline={data} />
+              <Link
+                to={`${routes.audit}?key=${encodeURIComponent(key)}`}
+                className="self-start text-sm font-medium text-primary hover:underline"
+              >
+                Проверить подписи и цепь →
+              </Link>
+            </div>
           ) : null}
         </div>
       )}

@@ -1,10 +1,16 @@
+import { rejectReasonText } from '@/shared/lib'
+
 import type { KeyConfirmation, PasskeyRole, PasskeyStatus } from './types'
+
+// Reject-reason labels live in @/shared/lib (shared with the signed-action
+// close flow); re-exported so the passkey public API stays stable.
+export { rejectReasonText }
 
 const STATUS_LABELS: Record<PasskeyStatus, string> = {
   PENDING: 'Ожидает подтверждения',
   ACTIVE: 'Активен в цепи',
   REJECTED: 'Отклонён',
-  REVOKED: 'Отозван',
+  REVOKED: 'Отозван в цепи',
 }
 
 export function passkeyStatusLabel(status: PasskeyStatus): string {
@@ -20,33 +26,40 @@ export function pendingKeyHint(role: PasskeyRole): string {
   return PENDING_HINTS[role]
 }
 
-const REJECT_REASON_LABELS: Record<number, string> = {
-  1: 'Ключ подписанта неизвестен реестру',
-  2: 'Ключ подписанта отозван',
-  3: 'Подпись не прошла проверку в цепи',
-  4: 'Неверный тип действия',
-  5: 'Подписант не админ организации',
-  6: 'Ключ уже зарегистрирован в реестре',
-  7: 'Некорректный публичный ключ',
-  8: 'Ключ из другой организации',
-  9: 'Ключ не принадлежит оператору',
+// Action-type-specific confirmation texts: 5 = KeyRegister, 6 = KeyRevoke.
+interface ConfirmationLabels {
+  SENT: string
+  APPLIED: string
+  rejectedPrefix: string
+  FAILED: string
 }
 
-export function rejectReasonText(code: number | null): string {
-  if (code === null) return 'Причина неизвестна'
-  return REJECT_REASON_LABELS[code] ?? `Код ${code}`
+const CONFIRMATION_LABELS: Record<number, ConfirmationLabels> = {
+  5: {
+    SENT: 'Отправлено в цепь',
+    APPLIED: 'Подтверждено в цепи',
+    rejectedPrefix: 'Отклонено',
+    FAILED: 'Не удалось записать в цепь',
+  },
+  6: {
+    SENT: 'Отзыв отправлен в цепь',
+    APPLIED: 'Отозван в цепи',
+    rejectedPrefix: 'Отзыв отклонён',
+    FAILED: 'Не удалось записать отзыв в цепь',
+  },
 }
 
 export function confirmationText(c: KeyConfirmation): string {
+  const labels = CONFIRMATION_LABELS[c.actionType] ?? CONFIRMATION_LABELS[5]
   switch (c.state) {
     case 'SENT':
-      return 'Отправлено в цепь'
+      return labels.SENT
     case 'APPLIED':
-      return 'Подтверждено в цепи'
+      return labels.APPLIED
     case 'REJECTED':
-      return `Отклонено: ${rejectReasonText(c.rejectReason)}`
+      return `${labels.rejectedPrefix}: ${rejectReasonText(c.rejectReason)}`
     case 'FAILED':
-      return 'Не удалось записать в цепь'
+      return labels.FAILED
   }
 }
 

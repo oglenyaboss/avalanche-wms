@@ -15,6 +15,7 @@ const (
 	msgOperatorOnly    = "Только оператор может выполнять это действие"
 	msgAdminOnly       = "Только администратор может выполнять это действие"
 	msgAdminOrOperator = "Требуется роль администратора или оператора"
+	msgAuditorOrAdmin  = "Требуется роль аудитора или администратора"
 )
 
 // RequireOperator authorizes the request for the OPERATOR role only. It is used
@@ -36,6 +37,14 @@ func RequireAdmin(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 // Behavior is otherwise identical to RequireOperator.
 func RequireAdminOrOperator(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	return requireRole(w, r, msgAdminOrOperator, domain.UserRoleAdmin, domain.UserRoleOperator)
+}
+
+// RequireAuditorOrAdmin authorizes the request for the AUDITOR or ADMIN roles.
+// Read-only audit endpoints use it; every other gate stays role-specific, so an
+// auditor cannot call any mutating or operational endpoint.
+// Behavior is otherwise identical to RequireOperator.
+func RequireAuditorOrAdmin(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	return requireRole(w, r, msgAuditorOrAdmin, domain.UserRoleAuditor, domain.UserRoleAdmin)
 }
 
 // requireRole is the shared gate: it requires an authenticated user whose role is

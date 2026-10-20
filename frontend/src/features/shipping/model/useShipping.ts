@@ -1,7 +1,11 @@
 import { useReducer } from 'react'
 import { useMutation } from '@tanstack/react-query'
 
-import { scanBuffer, scanDriver, ship } from '../api/shippingApi'
+import { signOperation } from '@/entities/signed-action'
+import { webauthnSignErrorText } from '@/shared/lib'
+
+import { draftShip, scanBuffer, scanDriver, submitShip } from '../api/shippingApi'
+import type { ShipParams } from '../api/shippingApi'
 import { getShippingErrorMessage } from './errors'
 import { initialShippingState, shippingReducer } from './shippingReducer'
 
@@ -20,9 +24,15 @@ export function useShipping() {
     mutationFn: scanDriver,
     retry: false,
   })
+  // Shipping the buffer is one signed action: draft the bulk/spot batch, one
+  // passkey touch per part, then submit the assertions.
   const shipMutation = useMutation({
     mutationKey: ['shipping', 'ship'],
-    mutationFn: ship,
+    mutationFn: async (params: ShipParams) => {
+      const draft = await draftShip(params)
+      const assertions = await signOperation(draft)
+      return submitShip(draft.operationId, assertions)
+    },
     retry: false,
   })
 
@@ -111,6 +121,15 @@ export function useShipping() {
         dispatch({ type: 'BUFFER_REFRESHED', result: refreshed })
       }
     } catch (error) {
+      // A DOMException comes from the authenticator (dismissed prompt or
+      // timeout) — the ship may not even have been requested, so the shipping
+      // error classification does not apply; show the signing text instead.
+      const signError = webauthnSignErrorText(error)
+      if (signError) {
+        showError(signError)
+        return
+      }
+
       showError(getShippingErrorMessage(error))
     }
   }

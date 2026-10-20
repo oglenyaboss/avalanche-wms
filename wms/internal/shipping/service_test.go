@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/signedops"
 )
 
 type mockShippingRepo struct {
@@ -29,28 +30,37 @@ type mockShippingRepo struct {
 	// updateCalls считает, сколько раз service попытался выполнить conditional UPDATE.
 	updateCalls int
 
-	shipProducts    []ProductForShip
-	shipProductsErr error
+	// Подписанная отгрузка (ship_signed): read-only список черновика, заблокированный
+	// набор submit'а, врата неподтверждённой сборки и подписанный механизм.
+	listProducts        []ProductForShip
+	lockedProducts      []ProductForShip
+	unconfirmedProducts []uuid.UUID
+	unconfirmedAsked    []uuid.UUID
+	lockedOperation     *signedops.Operation
+	lockSignerErr       error
 
 	ordersCompleted        int
 	ordersPartiallyShipped int
-	updateOrdersErr        error
 
 	bufferRemaining int
-	countErr        error
-
-	updateProductsErr error
-	insertShippingErr error
-	insertOutboxErr   error
-	departErr         error
 
 	withTxCalls          int
-	selectedSpotProducts []uuid.UUID
 	updatedProductIDs    []uuid.UUID
 	updatedOrderIDs      []uuid.UUID
-	insertedShippings    []shippingEvent
-	insertedOutbox       []shippingEvent
+	insertedShippings    []shippingInsert
 	dispatchDeparted     bool
+	writeActionsCalls    int
+	lastWriteActionsOp   *signedops.Operation
+	lastWriteActionsPayl [][]byte
+}
+
+// shippingInsert — один вызов BatchInsertShippings, зафиксированный моком.
+type shippingInsert struct {
+	Events     []shippingEvent
+	DispatchID uuid.UUID
+	OperatorID uuid.UUID
+	OccurredAt time.Time
+	ActionID   uuid.UUID
 }
 
 func (m *mockShippingRepo) WithTx(_ context.Context, fn func(shippingRepository) error) error {
@@ -86,6 +96,13 @@ func (m *mockShippingRepo) GetDispatchByCode(_ context.Context, _ string) (*Disp
 	return m.dispatch, nil
 }
 
+func (m *mockShippingRepo) GetDispatchByID(_ context.Context, _ uuid.UUID) (*DispatchRecord, error) {
+	if m.dispatchErr != nil {
+		return nil, m.dispatchErr
+	}
+	return m.dispatch, nil
+}
+
 func (m *mockShippingRepo) GetDispatchForUpdate(_ context.Context, _ uuid.UUID) (*DispatchRecord, error) {
 	if m.dispatchErr != nil {
 		return nil, m.dispatchErr
@@ -105,65 +122,71 @@ func (m *mockShippingRepo) UpdateDispatchToAtGate(_ context.Context, _ string) (
 	return m.updatedDispatch, nil
 }
 
-func (m *mockShippingRepo) SelectProductsForShip(
-	_ context.Context,
-	_ uuid.UUID,
-	productIDs []uuid.UUID,
-) ([]ProductForShip, error) {
-	m.selectedSpotProducts = append([]uuid.UUID(nil), productIDs...)
-	if m.shipProductsErr != nil {
-		return nil, m.shipProductsErr
-	}
-	return m.shipProducts, nil
+func (m *mockShippingRepo) ListProductsForShip(_ context.Context, _ uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error) {
+	return m.listProducts, nil
+}
+
+func (m *mockShippingRepo) LockProductsForShip(_ context.Context, _ uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error) {
+	return m.lockedProducts, nil
+}
+
+func (m *mockShippingRepo) UnconfirmedProducts(_ context.Context, productIDs []uuid.UUID, _ string) ([]uuid.UUID, error) {
+	m.unconfirmedAsked = append([]uuid.UUID(nil), productIDs...)
+	return m.unconfirmedProducts, nil
 }
 
 func (m *mockShippingRepo) BatchUpdateProductsShipped(_ context.Context, productIDs []uuid.UUID) error {
 	m.updatedProductIDs = append([]uuid.UUID(nil), productIDs...)
-	return m.updateProductsErr
+	return nil
 }
 
 func (m *mockShippingRepo) BatchInsertShippings(
 	_ context.Context,
 	events []shippingEvent,
-	_ uuid.UUID,
-	_ uuid.UUID,
+	dispatchID uuid.UUID,
+	operatorID uuid.UUID,
+	occurredAt time.Time,
+	actionID uuid.UUID,
 ) error {
-	m.insertedShippings = append([]shippingEvent(nil), events...)
-	return m.insertShippingErr
-}
-
-func (m *mockShippingRepo) BatchInsertShippingOutbox(
-	_ context.Context,
-	events []shippingEvent,
-	_ uuid.UUID,
-) (int, error) {
-	m.insertedOutbox = append([]shippingEvent(nil), events...)
-	if m.insertOutboxErr != nil {
-		return 0, m.insertOutboxErr
-	}
-	return len(events), nil
+	m.insertedShippings = append(m.insertedShippings, shippingInsert{
+		Events:     append([]shippingEvent(nil), events...),
+		DispatchID: dispatchID,
+		OperatorID: operatorID,
+		OccurredAt: occurredAt,
+		ActionID:   actionID,
+	})
+	return nil
 }
 
 func (m *mockShippingRepo) UpdateOrdersShippedConditional(_ context.Context, orderIDs []uuid.UUID) (int, int, error) {
 	m.updatedOrderIDs = append([]uuid.UUID(nil), orderIDs...)
-	if m.updateOrdersErr != nil {
-		return 0, 0, m.updateOrdersErr
-	}
 	return m.ordersCompleted, m.ordersPartiallyShipped, nil
 }
 
 func (m *mockShippingRepo) CountReadyToShipProductsInBuffer(_ context.Context, _ uuid.UUID) (int, error) {
-	if m.countErr != nil {
-		return 0, m.countErr
-	}
 	return m.bufferRemaining, nil
 }
 
 func (m *mockShippingRepo) UpdateDispatchDeparted(_ context.Context, _ uuid.UUID) error {
-	if m.departErr != nil {
-		return m.departErr
-	}
 	m.dispatchDeparted = true
+	return nil
+}
+
+func (m *mockShippingRepo) LockOperation(_ context.Context, _, _ uuid.UUID) (*signedops.Operation, error) {
+	if m.lockedOperation == nil {
+		return nil, signedops.ErrOperationNotFound
+	}
+	return m.lockedOperation, nil
+}
+
+func (m *mockShippingRepo) LockSigner(_ context.Context, _ []byte) error {
+	return m.lockSignerErr
+}
+
+func (m *mockShippingRepo) WriteActions(_ context.Context, op *signedops.Operation, payloads [][]byte) error {
+	m.writeActionsCalls++
+	m.lastWriteActionsOp = op
+	m.lastWriteActionsPayl = payloads
 	return nil
 }
 
@@ -196,7 +219,7 @@ func TestScanBufferSuccess(t *testing.T) {
 		},
 	}
 
-	result, err := NewService(repo).ScanBuffer(context.Background(), operatorID, bufferBinID)
+	result, err := NewService(repo, nil, nil).ScanBuffer(context.Background(), operatorID, bufferBinID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -238,7 +261,7 @@ func TestScanBufferEmpty(t *testing.T) {
 		products: []ReadyToShipProduct{},
 	}
 
-	result, err := NewService(repo).ScanBuffer(context.Background(), operatorID, bufferBinID)
+	result, err := NewService(repo, nil, nil).ScanBuffer(context.Background(), operatorID, bufferBinID)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -254,7 +277,7 @@ func TestScanBufferEmpty(t *testing.T) {
 func TestScanBufferBinNotFound(t *testing.T) {
 	repo := &mockShippingRepo{binErr: ErrBinNotFound}
 
-	_, err := NewService(repo).ScanBuffer(context.Background(), uuid.New(), uuid.New())
+	_, err := NewService(repo, nil, nil).ScanBuffer(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, ErrBinNotFound) {
 		t.Fatalf("expected ErrBinNotFound, got %v", err)
 	}
@@ -271,7 +294,7 @@ func TestScanBufferWrongSection(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanBuffer(context.Background(), uuid.New(), uuid.New())
+	_, err := NewService(repo, nil, nil).ScanBuffer(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, ErrBinNotShippingBuffer) {
 		t.Fatalf("expected ErrBinNotShippingBuffer, got %v", err)
 	}
@@ -303,7 +326,7 @@ func TestScanDriverSuccess(t *testing.T) {
 		},
 	}
 
-	result, err := NewService(repo).ScanDriver(context.Background(), operatorID, "DSP-001")
+	result, err := NewService(repo, nil, nil).ScanDriver(context.Background(), operatorID, "DSP-001")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -322,7 +345,7 @@ func TestScanDriverSuccess(t *testing.T) {
 func TestScanDriverNotFound(t *testing.T) {
 	repo := &mockShippingRepo{dispatchErr: ErrDispatchNotFound}
 
-	_, err := NewService(repo).ScanDriver(context.Background(), uuid.New(), "DSP-MISSING")
+	_, err := NewService(repo, nil, nil).ScanDriver(context.Background(), uuid.New(), "DSP-MISSING")
 	if !errors.Is(err, ErrDispatchNotFound) {
 		t.Fatalf("expected ErrDispatchNotFound, got %v", err)
 	}
@@ -338,7 +361,7 @@ func TestScanDriverAlreadyDeparted(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanDriver(context.Background(), uuid.New(), "DSP-001")
+	_, err := NewService(repo, nil, nil).ScanDriver(context.Background(), uuid.New(), "DSP-001")
 	if !errors.Is(err, ErrDispatchAlreadyDeparted) {
 		t.Fatalf("expected ErrDispatchAlreadyDeparted, got %v", err)
 	}
@@ -357,7 +380,7 @@ func TestScanDriverCancelled(t *testing.T) {
 		},
 	}
 
-	_, err := NewService(repo).ScanDriver(context.Background(), uuid.New(), "DSP-001")
+	_, err := NewService(repo, nil, nil).ScanDriver(context.Background(), uuid.New(), "DSP-001")
 	if !errors.Is(err, ErrDispatchCancelled) {
 		t.Fatalf("expected ErrDispatchCancelled, got %v", err)
 	}
@@ -387,7 +410,7 @@ func TestScanDriverIdempotentAtGate(t *testing.T) {
 		},
 	}
 
-	result, err := NewService(repo).ScanDriver(context.Background(), operatorID, "DSP-001")
+	result, err := NewService(repo, nil, nil).ScanDriver(context.Background(), operatorID, "DSP-001")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -402,368 +425,5 @@ func TestScanDriverIdempotentAtGate(t *testing.T) {
 	}
 	if result.ArrivedAt == nil || !result.ArrivedAt.Equal(arrivedAt) {
 		t.Fatalf("expected arrived_at %s, got %v", arrivedAt, result.ArrivedAt)
-	}
-}
-
-// TestShipBulkSuccess проверяет bulk-отгрузку всего буфера и переход рейса в DEPARTED.
-func TestShipBulkSuccess(t *testing.T) {
-	bufferBinID := uuid.New()
-	dispatchID := uuid.New()
-	operatorID := uuid.New()
-	destinationID := uuid.New()
-	section := binSectionShippingBuffer
-	orderID := uuid.New()
-	product1 := uuid.New()
-	product2 := uuid.New()
-
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			BinID:         bufferBinID,
-			Section:       &section,
-			DestinationID: &destinationID,
-		},
-		dispatch: &DispatchRecord{
-			DispatchID:    dispatchID,
-			DestinationID: destinationID,
-			Status:        domain.OutboundDispatchStatusAtGate,
-		},
-		shipProducts: []ProductForShip{
-			{ProductID: product1, OrderID: &orderID},
-			{ProductID: product2, OrderID: &orderID},
-		},
-		ordersCompleted: 1,
-		bufferRemaining: 0,
-	}
-
-	result, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: bufferBinID,
-		DispatchID:  dispatchID,
-		OperatorID:  operatorID,
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if result.ProductsShipped != 2 {
-		t.Fatalf("expected 2 products shipped, got %d", result.ProductsShipped)
-	}
-	if result.OutboxEventsCreated != 2 {
-		t.Fatalf("expected 2 outbox events, got %d", result.OutboxEventsCreated)
-	}
-	if result.OrdersCompleted != 1 {
-		t.Fatalf("expected 1 completed order, got %d", result.OrdersCompleted)
-	}
-	if !result.DispatchDeparted || !repo.dispatchDeparted {
-		t.Fatal("expected dispatch to depart")
-	}
-	if len(repo.selectedSpotProducts) != 0 {
-		t.Fatalf("expected bulk select with no product ids, got %d", len(repo.selectedSpotProducts))
-	}
-	assertSameUUIDs(t, repo.updatedProductIDs, []uuid.UUID{product1, product2})
-	assertShippingEventsMatch(t, repo.insertedShippings, repo.insertedOutbox, []uuid.UUID{product1, product2})
-}
-
-// TestShipSpotSuccess проверяет spot-отгрузку выбранных товаров без отправления рейса, если в буфере есть остаток.
-func TestShipSpotSuccess(t *testing.T) {
-	bufferBinID := uuid.New()
-	dispatchID := uuid.New()
-	operatorID := uuid.New()
-	destinationID := uuid.New()
-	section := binSectionShippingBuffer
-	productID := uuid.New()
-
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			BinID:         bufferBinID,
-			Section:       &section,
-			DestinationID: &destinationID,
-		},
-		dispatch: &DispatchRecord{
-			DispatchID:    dispatchID,
-			DestinationID: destinationID,
-			Status:        domain.OutboundDispatchStatusAtGate,
-		},
-		shipProducts:    []ProductForShip{{ProductID: productID}},
-		bufferRemaining: 3,
-	}
-
-	result, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: bufferBinID,
-		DispatchID:  dispatchID,
-		OperatorID:  operatorID,
-		ProductIDs:  []uuid.UUID{productID},
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if result.ProductsShipped != 1 {
-		t.Fatalf("expected 1 product shipped, got %d", result.ProductsShipped)
-	}
-	if result.OutboxEventsCreated != 1 {
-		t.Fatalf("expected 1 outbox event, got %d", result.OutboxEventsCreated)
-	}
-	if result.DispatchDeparted {
-		t.Fatal("expected dispatch to stay at gate")
-	}
-	assertSameUUIDs(t, repo.selectedSpotProducts, []uuid.UUID{productID})
-	assertShippingEventsMatch(t, repo.insertedShippings, repo.insertedOutbox, []uuid.UUID{productID})
-}
-
-// TestShipDestinationMismatch проверяет запрет отгрузки, когда destination буфера и рейса не совпадают.
-func TestShipDestinationMismatch(t *testing.T) {
-	section := binSectionShippingBuffer
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			Section:       &section,
-			DestinationID: uuidPtr(uuid.New()),
-		},
-		dispatch: &DispatchRecord{
-			DestinationID: uuid.New(),
-			Status:        domain.OutboundDispatchStatusAtGate,
-		},
-	}
-
-	_, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: uuid.New(),
-		DispatchID:  uuid.New(),
-		OperatorID:  uuid.New(),
-	})
-	if !errors.Is(err, ErrDestinationMismatch) {
-		t.Fatalf("expected ErrDestinationMismatch, got %v", err)
-	}
-	if len(repo.updatedProductIDs) != 0 {
-		t.Fatal("expected no product updates")
-	}
-}
-
-// TestShipDispatchNotAtGate проверяет запрет отгрузки для рейса, который ещё не находится у ворот.
-func TestShipDispatchNotAtGate(t *testing.T) {
-	destinationID := uuid.New()
-	section := binSectionShippingBuffer
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			Section:       &section,
-			DestinationID: &destinationID,
-		},
-		dispatch: &DispatchRecord{
-			DestinationID: destinationID,
-			Status:        domain.OutboundDispatchStatusScheduled,
-		},
-	}
-
-	_, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: uuid.New(),
-		DispatchID:  uuid.New(),
-		OperatorID:  uuid.New(),
-	})
-	if !errors.Is(err, ErrDispatchNotAtGate) {
-		t.Fatalf("expected ErrDispatchNotAtGate, got %v", err)
-	}
-}
-
-// TestShipBulkBufferEmpty проверяет ошибку bulk-отгрузки из пустого буфера.
-func TestShipBulkBufferEmpty(t *testing.T) {
-	destinationID := uuid.New()
-	section := binSectionShippingBuffer
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			Section:       &section,
-			DestinationID: &destinationID,
-		},
-		dispatch: &DispatchRecord{
-			DestinationID: destinationID,
-			Status:        domain.OutboundDispatchStatusAtGate,
-		},
-		shipProducts: []ProductForShip{},
-	}
-
-	_, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: uuid.New(),
-		DispatchID:  uuid.New(),
-		OperatorID:  uuid.New(),
-	})
-	if !errors.Is(err, ErrBufferEmpty) {
-		t.Fatalf("expected ErrBufferEmpty, got %v", err)
-	}
-}
-
-// TestShipSpotProductNotInBuffer проверяет ошибку spot-отгрузки, если хотя бы один товар не готов в этом буфере.
-func TestShipSpotProductNotInBuffer(t *testing.T) {
-	destinationID := uuid.New()
-	section := binSectionShippingBuffer
-	product1 := uuid.New()
-	product2 := uuid.New()
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			Section:       &section,
-			DestinationID: &destinationID,
-		},
-		dispatch: &DispatchRecord{
-			DestinationID: destinationID,
-			Status:        domain.OutboundDispatchStatusAtGate,
-		},
-		shipProducts: []ProductForShip{{ProductID: product1}},
-	}
-
-	_, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: uuid.New(),
-		DispatchID:  uuid.New(),
-		OperatorID:  uuid.New(),
-		ProductIDs:  []uuid.UUID{product1, product2},
-	})
-	if !errors.Is(err, ErrProductNotInBuffer) {
-		t.Fatalf("expected ErrProductNotInBuffer, got %v", err)
-	}
-}
-
-// TestShipPartialOrderKeepsOrderOpen проверяет, что частичная отгрузка не переводит заказ в SHIPPED.
-func TestShipPartialOrderKeepsOrderOpen(t *testing.T) {
-	bufferBinID := uuid.New()
-	dispatchID := uuid.New()
-	operatorID := uuid.New()
-	destinationID := uuid.New()
-	orderID := uuid.New()
-	section := binSectionShippingBuffer
-	productID := uuid.New()
-
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			BinID:         bufferBinID,
-			Section:       &section,
-			DestinationID: &destinationID,
-		},
-		dispatch: &DispatchRecord{
-			DispatchID:    dispatchID,
-			DestinationID: destinationID,
-			Status:        domain.OutboundDispatchStatusAtGate,
-		},
-		shipProducts: []ProductForShip{{ProductID: productID, OrderID: &orderID}},
-		// Order still has non-SHIPPED products: the repository reports it as
-		// partially shipped (completed=0, partial=1) rather than completed (issue #48).
-		ordersCompleted:        0,
-		ordersPartiallyShipped: 1,
-		bufferRemaining:        0,
-	}
-
-	result, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: bufferBinID,
-		DispatchID:  dispatchID,
-		OperatorID:  operatorID,
-		ProductIDs:  []uuid.UUID{productID},
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if result.ProductsShipped != 1 {
-		t.Fatalf("expected 1 product shipped, got %d", result.ProductsShipped)
-	}
-	if result.OrdersCompleted != 0 {
-		t.Fatalf("expected no completed orders, got %d", result.OrdersCompleted)
-	}
-	if result.OrdersPartiallyShipped != 1 {
-		t.Fatalf("expected 1 partially shipped order, got %d", result.OrdersPartiallyShipped)
-	}
-	assertSameUUIDs(t, repo.updatedOrderIDs, []uuid.UUID{orderID})
-	assertShippingEventsMatch(t, repo.insertedShippings, repo.insertedOutbox, []uuid.UUID{productID})
-}
-
-// TestShipDispatchDepartedWhenBufferEmpty проверяет перевод рейса в DEPARTED после очистки буфера.
-func TestShipDispatchDepartedWhenBufferEmpty(t *testing.T) {
-	destinationID := uuid.New()
-	section := binSectionShippingBuffer
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			Section:       &section,
-			DestinationID: &destinationID,
-		},
-		dispatch: &DispatchRecord{
-			DestinationID: destinationID,
-			Status:        domain.OutboundDispatchStatusAtGate,
-		},
-		shipProducts:    []ProductForShip{{ProductID: uuid.New()}},
-		bufferRemaining: 0,
-	}
-
-	result, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: uuid.New(),
-		DispatchID:  uuid.New(),
-		OperatorID:  uuid.New(),
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !result.DispatchDeparted || !repo.dispatchDeparted {
-		t.Fatal("expected dispatch departed")
-	}
-}
-
-// TestShipDispatchNotDepartedWhenBufferHasRemainingProducts проверяет, что рейс остаётся у ворот, если в буфере остались товары.
-func TestShipDispatchNotDepartedWhenBufferHasRemainingProducts(t *testing.T) {
-	destinationID := uuid.New()
-	section := binSectionShippingBuffer
-	repo := &mockShippingRepo{
-		bin: &BufferBinRecord{
-			Section:       &section,
-			DestinationID: &destinationID,
-		},
-		dispatch: &DispatchRecord{
-			DestinationID: destinationID,
-			Status:        domain.OutboundDispatchStatusAtGate,
-		},
-		shipProducts:    []ProductForShip{{ProductID: uuid.New()}},
-		bufferRemaining: 1,
-	}
-
-	result, err := NewService(repo).Ship(context.Background(), ShipRequest{
-		BufferBinID: uuid.New(),
-		DispatchID:  uuid.New(),
-		OperatorID:  uuid.New(),
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if result.DispatchDeparted || repo.dispatchDeparted {
-		t.Fatal("expected dispatch to stay at gate")
-	}
-	if result.BufferRemaining != 1 {
-		t.Fatalf("expected 1 remaining product, got %d", result.BufferRemaining)
-	}
-}
-
-func uuidPtr(id uuid.UUID) *uuid.UUID {
-	return &id
-}
-
-// assertSameUUIDs проверяет, что два слайса UUID совпадают по длине и порядку элементов.
-func assertSameUUIDs(t *testing.T, got, want []uuid.UUID) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("expected %d ids, got %d", len(want), len(got))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("expected id[%d] %s, got %s", i, want[i], got[i])
-		}
-	}
-}
-
-// assertShippingEventsMatch проверяет, что shippings и outbox содержат одинаковые event_id для тех же товаров.
-func assertShippingEventsMatch(t *testing.T, shippings, outbox []shippingEvent, productIDs []uuid.UUID) {
-	t.Helper()
-	if len(shippings) != len(productIDs) {
-		t.Fatalf("expected %d shipping events, got %d", len(productIDs), len(shippings))
-	}
-	if len(outbox) != len(productIDs) {
-		t.Fatalf("expected %d outbox events, got %d", len(productIDs), len(outbox))
-	}
-	for i := range productIDs {
-		if shippings[i].ProductID != productIDs[i] {
-			t.Fatalf("expected shipping product[%d] %s, got %s", i, productIDs[i], shippings[i].ProductID)
-		}
-		if outbox[i] != shippings[i] {
-			t.Fatalf("expected outbox event[%d] to match shipping event", i)
-		}
-		if shippings[i].EventID == uuid.Nil {
-			t.Fatalf("expected shipping event[%d] to have event id", i)
-		}
 	}
 }

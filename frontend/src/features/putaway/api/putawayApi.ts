@@ -4,6 +4,13 @@ import type {
   PickedProductResult,
   StoragePlacement,
 } from '@/entities/putaway'
+import {
+  mapSignedOperationDraft,
+  toAssertionsBody,
+  type PartAssertion,
+  type SignedOperationDraft,
+  type SignedOperationDraftResponse,
+} from '@/entities/signed-action'
 import { apiClient } from '@/shared/api'
 
 // ── Wire shapes (snake_case, as returned by the WMS API) ────────────────────
@@ -55,6 +62,12 @@ interface ScanStorageBinResponse {
   storage_bin_code: string
   products_placed: number
   outbox_events_created: number
+}
+
+// scan-storage-bin/submit result: today's placement result plus the id of the
+// signed operation that performed it.
+interface PlaceToStorageBinResponse extends ScanStorageBinResponse {
+  operation_id: string
 }
 
 // ── Mappers ─────────────────────────────────────────────────────────────────
@@ -111,18 +124,40 @@ export async function scanProduct({
   }
 }
 
-export interface ScanStorageBinInput {
+export interface DraftPlaceToStorageBinInput {
   productIds: string[]
   storageBinId: string
 }
 
-export async function scanStorageBin({
+// Drafts the signed putaway operation: the whole unplaced cart into one
+// storage bin. Errors: STORAGE_BIN_NOT_FOUND, PRODUCT_NOT_IN_BUFFER,
+// PRODUCT_NOT_RECEIVED, CHAIN_EVENT_REJECTED, SIGNER_KEY_NOT_ACTIVE.
+export async function draftPlaceToStorageBin({
   productIds,
   storageBinId,
-}: ScanStorageBinInput): Promise<StoragePlacement> {
-  const { data } = await apiClient.post<ApiEnvelope<ScanStorageBinResponse>>(
-    '/putaway/scan-storage-bin',
-    { product_ids: productIds, storage_bin_id: storageBinId },
+}: DraftPlaceToStorageBinInput): Promise<SignedOperationDraft> {
+  const { data } = await apiClient.post<
+    ApiEnvelope<SignedOperationDraftResponse>
+  >('/putaway/scan-storage-bin/draft', {
+    product_ids: productIds,
+    storage_bin_id: storageBinId,
+  })
+
+  return mapSignedOperationDraft(unwrap(data))
+}
+
+// Submits the per-part assertions produced by signOperation. Extra errors:
+// DRAFT_STALE, OPERATION_ALREADY_SUBMITTED, INVALID_ASSERTION.
+export async function submitPlaceToStorageBin(
+  operationId: string,
+  assertions: PartAssertion[],
+): Promise<StoragePlacement> {
+  const { data } = await apiClient.post<ApiEnvelope<PlaceToStorageBinResponse>>(
+    '/putaway/scan-storage-bin/submit',
+    {
+      operation_id: operationId,
+      assertions: toAssertionsBody(assertions),
+    },
   )
 
   const result = unwrap(data)
@@ -132,5 +167,6 @@ export async function scanStorageBin({
     storageBinCode: result.storage_bin_code,
     productsPlaced: result.products_placed,
     outboxEventsCreated: result.outbox_events_created,
+    operationId: result.operation_id,
   }
 }

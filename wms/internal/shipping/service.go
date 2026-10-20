@@ -2,46 +2,52 @@ package shipping
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/signedops"
 )
 
-const (
-	binSectionShippingBuffer = "SHIPPING_BUFFER"
-	shippingAggregateType    = "shipping"
-	shippingEventType        = "wms.shipping.v1"
-)
+const binSectionShippingBuffer = "SHIPPING_BUFFER"
 
+// Service отгружает буфер отгрузки на рейс: scan-buffer/scan-driver остаются
+// беззнаковыми, сама отгрузка — подписанное действие (ADR-0001, #15), см. ship_signed.go.
 type Service struct {
-	repo shippingRepository
+	repo   shippingRepository
+	ops    operationStore
+	signer signerSource
 }
 
+// shippingRepository — доступ к данным отгрузки; tx-методы (LockProductsForShip,
+// LockOperation, LockSigner, WriteActions) вызывать только на репозитории из WithTx.
 type shippingRepository interface {
 	WithTx(ctx context.Context, fn func(shippingRepository) error) error
 	GetBinWithDestinationByID(ctx context.Context, binID uuid.UUID) (*BufferBinRecord, error)
 	GetBufferBinForUpdate(ctx context.Context, binID uuid.UUID) (*BufferBinRecord, error)
 	ListReadyToShipProductsByBin(ctx context.Context, binID uuid.UUID) ([]ReadyToShipProduct, error)
 	GetDispatchByCode(ctx context.Context, dispatchCode string) (*DispatchRecord, error)
+	GetDispatchByID(ctx context.Context, dispatchID uuid.UUID) (*DispatchRecord, error)
 	GetDispatchForUpdate(ctx context.Context, dispatchID uuid.UUID) (*DispatchRecord, error)
 	UpdateDispatchToAtGate(ctx context.Context, dispatchCode string) (*DispatchRecord, error)
-	SelectProductsForShip(ctx context.Context, binID uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error)
+	ListProductsForShip(ctx context.Context, binID uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error)
+	LockProductsForShip(ctx context.Context, binID uuid.UUID, productIDs []uuid.UUID) ([]ProductForShip, error)
+	UnconfirmedProducts(ctx context.Context, productIDs []uuid.UUID, aggregate string) ([]uuid.UUID, error)
 	BatchUpdateProductsShipped(ctx context.Context, productIDs []uuid.UUID) error
-	BatchInsertShippings(ctx context.Context, events []shippingEvent, dispatchID, operatorID uuid.UUID) error
-	BatchInsertShippingOutbox(ctx context.Context, events []shippingEvent, dispatchID uuid.UUID) (int, error)
+	BatchInsertShippings(ctx context.Context, events []shippingEvent, dispatchID, operatorID uuid.UUID, occurredAt time.Time, actionID uuid.UUID) error
 	UpdateOrdersShippedConditional(ctx context.Context, orderIDs []uuid.UUID) (completed, partial int, err error)
 	CountReadyToShipProductsInBuffer(ctx context.Context, binID uuid.UUID) (int, error)
 	UpdateDispatchDeparted(ctx context.Context, dispatchID uuid.UUID) error
+	LockOperation(ctx context.Context, operationID, createdBy uuid.UUID) (*signedops.Operation, error)
+	LockSigner(ctx context.Context, credentialID []byte) error
+	WriteActions(ctx context.Context, op *signedops.Operation, payloads [][]byte) error
 }
 
-func NewService(repo shippingRepository) *Service {
-	return &Service{repo: repo}
+func NewService(repo shippingRepository, ops operationStore, signer signerSource) *Service {
+	return &Service{repo: repo, ops: ops, signer: signer}
 }
 
 func (s *Service) ScanBuffer(ctx context.Context, operatorID, bufferBinID uuid.UUID) (*ScanBufferResponse, error) {
@@ -115,115 +121,6 @@ func (s *Service) ScanDriver(ctx context.Context, operatorID uuid.UUID, dispatch
 	}
 }
 
-func (s *Service) Ship(ctx context.Context, req ShipRequest) (*ShipResponse, error) {
-	if req.OperatorID == uuid.Nil || req.BufferBinID == uuid.Nil || req.DispatchID == uuid.Nil {
-		return nil, fmt.Errorf("shipping.Service.Ship: %w", ErrInvalidInput)
-	}
-
-	var resp ShipResponse
-	err := s.repo.WithTx(ctx, func(repo shippingRepository) error {
-		// 1. Блокируем и проверяем буфер отгрузки.
-		bin, err := repo.GetBufferBinForUpdate(ctx, req.BufferBinID)
-		if err != nil {
-			return fmt.Errorf("shipping.Service.Ship get bin: %w", err)
-		}
-		if bin.Section == nil || *bin.Section != binSectionShippingBuffer || bin.DestinationID == nil {
-			return fmt.Errorf("shipping.Service.Ship: %w", ErrBinNotShippingBuffer)
-		}
-
-		// 2. Блокируем и проверяем рейс: машина должна быть у ворот, destination должен совпадать.
-		dispatch, err := repo.GetDispatchForUpdate(ctx, req.DispatchID)
-		if err != nil {
-			return fmt.Errorf("shipping.Service.Ship get dispatch: %w", err)
-		}
-		if *bin.DestinationID != dispatch.DestinationID {
-			return fmt.Errorf("shipping.Service.Ship: %w", ErrDestinationMismatch)
-		}
-		if dispatch.Status != domain.OutboundDispatchStatusAtGate {
-			return fmt.Errorf("shipping.Service.Ship: %w", ErrDispatchNotAtGate)
-		}
-
-		// 3. Блокируем товары для текущей отгрузки в режиме bulk или spot.
-		products, err := repo.SelectProductsForShip(ctx, req.BufferBinID, req.ProductIDs)
-		if err != nil {
-			return fmt.Errorf("shipping.Service.Ship select products: %w", err)
-		}
-		if len(req.ProductIDs) == 0 && len(products) == 0 {
-			return fmt.Errorf("shipping.Service.Ship: %w", ErrBufferEmpty)
-		}
-		if len(req.ProductIDs) > 0 && len(products) != len(req.ProductIDs) {
-			return fmt.Errorf("shipping.Service.Ship: %w", ErrProductNotInBuffer)
-		}
-
-		productIDs := make([]uuid.UUID, 0, len(products))
-		orderSet := make(map[uuid.UUID]struct{})
-		events := make([]shippingEvent, 0, len(products))
-		for _, p := range products {
-			productIDs = append(productIDs, p.ProductID)
-			events = append(events, shippingEvent{EventID: uuid.New(), ProductID: p.ProductID})
-			if p.OrderID != nil {
-				// orderSet хранит заказы, затронутые этой отгрузкой, и автоматически убирает дубли.
-				orderSet[*p.OrderID] = struct{}{}
-			}
-		}
-
-		// 4. Переводим товары в статус SHIPPED.
-		if err := repo.BatchUpdateProductsShipped(ctx, productIDs); err != nil {
-			return fmt.Errorf("shipping.Service.Ship update products: %w", err)
-		}
-		// 5. Создаём запись shippings для каждого товара.
-		if err := repo.BatchInsertShippings(ctx, events, req.DispatchID, req.OperatorID); err != nil {
-			return fmt.Errorf("shipping.Service.Ship insert shippings: %w", err)
-		}
-		// 6. Создаём shipping outbox event для каждого товара, чтобы запустить on-chain переход Picked -> Shipped.
-		outboxEventsCreated, err := repo.BatchInsertShippingOutbox(ctx, events, req.DispatchID)
-		if err != nil {
-			return fmt.Errorf("shipping.Service.Ship insert outbox: %w", err)
-		}
-
-		// 7. Двигаем статус заказа: SHIPPED, если все товары отгружены; иначе
-		//    PARTIALLY_SHIPPED, чтобы частично отгруженный заказ не выглядел как ASSEMBLED
-		//    и не застревал, если отгрузка пошла раньше перехода в ASSEMBLED (issue #48).
-		orderIDs := make([]uuid.UUID, 0, len(orderSet))
-		for orderID := range orderSet {
-			orderIDs = append(orderIDs, orderID)
-		}
-		ordersCompleted, ordersPartiallyShipped, err := repo.UpdateOrdersShippedConditional(ctx, orderIDs)
-		if err != nil {
-			return fmt.Errorf("shipping.Service.Ship update orders: %w", err)
-		}
-
-		// 8. Проверяем остаток в буфере; если буфер пуст, переводим рейс в DEPARTED.
-		remaining, err := repo.CountReadyToShipProductsInBuffer(ctx, req.BufferBinID)
-		if err != nil {
-			return fmt.Errorf("shipping.Service.Ship count remaining: %w", err)
-		}
-
-		dispatchDeparted := false
-		if remaining == 0 {
-			if err := repo.UpdateDispatchDeparted(ctx, req.DispatchID); err != nil {
-				return fmt.Errorf("shipping.Service.Ship depart dispatch: %w", err)
-			}
-			dispatchDeparted = true
-		}
-
-		resp = ShipResponse{
-			ProductsShipped:        len(products),
-			OutboxEventsCreated:    outboxEventsCreated,
-			OrdersCompleted:        ordersCompleted,
-			OrdersPartiallyShipped: ordersPartiallyShipped,
-			DispatchDeparted:       dispatchDeparted,
-			BufferRemaining:        remaining,
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return &resp, nil
-}
-
 func (d *DispatchRecord) toScanDriverResponse() *ScanDriverResponse {
 	return &ScanDriverResponse{
 		DispatchID:    d.DispatchID,
@@ -239,26 +136,4 @@ func (d *DispatchRecord) toScanDriverResponse() *ScanDriverResponse {
 		Status:    d.Status,
 		ArrivedAt: d.ArrivedAt,
 	}
-}
-
-func payloadHashForShipping(productID, dispatchID uuid.UUID) (string, error) {
-	payload := struct {
-		ProductID     uuid.UUID `json:"product_id"`
-		DispatchID    uuid.UUID `json:"dispatch_id"`
-		AggregateType string    `json:"aggregate_type"`
-		EventType     string    `json:"event_type"`
-	}{
-		ProductID:     productID,
-		DispatchID:    dispatchID,
-		AggregateType: shippingAggregateType,
-		EventType:     shippingEventType,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("shipping.payloadHashForShipping marshal: %w", err)
-	}
-
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
 }

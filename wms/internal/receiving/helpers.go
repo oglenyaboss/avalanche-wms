@@ -1,10 +1,6 @@
 package receiving
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
@@ -78,26 +74,4 @@ func validateScanCode(raw string) (string, error) {
 		return "", ErrInvalidInput
 	}
 	return trimmed, nil
-}
-
-func payloadHashForReceiving(productID, cargoplaceID uuid.UUID) (string, error) {
-	payload := struct {
-		ProductID     uuid.UUID `json:"product_id"`
-		CargoplaceID  uuid.UUID `json:"cargoplace_id"`
-		AggregateType string    `json:"aggregate_type"`
-		EventType     string    `json:"event_type"`
-	}{
-		ProductID:     productID,
-		CargoplaceID:  cargoplaceID,
-		AggregateType: "receiving",
-		EventType:     "wms.receiving.v1",
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("receiving.payloadHashForReceiving marshal payload: %w", err)
-	}
-
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
 }

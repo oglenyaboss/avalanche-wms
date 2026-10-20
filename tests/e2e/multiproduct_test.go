@@ -57,14 +57,16 @@ func TestMultiProduct_AllocatePickAssemble(t *testing.T) {
 		require.Containsf(t, taskProductSet, pid, "task missing for product %s", pid)
 	}
 
-	// Pick each product belonging to this order; the operator cart grows by one each
-	// time (operatorToken provisions a fresh operator, so the cart starts empty).
+	// Pick each product belonging to this order; the operator basket grows by one
+	// each time. #14: the unload is a signed action, so the picking operator is a
+	// signed one (a fresh signed operator starts with an empty basket).
+	op := newSignedOperator(t, ctx, env)
 	for i, pid := range orderProductIDs {
 		parsed, err := uuid.Parse(pid)
 		require.NoError(t, err)
 
 		var picked pickData
-		postJSON(t, env, token, "/assembly/pick", map[string]string{
+		postJSON(t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, &picked)
 		require.Equal(t, pid, picked.ProductID)
@@ -73,11 +75,8 @@ func TestMultiProduct_AllocatePickAssemble(t *testing.T) {
 		requireTaskStatus(t, ctx, env, parsed, "DONE")
 	}
 
-	// Place the whole cart into the shipping buffer; the order becomes ASSEMBLED.
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	// Unload the whole basket into the shipping buffer; the order becomes ASSEMBLED.
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 	require.Equal(t, productCount, placed.ProductsPlaced)
 	require.GreaterOrEqual(t, placed.OrdersAssembled, 1)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")

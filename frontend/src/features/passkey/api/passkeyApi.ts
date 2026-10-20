@@ -42,6 +42,7 @@ interface OrgKeysResponse {
 
 interface KeyConfirmationResponse {
   action_id: string
+  action_type: number
   state: ConfirmationState
   reject_reason: number | null
 }
@@ -78,6 +79,7 @@ export function mapPasskey(p: PasskeyResponse): Passkey {
 export function mapKeyConfirmation(c: KeyConfirmationResponse): KeyConfirmation {
   return {
     actionId: c.action_id,
+    actionType: c.action_type,
     state: c.state,
     rejectReason: c.reject_reason,
   }
@@ -140,6 +142,14 @@ export async function getOrganizationKeys(): Promise<OrgKeys> {
 export async function draftKeyConfirmation(targetKeyId: string): Promise<KeyActionDraft> {
   const { data } = await apiClient.post<ApiEnvelope<KeyActionDraftResponse>>(
     '/passkeys/actions/key-register/draft',
+    { target_key_id: targetKeyId }
+  )
+  return mapKeyActionDraft(unwrap(data))
+}
+
+export async function draftKeyRevoke(targetKeyId: string): Promise<KeyActionDraft> {
+  const { data } = await apiClient.post<ApiEnvelope<KeyActionDraftResponse>>(
+    '/passkeys/actions/key-revoke/draft',
     { target_key_id: targetKeyId }
   )
   return mapKeyActionDraft(unwrap(data))

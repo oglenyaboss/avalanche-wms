@@ -10,6 +10,8 @@ interface OrgKeysTableProps {
   confirmingKeyId: string | null
   onReject: (keyId: string) => void
   rejectingKeyId: string | null
+  onRevoke: (keyId: string) => void
+  revokingKeyId: string | null
 }
 
 interface ConfirmationCellProps {
@@ -18,6 +20,8 @@ interface ConfirmationCellProps {
   confirmingKeyId: string | null
   onReject: (keyId: string) => void
   rejectingKeyId: string | null
+  onRevoke: (keyId: string) => void
+  revokingKeyId: string | null
 }
 
 const ROLE_LABELS: Record<OrgMember['role'], string> = {
@@ -25,51 +29,100 @@ const ROLE_LABELS: Record<OrgMember['role'], string> = {
   OPERATOR: 'Оператор',
 }
 
-function ConfirmationCell({ member, onConfirm, confirmingKeyId, onReject, rejectingKeyId }: ConfirmationCellProps) {
+function ConfirmationCell({
+  member,
+  onConfirm,
+  confirmingKeyId,
+  onReject,
+  rejectingKeyId,
+  onRevoke,
+  revokingKeyId,
+}: ConfirmationCellProps) {
   const passkey = member.passkey
-  if (member.role !== 'OPERATOR' || passkey?.status !== 'PENDING') {
+  if (member.role !== 'OPERATOR' || !passkey) {
     return <span>—</span>
   }
-  if (member.confirmation?.state === 'SENT' || member.confirmation?.state === 'APPLIED') {
+  if (passkey.status === 'PENDING') {
+    if (member.confirmation?.state === 'SENT' || member.confirmation?.state === 'APPLIED') {
+      return (
+        <span className="text-muted-foreground">{confirmationText(member.confirmation)}</span>
+      )
+    }
+    const busy = confirmingKeyId === passkey.keyId || rejectingKeyId === passkey.keyId
     return (
-      <span className="text-muted-foreground">{confirmationText(member.confirmation)}</span>
+      <div className="flex flex-col items-start gap-1">
+        <div className="flex gap-2">
+          <Button
+            className="self-start"
+            disabled={busy}
+            onClick={() => onConfirm(passkey.keyId)}
+          >
+            Подтвердить ключ
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={busy}
+            onClick={() => onReject(passkey.keyId)}
+          >
+            Отклонить
+          </Button>
+        </div>
+        {member.confirmation && (
+          <span
+            className={
+              member.confirmation.state === 'REJECTED' || member.confirmation.state === 'FAILED'
+                ? 'text-xs text-destructive'
+                : 'text-xs text-muted-foreground'
+            }
+          >
+            {confirmationText(member.confirmation)}
+          </span>
+        )}
+      </div>
     )
   }
-  const busy = confirmingKeyId === passkey.keyId || rejectingKeyId === passkey.keyId
-  return (
-    <div className="flex flex-col items-start gap-1">
-      <div className="flex gap-2">
-        <Button
-          className="self-start"
-          disabled={busy}
-          onClick={() => onConfirm(passkey.keyId)}
-        >
-          Подтвердить ключ
-        </Button>
+  if (passkey.status === 'ACTIVE') {
+    if (member.confirmation?.state === 'SENT') {
+      return (
+        <span className="text-muted-foreground">{confirmationText(member.confirmation)}</span>
+      )
+    }
+    return (
+      <div className="flex flex-col items-start gap-1">
         <Button
           variant="destructive"
-          disabled={busy}
-          onClick={() => onReject(passkey.keyId)}
+          className="self-start"
+          disabled={revokingKeyId === passkey.keyId}
+          onClick={() => onRevoke(passkey.keyId)}
         >
-          Отклонить
+          Отозвать ключ
         </Button>
+        {member.confirmation && (
+          <span
+            className={
+              member.confirmation.state === 'REJECTED' || member.confirmation.state === 'FAILED'
+                ? 'text-xs text-destructive'
+                : 'text-xs text-muted-foreground'
+            }
+          >
+            {confirmationText(member.confirmation)}
+          </span>
+        )}
       </div>
-      {member.confirmation && (
-        <span
-          className={
-            member.confirmation.state === 'REJECTED' || member.confirmation.state === 'FAILED'
-              ? 'text-xs text-destructive'
-              : 'text-xs text-muted-foreground'
-          }
-        >
-          {confirmationText(member.confirmation)}
-        </span>
-      )}
-    </div>
-  )
+    )
+  }
+  return <span>—</span>
 }
 
-export function OrgKeysTable({ members, onConfirm, confirmingKeyId, onReject, rejectingKeyId }: OrgKeysTableProps) {
+export function OrgKeysTable({
+  members,
+  onConfirm,
+  confirmingKeyId,
+  onReject,
+  rejectingKeyId,
+  onRevoke,
+  revokingKeyId,
+}: OrgKeysTableProps) {
   if (members.length === 0) {
     return <p className="text-sm text-muted-foreground">В организации нет сотрудников.</p>
   }
@@ -108,6 +161,8 @@ export function OrgKeysTable({ members, onConfirm, confirmingKeyId, onReject, re
                   confirmingKeyId={confirmingKeyId}
                   onReject={onReject}
                   rejectingKeyId={rejectingKeyId}
+                  onRevoke={onRevoke}
+                  revokingKeyId={revokingKeyId}
                 />
               </td>
             </tr>

@@ -11,6 +11,7 @@ var (
 
 	ErrSignerKeyNotActive     = errors.New("SIGNER_KEY_NOT_ACTIVE")
 	ErrTargetNotPending       = errors.New("TARGET_NOT_PENDING")
+	ErrTargetNotActive        = errors.New("TARGET_NOT_ACTIVE")
 	ErrActionInProgress       = errors.New("ACTION_IN_PROGRESS")
 	ErrActionNotFound         = errors.New("ACTION_NOT_FOUND")
 	ErrActionAlreadySubmitted = errors.New("ACTION_ALREADY_SUBMITTED")

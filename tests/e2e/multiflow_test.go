@@ -32,9 +32,11 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	// One operator for both orders: carts are keyed per-operator in-memory,
-	// so both orders' picks accumulate in the same cart.
+	// One operator for both orders: both orders' picks accumulate in the same
+	// operator basket (assembly_tasks keyed by operator_id). The unload is a
+	// signed action, so the picking operator is a signed one.
 	token := operatorToken(t, env)
+	op := newSignedOperator(t, ctx, env)
 
 	// Two independent fixtures for SHOP-7, each with 1 pre-STORED product and
 	// an order line of qty=1. Each fixture creates its own SKU, order, and
@@ -81,7 +83,7 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 	allProductIDs := append(order1Products, order2Products...)
 	for i, pid := range allProductIDs {
 		var picked pickData
-		postJSON(t, env, token, "/assembly/pick", map[string]string{
+		postJSON(t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, &picked)
 		require.Equal(t, pid, picked.ProductID)
@@ -90,10 +92,7 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 
 	// 4. Flush the cart into the SHOP-7 shipping buffer; both orders become ASSEMBLED.
 	// fx1.ShippingBinID == fx2.ShippingBinID (single bin per destination).
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx1.ShippingBinID.String(),
-	}, &placed)
+	placed := unloadToShippingBufferSigned(t, env, op, fx1.ShippingBinID.String())
 	require.Equal(t, 2, placed.ProductsPlaced)
 	require.GreaterOrEqual(t, placed.OrdersAssembled, 2)
 	requireOrderStatus(t, ctx, env, fx1.OrderID, "ASSEMBLED")
@@ -103,6 +102,10 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 		require.NoError(t, err)
 		requireProductStatus(t, ctx, env, parsed, "READY_TO_SHIP")
 	}
+
+	// Fixture shortcut: pre-STORED products never get a committed picking event
+	// on chain (see the header comment), so prime the strict ship gate (#15).
+	markPickingConfirmed(t, ctx, env, parseProductIDs(t, allProductIDs))
 
 	// 5. Scan buffer + driver: bring fx1's dispatch to AT_GATE.
 	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
@@ -117,13 +120,9 @@ func TestMultiOrder_AllocateAndShip(t *testing.T) {
 	require.Equal(t, "AT_GATE", driver.Status)
 	requireDispatchStatus(t, ctx, env, fx1.DispatchID, "AT_GATE")
 
-	// 6. Ship all products with fx1's dispatch. Both orders complete, dispatch departs.
-	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx1.ShippingBinID.String(),
-		"dispatch_id":   fx1.DispatchID.String(),
-		"product_ids":   allProductIDs,
-	}, &shipped)
+	// 6. Ship all products as a signed spot action with fx1's dispatch. Both orders
+	//    complete, dispatch departs.
+	shipped, _ := shipSigned(t, env, op, fx1.ShippingBinID.String(), fx1.DispatchID.String(), parseProductIDs(t, allProductIDs))
 	require.Equal(t, 2, shipped.ProductsShipped)
 	require.GreaterOrEqual(t, shipped.OrdersCompleted, 2)
 	require.True(t, shipped.DispatchDeparted)
@@ -163,6 +162,7 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 	require.NotNil(t, env)
 
 	token := operatorToken(t, env)
+	op := newSignedOperator(t, ctx, env)
 
 	// ── Fixture: CREATED shipment with 3 EXPECTED cargoplaces ────────────
 	suf := shortSuffix()
@@ -303,13 +303,13 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 	// ── Table phase: process CP1 only ────────────────────────────────────
 
 	// scan-cargoplace at the table: RECEIVED_AT_GATE -> TABLE_IN_PROGRESS.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 	}, nil)
 
 	// scan-box: create a box inside CP1.
 	var box scanBoxData
-	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 		"box_barcode":   boxBarcode,
 	}, &box)
@@ -317,7 +317,7 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 
 	// scan-sku: identify the SKU by its barcode.
 	var sku scanSKUData
-	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 		"box_id":        box.BoxID.String(),
 		"barcode":       outboundSeedBarcode,
@@ -325,7 +325,7 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 
 	// scan-qr: create the product inside the box.
 	var scannedProduct scanQRData
-	postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 		"box_id":        box.BoxID.String(),
 		"sku_id":        sku.SKUID.String(),
@@ -335,21 +335,18 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 	requireProductStatus(t, ctx, env, scannedProduct.ProductID, "RECEIVED")
 
 	// close-box -> scan-buffer -> close-cargoplace.
-	postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
 		"box_id": box.BoxID.String(),
 	}, nil)
 
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": cpIDs[0].String(),
 		"buffer_bin_id": receivingBinID.String(),
 	}, nil)
 
-	var closeCP closeCargoplaceData
-	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
-		"cargoplace_id": cpIDs[0].String(),
-	}, &closeCP)
+	closeCP := closeCargoplaceSigned(t, env, op, cpIDs[0].String())
 	require.Equal(t, "TABLE_CLOSED", closeCP.Status)
-	require.Equal(t, 1, closeCP.OutboxEventsCreated)
+	require.Equal(t, 1, closeCP.OutboxEventsCreated, "a cargoplace of <2000 products closes with exactly one signed part")
 
 	// Per-product outbox assertion: the product created via scan-qr should have
 	// exactly 1 receiving outbox event.

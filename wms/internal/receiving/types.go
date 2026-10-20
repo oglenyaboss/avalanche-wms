@@ -75,6 +75,7 @@ type ScanBufferResult struct {
 
 type CloseCargoplaceResult struct {
 	CargoplaceID        uuid.UUID              `json:"cargoplace_id"`
+	OperationID         uuid.UUID              `json:"operation_id"`
 	Status              string                 `json:"status"`
 	Summary             CloseCargoplaceSummary `json:"summary"`
 	OutboxEventsCreated int                    `json:"outbox_events_created"`
@@ -110,6 +111,8 @@ type CloseCargoplaceParams struct {
 	CargoplaceID uuid.UUID
 	OperatorID   uuid.UUID
 	OccurredAt   time.Time
+	OperationID  *uuid.UUID
+	Payloads     [][]byte
 }
 
 type CloseCargoplaceTxResult struct {
@@ -138,6 +141,7 @@ type TableLogParams struct {
 	QRCode       *string
 	ProductID    *uuid.UUID
 	BufferBinID  *uuid.UUID
+	OperationID  *uuid.UUID
 	OccurredAt   time.Time
 }
 

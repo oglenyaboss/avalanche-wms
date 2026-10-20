@@ -4,7 +4,9 @@ import type {
   AllocationResult,
   AssemblyTask,
   Destination,
+  ShippingBufferResult,
 } from '@/entities/assembly'
+import { OperationChainStatus } from '@/entities/signed-action'
 import {
   Alert,
   AlertDescription,
@@ -22,6 +24,8 @@ interface DestinationPhaseProps {
   allocation: AllocationResult | null
   tasks: AssemblyTask[]
   successMessage: string | null
+  // The last unload result — its operationId drives the chain-status panel.
+  lastBufferResult: ShippingBufferResult | null
   onSelect: (destination: Destination) => void
   onDeselect: () => void
   onAllocate: () => void
@@ -91,6 +95,7 @@ export function DestinationPhase({
   allocation,
   tasks,
   successMessage,
+  lastBufferResult,
   onSelect,
   onDeselect,
   onAllocate,
@@ -108,9 +113,16 @@ export function DestinationPhase({
         description="Выберите магазин, аллоцируйте заказы и соберите товары на отгрузку."
         banner={
           successMessage ? (
-            <Alert variant="success">
-              <AlertDescription>{successMessage}</AlertDescription>
-            </Alert>
+            <div className="flex flex-col gap-3">
+              <Alert variant="success">
+                <AlertDescription>{successMessage}</AlertDescription>
+              </Alert>
+              {lastBufferResult ? (
+                <OperationChainStatus
+                  operationId={lastBufferResult.operationId}
+                />
+              ) : null}
+            </div>
           ) : null
         }
       >
@@ -160,9 +172,14 @@ export function DestinationPhase({
       {/* Placement summary after a buffer trip — the store stays selected for
           multi-trip, so the success message shows here, not just on the list. */}
       {successMessage ? (
-        <Alert variant="success">
-          <AlertDescription>{successMessage}</AlertDescription>
-        </Alert>
+        <div className="flex flex-col gap-3">
+          <Alert variant="success">
+            <AlertDescription>{successMessage}</AlertDescription>
+          </Alert>
+          {lastBufferResult ? (
+            <OperationChainStatus operationId={lastBufferResult.operationId} />
+          ) : null}
+        </div>
       ) : null}
 
       <div className="flex flex-col gap-3">

@@ -14,6 +14,7 @@ import (
 
 	"wms/internal/analytics"
 	"wms/internal/assembly"
+	"wms/internal/audit"
 	"wms/internal/auth"
 	"wms/internal/config"
 	"wms/internal/destinations"
@@ -27,6 +28,7 @@ import (
 	"wms/internal/putaway"
 	"wms/internal/receiving"
 	"wms/internal/shipping"
+	"wms/internal/signedops"
 )
 
 func main() {
@@ -64,21 +66,46 @@ func main() {
 		}
 	}
 
-	// Module wiring: repositories → services → handlers
+	// Module wiring: repositories → services → handlers.
+	// passkeys и signedops строятся раньше receiving, assembly и putaway: закрытие грузоместа,
+	// выгрузка корзины сборки в буфер и размещение корзины подписываются активным ключом
+	// оператора (passkeys.Service.ActiveSigner) и пишут части операции в signedops.
+	waAuth, err := webauthn.New(&webauthn.Config{
+		RPID:          cfg.WebAuthnRPID,
+		RPDisplayName: cfg.WebAuthnRPName,
+		RPOrigins:     cfg.WebAuthnRPOrigins,
+	})
+	if err != nil {
+		log.Fatalf("WebAuthn config invalid: %v", err)
+	}
+	passkeysRepo := passkeys.NewRepository(dbPool)
+	// Assigned through the interface var for the same typed-nil reason as receiptGetter.
+	var keyStatus passkeys.KeyStatusGetter
+	if ledgerClient != nil {
+		keyStatus = ledgerClient
+	}
+	passkeysSvc := passkeys.NewService(passkeysRepo, waAuth, keyStatus)
+	passkeysHandler := passkeys.NewHandler(passkeysSvc)
+
+	signedopsRepo := signedops.NewRepository(dbPool)
+	signedopsHandler := signedops.NewHandler(signedopsRepo)
+
 	receivingRepo := receiving.NewRepository(dbPool)
-	receivingSvc := receiving.NewService(receivingRepo)
+	receivingSvc := receiving.NewService(receivingRepo, signedopsRepo, passkeysSvc)
 	receivingHandler := receiving.NewHandler(receivingSvc)
 
 	assemblyRepo := assembly.NewRepository(dbPool)
-	assemblySvc := assembly.NewService(assemblyRepo)
+	assemblySvc := assembly.NewService(assemblyRepo, signedopsRepo, passkeysSvc)
 	assemblyHandler := assembly.NewHandler(assemblySvc)
 
 	putawayRepo := putaway.NewRepository(dbPool)
-	putawaySvc := putaway.NewService(putawayRepo)
+	putawaySvc := putaway.NewService(putawayRepo, signedopsRepo, passkeysSvc)
 	putawayHandler := putaway.NewHandler(putawaySvc)
 
 	shippingRepo := shipping.NewRepository(dbPool)
-	shippingSvc := shipping.NewService(shippingRepo)
+	// Отгрузка подписана: операция режется на части в signedops, подписывается активным
+	// ключом оператора (passkeys.Service.ActiveSigner) — как закрытие грузоместа и выгрузка корзины.
+	shippingSvc := shipping.NewService(shippingRepo, signedopsRepo, passkeysSvc)
 	shippingHandler := shipping.NewHandler(shippingSvc)
 
 	authRepo := auth.NewRepository(dbPool)
@@ -101,6 +128,8 @@ func main() {
 	productsSvc := products.NewService(productsRepo)
 	productsHandler := products.NewHandler(productsSvc)
 
+	auditHandler := audit.NewHandler(audit.NewRepository(dbPool))
+
 	// ledgerClient is a concrete *ledger.Client and is nil when LEDGER_ADAPTER_URL is
 	// unset. Assign THROUGH the interface var so a typed-nil pointer doesn't defeat
 	// the handler's `h.ledger == nil` check (a nil *ledger.Client stored directly in
@@ -110,23 +139,6 @@ func main() {
 		receiptGetter = ledgerClient
 	}
 	onchainHandler := onchain.NewHandler(receiptGetter)
-
-	waAuth, err := webauthn.New(&webauthn.Config{
-		RPID:          cfg.WebAuthnRPID,
-		RPDisplayName: cfg.WebAuthnRPName,
-		RPOrigins:     cfg.WebAuthnRPOrigins,
-	})
-	if err != nil {
-		log.Fatalf("WebAuthn config invalid: %v", err)
-	}
-	passkeysRepo := passkeys.NewRepository(dbPool)
-	// Assigned through the interface var for the same typed-nil reason as receiptGetter.
-	var keyStatus passkeys.KeyStatusGetter
-	if ledgerClient != nil {
-		keyStatus = ledgerClient
-	}
-	passkeysSvc := passkeys.NewService(passkeysRepo, waAuth, keyStatus)
-	passkeysHandler := passkeys.NewHandler(passkeysSvc)
 
 	// Router
 	r := mux.NewRouter()
@@ -161,6 +173,10 @@ func main() {
 	productsRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	productsHandler.RegisterRoutes(productsRouter)
 
+	auditRouter := r.PathPrefix("/audit").Subrouter()
+	auditRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	auditHandler.RegisterRoutes(auditRouter)
+
 	onchainRouter := r.PathPrefix("/onchain").Subrouter()
 	onchainRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	onchainHandler.RegisterRoutes(onchainRouter)
@@ -172,6 +188,10 @@ func main() {
 	passkeysRouter := r.PathPrefix("/passkeys").Subrouter()
 	passkeysRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	passkeysHandler.RegisterRoutes(passkeysRouter)
+
+	signedActionsRouter := r.PathPrefix("/signed-actions").Subrouter()
+	signedActionsRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	signedopsHandler.RegisterRoutes(signedActionsRouter)
 
 	log.Printf("WMS service starting on :%s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {

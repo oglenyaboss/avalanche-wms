@@ -67,64 +67,66 @@ func run(log *slog.Logger) error {
 	repo := store.NewRepository(pool)
 
 	// Signer ровно один (multi-signer запрещён: подписанные действия держат
-	// Kafka-порядок одной nonce-цепочкой). clients[0] обслуживает receipt-чтения
-	// (Confirm/reconcile/health) — receipt'ы node-global.
+	// Kafka-порядок одной nonce-цепочкой). Один клиент обслуживает и отправку,
+	// и receipt-чтения (Confirm/reconcile/health) — receipt'ы node-global.
 	// Источник signer'а — режим: static (локальный hex-ключ) или kms
 	// (Web3Signer: адаптеру нужен только public key ключа).
-	signers, err := buildSigners(cfg)
+	signer, err := buildSigner(cfg)
 	if err != nil {
 		return err
 	}
-	callers := make([]consumer.ChainCaller, 0, len(signers))
-	clients := make([]*chain.Client, 0, len(signers))
-	// Закрываем все клиенты одним deferred-closure (ranges по слайсу на момент
-	// выполнения → закроет и те, что успели создаться при раннем return).
-	defer func() {
-		for _, cl := range clients {
-			cl.Close()
-		}
-	}()
-	for i, s := range signers {
-		cl, cerr := chain.NewClientWithSigner(cfg.RpcURL, cfg.ContractAddr, s)
-		if cerr != nil {
-			return fmt.Errorf("signer %d: %w", i, cerr)
-		}
-		clients = append(clients, cl)
-		callers = append(callers, cl)
-		log.Info("chain client ready", "signer_mode", cfg.SignerMode, "signer_index", i, "signer", cl.FromAddress().Hex())
+	client, err := chain.NewClientWithSigner(cfg.RpcURL, cfg.ContractAddr, signer)
+	if err != nil {
+		return fmt.Errorf("chain client: %w", err)
 	}
-	// Fail-fast: каждый signer должен быть профинансирован, иначе его tx'ы под
+	defer client.Close()
+	log.Info("chain client ready", "signer_mode", cfg.SignerMode, "signer", client.FromAddress().Hex())
+
+	// Fail-fast: signer должен быть профинансирован, иначе его tx'ы под
 	// нагрузкой реверят (out-of-funds) и портят замер/целостность.
-	if err := assertSignersFunded(rootCtx, cfg.RpcURL, clients, log); err != nil {
+	if err := assertSignersFunded(rootCtx, cfg.RpcURL, []*chain.Client{client}, log); err != nil {
 		return err
 	}
 
+	// Один ethclient для read-only резолверов подписанных действий: складские
+	// (SignedMappingWMS) всегда, реестр (ConsortiumRegistry) — при заданном
+	// REGISTRY_ADDR. Отдельно от signer-клиента: резолверам нужен только
+	// contractCaller (eth_call + чтение логов).
+	ec, err := ethclient.Dial(cfg.RpcURL)
+	if err != nil {
+		return fmt.Errorf("resolver dial: %w", err)
+	}
+	defer ec.Close()
+
+	// Складские действия уходят через applyActions на CONTRACT_ADDR — резолвер
+	// строится всегда, исходы разбираются из его receipt'ов.
+	warehouse := chain.NewWarehouseActions(ec, common.HexToAddress(cfg.ContractAddr))
+
 	// Интерфейсная переменная: при незаданном REGISTRY_ADDR реестр остаётся nil-интерфейсом
 	// (typed-nil указатель внутри интерфейса не равен nil и обошёл бы проверку в handler).
-	// Строится ДО flusher/reconciler: подписанные действия уходят через
+	// Строится ДО flusher/reconciler: ключевые действия уходят через
 	// applyKeyActions на этот адрес, исходы разбираются из его receipt'ов.
 	var registry handler.RegistryReader
-	var actionResolver consumer.ActionResolver
+	var registryResolver consumer.ActionResolver
 	if cfg.RegistryAddr != "" {
-		ec, err := ethclient.Dial(cfg.RpcURL)
-		if err != nil {
-			return fmt.Errorf("registry dial: %w", err)
-		}
-		defer ec.Close()
 		reg, err := chain.NewRegistry(ec, common.HexToAddress(cfg.RegistryAddr))
 		if err != nil {
 			return fmt.Errorf("registry: %w", err)
 		}
 		registry = reg
-		actionResolver = reg
+		registryResolver = reg
 	}
 
 	brokers := strings.Split(cfg.KafkaBrokers, ",")
 	prod := dlq.NewProducer(brokers, cfg.DLQTopic)
 	defer func() { _ = prod.Close() }()
 
-	flusher := consumer.NewFlusher(callers, repo, prod, cfg.ReceiptPollTimeout, log).WithRegistry(actionResolver)
-	reconciler := consumer.NewReconciler(clients[0], repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log).WithRegistry(actionResolver)
+	flusher := consumer.NewFlusher(client, repo, prod, cfg.ReceiptPollTimeout, log).
+		WithWarehouseActions(warehouse).
+		WithRegistry(registryResolver)
+	reconciler := consumer.NewReconciler(client, repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log).
+		WithWarehouseActions(warehouse).
+		WithRegistry(registryResolver)
 
 	g, gCtx := errgroup.WithContext(rootCtx)
 	g.Go(func() error {
@@ -142,7 +144,7 @@ func run(log *slog.Logger) error {
 		return reconciler.Run(gCtx)
 	})
 
-	srv := startHTTPServer(log, cfg.Port, clients[0], registry)
+	srv := startHTTPServer(log, cfg.Port, client, registry)
 
 	runErr := g.Wait()
 	log.Info("consumer stopped, shutting down http")
@@ -160,33 +162,17 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-// buildSigners собирает TxSigner по режиму: static — локальный ecdsa-ключ
-// из PRIVATE_KEY/PRIVATE_KEYS; kms — удалённая подпись в Web3Signer по
+// buildSigner собирает TxSigner по режиму: static — локальный ecdsa-ключ
+// из PRIVATE_KEYS/PRIVATE_KEY; kms — удалённая подпись в Web3Signer по
 // KMS_PUBLIC_KEYS (адрес выводится из public key, приватник адаптеру
 // не нужен вообще). Signer ровно один — это валидирует config.Load.
-func buildSigners(cfg *config.Config) ([]chain.TxSigner, error) {
+func buildSigner(cfg *config.Config) (chain.TxSigner, error) {
 	if cfg.SignerMode != "kms" {
-		signers := make([]chain.TxSigner, 0, len(cfg.PrivateKeys))
-		for i, key := range cfg.PrivateKeys {
-			s, err := chain.NewStaticSigner(key)
-			if err != nil {
-				return nil, fmt.Errorf("static signer %d: %w", i, err)
-			}
-			signers = append(signers, s)
-		}
-		return signers, nil
+		// PRIVATE_KEYS (одно значение) приоритетнее дефолтного PRIVATE_KEY — как и раньше.
+		return chain.NewStaticSigner(cfg.PrivateKeys[0])
 	}
-
 	hc := &http.Client{Timeout: 10 * time.Second}
-	signers := make([]chain.TxSigner, 0, len(cfg.KMSPublicKeys))
-	for i, id := range cfg.KMSPublicKeys {
-		s, err := kms.NewSigner(cfg.KMSURL, id, hc)
-		if err != nil {
-			return nil, fmt.Errorf("kms signer %d: %w", i, err)
-		}
-		signers = append(signers, s)
-	}
-	return signers, nil
+	return kms.NewSigner(cfg.KMSURL, cfg.KMSPublicKeys[0], hc)
 }
 
 // assertSignersFunded fail-fast'ит, если любой signer не профинансирован: под

@@ -92,6 +92,11 @@ fi
 
 CONTRACT=$(live_addr /shared/contract_addr.txt)
 if [ -n "$CONTRACT" ]; then
+  # live-адрес может указывать на контракт v1 (без registry()): слепой skip
+  # оставил бы стек с контрактом без подписанных действий. v2 обязан указывать
+  # на задеплоенный реестр (case-insensitive, как sanity ниже).
+  REG_ONCHAIN=$(cast call "$CONTRACT" "registry()(address)" --rpc-url "$RPC_URL") || REG_ONCHAIN=""
+  [ "${REG_ONCHAIN,,}" = "${REG,,}" ] || { echo "FAIL: $CONTRACT is not SignedMappingWMS v2 with registry $REG — recreate volumes: docker compose --profile test down -v"; exit 1; }
   echo "==> Contract already deployed at $CONTRACT — skipping redeploy"
   # Re-persist auxiliary files in case they were cleared
   echo -n "$RPC_URL"   > /shared/rpc_url.txt

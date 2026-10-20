@@ -10,6 +10,10 @@ function visibleKeyLabels(role: Parameters<typeof visibleNavigationItems>[1]) {
     .filter((label) => keyLabels.includes(label))
 }
 
+function visibleLabels(role: Parameters<typeof visibleNavigationItems>[1]) {
+  return visibleNavigationItems(navigationItems, role).map((item) => item.label)
+}
+
 describe('visibleNavigationItems', () => {
   it('shows both passkey items to ADMIN', () => {
     expect(visibleKeyLabels('ADMIN')).toEqual(keyLabels)
@@ -24,8 +28,15 @@ describe('visibleNavigationItems', () => {
     expect(visibleKeyLabels(undefined)).toEqual([])
   })
 
-  it('keeps items without roles visible for everyone', () => {
-    const dashboard = navigationItems[0].label
-    expect(visibleNavigationItems(navigationItems, undefined).map((i) => i.label)).toContain(dashboard)
+  it('shows only the audit item to AUDITOR', () => {
+    expect(visibleLabels('AUDITOR')).toEqual(['Аудит'])
+  })
+
+  it('hides the audit item from OPERATOR', () => {
+    expect(visibleLabels('OPERATOR')).not.toContain('Аудит')
+  })
+
+  it('shows the audit item to ADMIN', () => {
+    expect(visibleLabels('ADMIN')).toContain('Аудит')
   })
 })

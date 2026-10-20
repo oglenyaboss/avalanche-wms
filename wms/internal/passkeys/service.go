@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"slices"
 	"sync"
 	"time"
@@ -28,7 +27,7 @@ type repository interface {
 	LatestPasskeysByOrg(ctx context.Context, orgID uuid.UUID) (map[uuid.UUID]domain.Passkey, error)
 	InsertPasskey(ctx context.Context, p domain.Passkey) error
 	UpdatePasskeyStatus(ctx context.Context, credentialID []byte, status domain.PasskeyStatus) error
-	RejectPendingPasskey(ctx context.Context, credentialID []byte) (bool, error)
+	RejectPendingPasskey(ctx context.Context, credentialID []byte) error
 	PasskeyByKeyID(ctx context.Context, keyID [32]byte) (*domain.Passkey, error)
 	PasskeyByCredentialID(ctx context.Context, id []byte) (*domain.Passkey, error)
 	InsertKeyAction(ctx context.Context, a KeyAction) error
@@ -280,33 +279,4 @@ func (s *Service) takeSession(userID uuid.UUID) (webauthn.SessionData, error) {
 		return webauthn.SessionData{}, fmt.Errorf("%w: registration session expired", ErrInvalidRegistration)
 	}
 	return p.data, nil
-}
-
-// syncStatus refreshes a PENDING/ACTIVE key from the on-chain registry. Chain
-// errors are logged and the stored status is kept, so reads never fail on it.
-// ponytail: статус тянется из цепи при чтении, по запросу на ключ; при большой организации — фоновая синхронизация.
-func (s *Service) syncStatus(ctx context.Context, p *domain.Passkey) {
-	if s.chain == nil || (p.Status != domain.PasskeyStatusPending && p.Status != domain.PasskeyStatusActive) {
-		return
-	}
-	key, err := s.chain.GetRegistryKey(ctx, "0x"+hex.EncodeToString(p.KeyID[:]))
-	if err != nil {
-		log.Printf("passkeys: registry status for key %x: %v", p.KeyID, err)
-		return
-	}
-	if !key.Found {
-		return
-	}
-	next := domain.PasskeyStatusRevoked
-	if key.Active {
-		next = domain.PasskeyStatusActive
-	}
-	if next == p.Status {
-		return
-	}
-	if err := s.repo.UpdatePasskeyStatus(ctx, p.CredentialID, next); err != nil {
-		log.Printf("passkeys: update status for key %x: %v", p.KeyID, err)
-		return
-	}
-	p.Status = next
 }

@@ -16,6 +16,7 @@ export type ConfirmationState = 'SENT' | 'APPLIED' | 'REJECTED' | 'FAILED'
 
 export interface KeyConfirmation {
   actionId: string
+  actionType: number
   state: ConfirmationState
   rejectReason: number | null
 }
@@ -50,9 +51,6 @@ export interface KeyActionDraft {
   timeout: number
 }
 
-export interface AssertionJSON {
-  credentialId: string
-  authenticatorData: string
-  clientDataJson: string
-  signature: string
-}
+// The assertion wire shape is shared with the signed-action flow; the
+// canonical definition lives in @/shared/lib.
+export type { AssertionJSON } from '@/shared/lib'

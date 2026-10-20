@@ -84,6 +84,9 @@ export interface ClosedCargoplace {
   status: 'TABLE_CLOSED'
   summary: CloseCargoplaceSummary
   outboxEventsCreated: number
+  // The signed operation that recorded the close into the chain; its per-part
+  // status is polled via /signed-actions/operations/{operationId}.
+  operationId: string
 }
 
 // A product registered during the current session, kept for the running list

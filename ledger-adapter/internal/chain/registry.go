@@ -35,9 +35,7 @@ type contractCaller interface {
 
 // Registry — read-only обёртка над ConsortiumRegistry.
 type Registry struct {
-	eth  contractCaller
-	addr common.Address
-	abi  abi.ABI
+	actionContract
 }
 
 // registryKeyTuple совпадает с Key из контракта: go-ethereum сопоставляет
@@ -51,7 +49,7 @@ type registryKeyTuple struct {
 }
 
 func NewRegistry(eth contractCaller, addr common.Address) (*Registry, error) {
-	return &Registry{eth: eth, addr: addr, abi: registryABI}, nil
+	return &Registry{actionContract{eth: eth, addr: addr, abi: registryABI}}, nil
 }
 
 func (r *Registry) ABI() abi.ABI { return r.abi }
@@ -89,25 +87,21 @@ func (r *Registry) OrganizationExists(ctx context.Context, orgID [16]byte) (bool
 	return res[0].(bool), nil
 }
 
-// Address — адрес контракта реестра.
-func (r *Registry) Address() common.Address { return r.addr }
-
-// ActionOutcomes восстанавливает исход каждого actionId из receipt'а tx с
+// LogOutcomes восстанавливает исход подписанных действий из логов receipt'а tx с
 // applyKeyActions. Логи реестра (Address == r.addr):
 //   - KeyRegistered/KeyRevoked (actionId — последнее non-indexed поле в data)
 //     → Applied;
 //   - ActionRejected (actionId — indexed bytes16 в topic1, выровнен влево;
 //     reason uint8 в data) → Reason.
 //
-// Для actionId без лога в receipt'е (повторная отправка, ADR §6) читается
-// actionState: 1 (Applied) → Applied; 2 (Rejected) → reason из ActionRejected-
-// лога по topic1; 0 (None) — исхода на цепи нет, ошибка.
-func (r *Registry) ActionOutcomes(ctx context.Context, receipt *types.Receipt, ids []uuid.UUID) (map[uuid.UUID]ActionOutcome, error) {
+// actionId без лога в этом receipt'е (повторная отправка, ADR §6) резолвится
+// StateOutcome'ом по actionState.
+func (r *Registry) LogOutcomes(receipt *types.Receipt) (map[uuid.UUID]ActionOutcome, error) {
 	keyRegistered := r.abi.Events["KeyRegistered"]
 	keyRevoked := r.abi.Events["KeyRevoked"]
 	actionRejected := r.abi.Events["ActionRejected"]
 
-	outcomes := make(map[uuid.UUID]ActionOutcome, len(ids))
+	outcomes := make(map[uuid.UUID]ActionOutcome)
 	for _, l := range receipt.Logs {
 		if l.Address != r.addr || len(l.Topics) == 0 {
 			continue
@@ -140,94 +134,12 @@ func (r *Registry) ActionOutcomes(ctx context.Context, receipt *types.Receipt, i
 			outcomes[uuid.UUID(id)] = ActionOutcome{Reason: reason}
 		}
 	}
-
-	for _, id := range ids {
-		if _, ok := outcomes[id]; ok {
-			continue
-		}
-		state, err := r.actionState(ctx, [16]byte(id))
-		if err != nil {
-			return nil, err
-		}
-		switch state {
-		case 1: // SignedAction.State.Applied
-			outcomes[id] = ActionOutcome{Applied: true}
-		case 2: // SignedAction.State.Rejected — reason достаём из журнала
-			reason, err := r.rejectedReason(ctx, actionRejected, id)
-			if err != nil {
-				return nil, err
-			}
-			outcomes[id] = ActionOutcome{Reason: reason}
-		default: // SignedAction.State.None — исхода на цепи нет
-			return nil, fmt.Errorf("no outcome for action %s", id)
-		}
-	}
 	return outcomes, nil
 }
 
-// actionState читает SignedAction.State по actionId (0 None, 1 Applied, 2 Rejected).
-func (r *Registry) actionState(ctx context.Context, id [16]byte) (uint8, error) {
-	data, err := r.abi.Pack("actionState", id)
-	if err != nil {
-		return 0, fmt.Errorf("pack actionState: %w", err)
-	}
-	out, err := r.call(ctx, data)
-	if err != nil {
-		return 0, err
-	}
-	vals, err := r.abi.Unpack("actionState", out)
-	if err != nil {
-		return 0, fmt.Errorf("unpack actionState: %w", err)
-	}
-	state, ok := vals[0].(uint8)
-	if !ok {
-		return 0, errors.New("actionState: значение не uint8")
-	}
-	return state, nil
-}
-
-// rejectedReason достаёт reason отклонённого actionId из журнала реестра:
-// FilterLogs по ActionRejected с topic1 = actionId (повторы одного actionId
-// на цепи невозможны — контракт применяет действие единожды), берём
-// последний лог.
-func (r *Registry) rejectedReason(ctx context.Context, actionRejected abi.Event, id uuid.UUID) (uint8, error) {
-	var topic common.Hash
-	copy(topic[:], id[:]) // indexed bytes16 в topic выровнен влево
-
-	logs, err := r.eth.FilterLogs(ctx, ethereum.FilterQuery{
-		Addresses: []common.Address{r.addr},
-		Topics:    [][]common.Hash{{actionRejected.ID}, {topic}},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("filter ActionRejected %s: %w", id, err)
-	}
-	if len(logs) == 0 {
-		return 0, fmt.Errorf("no ActionRejected log for action %s", id)
-	}
-	return unpackRejectReason(actionRejected, logs[len(logs)-1].Data)
-}
-
-// unpackRejectReason анпакит reason (единственное non-indexed поле
-// ActionRejected) из data лога.
-func unpackRejectReason(actionRejected abi.Event, data []byte) (uint8, error) {
-	vals, err := actionRejected.Inputs.NonIndexed().Unpack(data)
-	if err != nil {
-		return 0, fmt.Errorf("unpack ActionRejected: %w", err)
-	}
-	reason, ok := vals[0].(uint8)
-	if !ok {
-		return 0, errors.New("ActionRejected: reason не uint8")
-	}
-	return reason, nil
-}
-
-func (r *Registry) call(ctx context.Context, data []byte) ([]byte, error) {
-	out, err := r.eth.CallContract(ctx, ethereum.CallMsg{To: &r.addr, Data: data}, nil)
-	if err != nil {
-		return nil, err
-	}
-	if len(out) == 0 {
-		return nil, errors.New("registry: пустой ответ, по адресу нет контракта")
-	}
-	return out, nil
+// StateOutcome — исход одного actionId по actionState реестра (fallback для id
+// без лога в receipt'е): Applied → Applied; Rejected → reason из
+// ActionRejected-лога журнала; None → (zero, false, nil) — исхода на цепи нет.
+func (r *Registry) StateOutcome(ctx context.Context, id uuid.UUID) (ActionOutcome, bool, error) {
+	return r.stateOutcome(ctx, id)
 }

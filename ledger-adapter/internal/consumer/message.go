@@ -17,6 +17,16 @@ import (
 // Kafka value = JSON-строка с конвертом ActionEnvelope, key = actionId.
 const aggregateSignedAction = "signed_action"
 
+// Значения SignedAction.Type из ADR-0001: складские (1–4) и ключевые (5–6) действия.
+const (
+	actionTypeReceive     uint8 = 1
+	actionTypePutAway     uint8 = 2
+	actionTypePick        uint8 = 3
+	actionTypeShip        uint8 = 4
+	actionTypeKeyRegister uint8 = 5
+	actionTypeKeyRevoke   uint8 = 6
+)
+
 // ActionEnvelope — конверт подписанного действия из outbox payload (контракт §2).
 // hex-поля 0x-prefixed lowercase; keyId — ключ ПОДПИСАНТА (админа).
 type ActionEnvelope struct {
@@ -24,7 +34,9 @@ type ActionEnvelope struct {
 	ActionID   string   `json:"actionId"`
 	ActionType uint8    `json:"actionType"`
 	ItemIDs    []string `json:"itemIds"`
-	SubjectKey *struct {
+	// DetailsHash — только у складских действий (ADR §4); у ключевых пустой.
+	DetailsHash string `json:"detailsHash"`
+	SubjectKey  *struct {
 		QX string `json:"qx"`
 		QY string `json:"qy"`
 	} `json:"subjectKey"`
@@ -42,17 +54,19 @@ type ActionEnvelope struct {
 // Message — распарсенное kafka-сообщение с идентификаторами event/product и
 // типом агрегата (из Kafka header aggregate_type, проставленного Debezium
 // EventRouter). KafkaMsg храним полностью для commit-of-offset и DLQ-republish.
-// Action != nil только для подписанных действий; для них ProductID = uuid.Nil
+// Для подписанных действий задано ровно одно из Action (ключевое) /
+// WarehouseAction (складское); для них ProductID = uuid.Nil
 // (key = actionId, не product_id).
 //
 // Передавать только через pointer (gocritic hugeParam: kafka.Message ~152 байт).
 type Message struct {
-	EventID       uuid.UUID
-	ProductID     uuid.UUID
-	AggregateType string // "receiving"/"putaway"/"picking"/"shipping"/"signed_action"
-	Action        *chain.KeyAction
-	Topic         string
-	KafkaMsg      kafka.Message
+	EventID         uuid.UUID
+	ProductID       uuid.UUID
+	AggregateType   string // "receiving"/"putaway"/"picking"/"shipping"/"signed_action"
+	Action          *chain.KeyAction
+	WarehouseAction *chain.WarehouseAction
+	Topic           string
+	KafkaMsg        kafka.Message
 }
 
 // validAggregates derived from fsmOrder — single source of truth for known types.
@@ -131,27 +145,41 @@ func parseSignedAction(m *kafka.Message, eventID uuid.UUID, eventIDStr string) (
 	if env.ActionID != eventIDStr {
 		return nil, fmt.Errorf("signed_action: actionId %q != id header %q", env.ActionID, eventIDStr)
 	}
-	if env.ActionType != 5 && env.ActionType != 6 {
+	switch {
+	case env.ActionType == actionTypeKeyRegister || env.ActionType == actionTypeKeyRevoke:
+		if env.SubjectKey == nil {
+			return nil, fmt.Errorf("signed_action: missing subjectKey")
+		}
+		action, err := env.toKeyAction(eventID)
+		if err != nil {
+			return nil, fmt.Errorf("signed_action: %w", err)
+		}
+		return &Message{
+			EventID:       eventID,
+			AggregateType: aggregateSignedAction,
+			Action:        action,
+			Topic:         m.Topic,
+			KafkaMsg:      *m,
+		}, nil
+	case env.ActionType >= actionTypeReceive && env.ActionType <= actionTypeShip:
+		action, err := env.toWarehouseAction(eventID)
+		if err != nil {
+			return nil, fmt.Errorf("signed_action: %w", err)
+		}
+		return &Message{
+			EventID:         eventID,
+			AggregateType:   aggregateSignedAction,
+			WarehouseAction: action,
+			Topic:           m.Topic,
+			KafkaMsg:        *m,
+		}, nil
+	default:
 		return nil, fmt.Errorf("unsupported action type %d", env.ActionType)
 	}
-	if env.SubjectKey == nil {
-		return nil, fmt.Errorf("signed_action: missing subjectKey")
-	}
-	action, err := env.toKeyAction(eventID)
-	if err != nil {
-		return nil, fmt.Errorf("signed_action: %w", err)
-	}
-	return &Message{
-		EventID:       eventID,
-		AggregateType: aggregateSignedAction,
-		Action:        action,
-		Topic:         m.Topic,
-		KafkaMsg:      *m,
-	}, nil
 }
 
-// toKeyAction переводит конверт в chain.KeyAction. ActionId — сырые 16 байт
-// UUID (ADR §2); ClientDataJSON — строка как есть; индексы — *big.Int.
+// toKeyAction переводит конверт ключевого действия в chain.KeyAction.
+// ActionId — сырые 16 байт UUID (ADR §2); Qx/Qy — регистрируемый ключ.
 func (env *ActionEnvelope) toKeyAction(id uuid.UUID) (*chain.KeyAction, error) {
 	qx, err := decodeHex32("subjectKey.qx", env.SubjectKey.QX)
 	if err != nil {
@@ -161,19 +189,7 @@ func (env *ActionEnvelope) toKeyAction(id uuid.UUID) (*chain.KeyAction, error) {
 	if err != nil {
 		return nil, err
 	}
-	keyID, err := decodeHex32("keyId", env.KeyID)
-	if err != nil {
-		return nil, err
-	}
-	r, err := decodeHex32("webauthn.r", env.WebAuthn.R)
-	if err != nil {
-		return nil, err
-	}
-	s, err := decodeHex32("webauthn.s", env.WebAuthn.S)
-	if err != nil {
-		return nil, err
-	}
-	authData, err := decodeHex("webauthn.authenticatorData", env.WebAuthn.AuthenticatorData)
+	keyID, auth, err := env.authOf()
 	if err != nil {
 		return nil, err
 	}
@@ -183,14 +199,66 @@ func (env *ActionEnvelope) toKeyAction(id uuid.UUID) (*chain.KeyAction, error) {
 		Qx:          qx,
 		Qy:          qy,
 		SignerKeyId: keyID,
-		Auth: chain.WebAuthnAuth{
-			R:                 r,
-			S:                 s,
-			ChallengeIndex:    big.NewInt(env.WebAuthn.ChallengeIndex),
-			TypeIndex:         big.NewInt(env.WebAuthn.TypeIndex),
-			AuthenticatorData: authData,
-			ClientDataJSON:    env.WebAuthn.ClientDataJSON,
-		},
+		Auth:        auth,
+	}, nil
+}
+
+// toWarehouseAction переводит конверт складского действия в
+// chain.WarehouseAction. ItemIds — UUID товаров в порядке конверта (ADR §9:
+// порядок проставляет WMS, адаптер не меняет).
+func (env *ActionEnvelope) toWarehouseAction(id uuid.UUID) (*chain.WarehouseAction, error) {
+	detailsHash, err := decodeHex32("detailsHash", env.DetailsHash)
+	if err != nil {
+		return nil, err
+	}
+	keyID, auth, err := env.authOf()
+	if err != nil {
+		return nil, err
+	}
+	itemIds := make([]*big.Int, len(env.ItemIDs))
+	for i, s := range env.ItemIDs {
+		itemID, err := uuid.Parse(s)
+		if err != nil {
+			return nil, fmt.Errorf("itemIds[%d]: %w", i, err)
+		}
+		itemIds[i] = chain.UUIDToUint256(itemID.String())
+	}
+	return &chain.WarehouseAction{
+		ActionId:    [16]byte(id),
+		ActionType:  env.ActionType,
+		ItemIds:     itemIds,
+		DetailsHash: detailsHash,
+		KeyId:       keyID,
+		Auth:        auth,
+	}, nil
+}
+
+// authOf декодирует общие для всех действий поля подписи: keyId ПОДПИСАНТА и
+// WebAuthnAuth. ClientDataJSON — строка как есть; индексы — *big.Int.
+func (env *ActionEnvelope) authOf() ([32]byte, chain.WebAuthnAuth, error) {
+	keyID, err := decodeHex32("keyId", env.KeyID)
+	if err != nil {
+		return [32]byte{}, chain.WebAuthnAuth{}, err
+	}
+	r, err := decodeHex32("webauthn.r", env.WebAuthn.R)
+	if err != nil {
+		return [32]byte{}, chain.WebAuthnAuth{}, err
+	}
+	s, err := decodeHex32("webauthn.s", env.WebAuthn.S)
+	if err != nil {
+		return [32]byte{}, chain.WebAuthnAuth{}, err
+	}
+	authData, err := decodeHex("webauthn.authenticatorData", env.WebAuthn.AuthenticatorData)
+	if err != nil {
+		return [32]byte{}, chain.WebAuthnAuth{}, err
+	}
+	return keyID, chain.WebAuthnAuth{
+		R:                 r,
+		S:                 s,
+		ChallengeIndex:    big.NewInt(env.WebAuthn.ChallengeIndex),
+		TypeIndex:         big.NewInt(env.WebAuthn.TypeIndex),
+		AuthenticatorData: authData,
+		ClientDataJSON:    env.WebAuthn.ClientDataJSON,
 	}, nil
 }
 

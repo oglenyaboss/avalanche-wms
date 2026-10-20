@@ -1,13 +1,16 @@
 import type { CloseCargoplaceSummary } from '@/entities/cargoplace'
+import { OperationChainStatus } from '@/entities/signed-action'
 import { Alert, AlertDescription } from '@/shared/ui'
 
 interface CargoplaceSummaryProps {
   summary: CloseCargoplaceSummary
+  operationId: string | null
 }
 
 // The close-cargoplace result: received vs expected, plus the per-SKU shortage
-// breakdown (overages and damage are not modeled by the backend).
-export function CargoplaceSummary({ summary }: CargoplaceSummaryProps) {
+// breakdown (overages and damage are not modeled by the backend) and the live
+// chain status of the signed close operation.
+export function CargoplaceSummary({ summary, operationId }: CargoplaceSummaryProps) {
   const hasShortage = summary.shortage > 0
 
   return (
@@ -18,6 +21,8 @@ export function CargoplaceSummary({ summary }: CargoplaceSummaryProps) {
           {hasShortage ? `, недостача ${summary.shortage}` : ''}.
         </AlertDescription>
       </Alert>
+
+      {operationId ? <OperationChainStatus operationId={operationId} /> : null}
 
       {hasShortage && summary.shortageBySku.length > 0 ? (
         <div className="flex flex-col gap-2">

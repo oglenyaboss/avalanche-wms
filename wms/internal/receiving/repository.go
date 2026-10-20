@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"wms/internal/domain"
+	"wms/internal/signedaction"
+	"wms/internal/signedops"
 )
 
 type dbTX interface {
@@ -738,7 +740,11 @@ func (r *Repository) InsertReceivingTableLog(ctx context.Context, params *TableL
 }
 
 // CloseCargoplaceWithOutbox
-// CloseCargoplaceWithOutbox: закрытие cargoplace + продукты + outbox в одной транзакции.
+// CloseCargoplaceWithOutbox: закрытие cargoplace + продукты + подписанные действия в одной транзакции.
+//
+// Порядок шагов (ADR-0001 §7): блокировка cargoplace и проверка статуса, блокировка операции
+// FOR UPDATE, сверка состава с черновиком (иначе DRAFT_STALE), FOR SHARE на ключ подписанта,
+// обновление cargoplace, сводка, лог CLOSE_CARGO, запись действий в outbox.
 //
 // ВНИМАНИЕ: метод сам управляет транзакцией через r.db.Begin — НЕ оборачивать в WithTx.
 // При оборачивании внешняя tx и внутренний Begin возьмут разные коннекты из пула,
@@ -747,6 +753,9 @@ func (r *Repository) CloseCargoplaceWithOutbox(
 	ctx context.Context,
 	params *CloseCargoplaceParams,
 ) (*CloseCargoplaceTxResult, error) {
+	if params.OperationID == nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox: operation id is required")
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox begin tx: %w", err)
@@ -767,6 +776,35 @@ func (r *Repository) CloseCargoplaceWithOutbox(
 	}
 	if cpStatus != cargoplaceStatusTableInProgress {
 		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox: %w", ErrCargoplaceNotInProgress)
+	}
+
+	op, err := signedops.LockOperation(ctx, tx, *params.OperationID, params.OperatorID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox lock operation: %w", err)
+	}
+
+	productIDs, err := r.listProductIDsByCargoplaceTx(ctx, tx, params.CargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox list product ids: %w", err)
+	}
+
+	// Состав грузоместа должен совпадать с черновиком: между draft и submit состав
+	// мог измениться, а подпись покрывает только старый набор itemId.
+	opItems := make([]uuid.UUID, 0)
+	for _, p := range op.Parts {
+		opItems = append(opItems, p.ItemIDs...)
+	}
+	sortedProductIDs := signedaction.SortByItemID(productIDs)
+	stale := len(sortedProductIDs) != len(opItems)
+	for i := 0; !stale && i < len(opItems); i++ {
+		stale = sortedProductIDs[i] != opItems[i]
+	}
+	if stale {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox: %w", ErrDraftStale)
+	}
+
+	if err := signedops.LockSigner(ctx, tx, op.SignerCredentialID); err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox lock signer: %w", err)
 	}
 
 	const updateCargoplaceQuery = `
@@ -809,18 +847,14 @@ func (r *Repository) CloseCargoplaceWithOutbox(
 		CargoplaceID: params.CargoplaceID,
 		OperatorID:   params.OperatorID,
 		Action:       "CLOSE_CARGO",
+		OperationID:  params.OperationID,
 		OccurredAt:   params.OccurredAt,
 	}); err != nil {
 		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox insert log: %w", err)
 	}
 
-	productIDs, err := r.listProductIDsByCargoplaceTx(ctx, tx, params.CargoplaceID)
-	if err != nil {
-		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox list product ids: %w", err)
-	}
-
-	if err := r.insertOutboxEventsTx(ctx, tx, params.CargoplaceID, productIDs); err != nil {
-		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox insert outbox events: %w", err)
+	if err := signedops.WriteActions(ctx, tx, op, params.Payloads); err != nil {
+		return nil, fmt.Errorf("receiving.Repository.CloseCargoplaceWithOutbox write actions: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -830,7 +864,7 @@ func (r *Repository) CloseCargoplaceWithOutbox(
 	return &CloseCargoplaceTxResult{
 		ExpectedSKUs:        expectedSKUs,
 		ReceivedSKUCounts:   receivedSKUCounts,
-		OutboxEventsCreated: len(productIDs),
+		OutboxEventsCreated: len(op.Parts),
 	}, nil
 }
 
@@ -851,9 +885,10 @@ func (r *Repository) insertReceivingTableLogTx(
 			qr_code,
 			product_id,
 			buffer_bin_id,
+			operation_id,
 			occurred_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 
 	_, err := tx.Exec(
 		ctx,
@@ -868,6 +903,7 @@ func (r *Repository) insertReceivingTableLogTx(
 		params.QRCode,
 		params.ProductID,
 		params.BufferBinID,
+		params.OperationID,
 		params.OccurredAt,
 	)
 	if err != nil {
@@ -877,11 +913,25 @@ func (r *Repository) insertReceivingTableLogTx(
 	return nil
 }
 
-func (r *Repository) listProductIDsByCargoplaceTx(
-	ctx context.Context,
-	tx pgx.Tx,
-	cargoplaceID uuid.UUID,
-) ([]uuid.UUID, error) {
+// ListClosableProductIDs returns the products closable with a signed receive
+// action for the cargoplace: products RECEIVED in CLOSED boxes.
+func (r *Repository) ListClosableProductIDs(ctx context.Context, cargoplaceID uuid.UUID) ([]uuid.UUID, error) {
+	ids, err := listClosableProductIDs(ctx, r.db, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.ListClosableProductIDs: %w", err)
+	}
+	return ids, nil
+}
+
+// closableQuerier is the subset of pgx needed by the closable-products query;
+// satisfied by both a *pgxpool.Pool and a pgx.Tx.
+type closableQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// listClosableProductIDs runs the same query on a pool or inside a transaction,
+// so the draft and the submit see one definition of "closable".
+func listClosableProductIDs(ctx context.Context, q closableQuerier, cargoplaceID uuid.UUID) ([]uuid.UUID, error) {
 	const query = `
 		SELECT p.product_id
 		FROM wms_inventory.products p
@@ -891,9 +941,9 @@ func (r *Repository) listProductIDsByCargoplaceTx(
 			AND b.status = 'CLOSED'
 		ORDER BY p.product_id`
 
-	rows, err := tx.Query(ctx, query, cargoplaceID)
+	rows, err := q.Query(ctx, query, cargoplaceID)
 	if err != nil {
-		return nil, fmt.Errorf("receiving.Repository.listProductIDsByCargoplaceTx query: %w", err)
+		return nil, fmt.Errorf("receiving.Repository.listClosableProductIDs query: %w", err)
 	}
 	defer rows.Close()
 
@@ -901,15 +951,27 @@ func (r *Repository) listProductIDsByCargoplaceTx(
 	for rows.Next() {
 		var productID uuid.UUID
 		if err := rows.Scan(&productID); err != nil {
-			return nil, fmt.Errorf("receiving.Repository.listProductIDsByCargoplaceTx scan: %w", err)
+			return nil, fmt.Errorf("receiving.Repository.listClosableProductIDs scan: %w", err)
 		}
 		productIDs = append(productIDs, productID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("receiving.Repository.listProductIDsByCargoplaceTx rows: %w", err)
+		return nil, fmt.Errorf("receiving.Repository.listClosableProductIDs rows: %w", err)
 	}
 
 	return productIDs, nil
+}
+
+func (r *Repository) listProductIDsByCargoplaceTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cargoplaceID uuid.UUID,
+) ([]uuid.UUID, error) {
+	ids, err := listClosableProductIDs(ctx, tx, cargoplaceID)
+	if err != nil {
+		return nil, fmt.Errorf("receiving.Repository.listProductIDsByCargoplaceTx: %w", err)
+	}
+	return ids, nil
 }
 
 func (r *Repository) cargoplaceExistsTx(
@@ -998,62 +1060,4 @@ func (r *Repository) listReceivedProductCountsBySKUTx(
 	}
 
 	return items, nil
-}
-
-// insertOutboxEventsTx вставляет outbox-события для всех продуктов закрываемого cargoplace.
-//
-// Защита от дублей сейчас обеспечивается на уровне UPDATE wms_inventory.cargoplaces
-// в CloseCargoplaceWithOutbox: повторный вызов второй раз не пройдёт WHERE status='TABLE_IN_PROGRESS'
-// и метод вернёт ErrCargoplaceNotInProgress до этого INSERT'а. Поэтому отдельный
-// ON CONFLICT здесь не нужен — event_id всегда новый (uuid.New()).
-//
-// Если в будущем появится worker-level retry (с тем же payload), потребуется
-// unique constraint на (aggregate_id, payload_hash) в public.outbox_events
-// и соответствующий ON CONFLICT — это вне scope текущей задачи.
-func (r *Repository) insertOutboxEventsTx(
-	ctx context.Context,
-	tx pgx.Tx,
-	cargoplaceID uuid.UUID,
-	productIDs []uuid.UUID,
-) error {
-	if len(productIDs) == 0 {
-		return nil
-	}
-
-	eventIDs := make([]uuid.UUID, 0, len(productIDs))
-	aggregateIDs := make([]uuid.UUID, 0, len(productIDs))
-	payloadHashes := make([]string, 0, len(productIDs))
-
-	for _, productID := range productIDs {
-		payloadHash, err := payloadHashForReceiving(productID, cargoplaceID)
-		if err != nil {
-			return fmt.Errorf("receiving.Repository.insertOutboxEventsTx build payload hash: %w", err)
-		}
-
-		eventIDs = append(eventIDs, uuid.New())
-		aggregateIDs = append(aggregateIDs, productID)
-		payloadHashes = append(payloadHashes, payloadHash)
-	}
-
-	const query = `
-		INSERT INTO public.outbox_events (
-			event_id,
-			aggregate_id,
-			aggregate_type,
-			event_type,
-			payload_hash
-		)
-		SELECT
-			event_id,
-			aggregate_id,
-			'receiving',
-			'wms.receiving.v1',
-			payload_hash
-		FROM unnest($1::uuid[], $2::uuid[], $3::text[]) AS events(event_id, aggregate_id, payload_hash)`
-
-	if _, err := tx.Exec(ctx, query, eventIDs, aggregateIDs, payloadHashes); err != nil {
-		return fmt.Errorf("receiving.Repository.insertOutboxEventsTx exec: %w", err)
-	}
-
-	return nil
 }
