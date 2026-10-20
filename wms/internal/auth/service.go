@@ -256,7 +256,7 @@ func (s *Service) generateRefreshToken(userID uuid.UUID) (string, error) {
 
 func isValidRole(role domain.UserRole) bool {
 	switch role {
-	case domain.UserRoleAdmin, domain.UserRoleOperator, domain.UserRoleCustomer:
+	case domain.UserRoleAdmin, domain.UserRoleOperator, domain.UserRoleCustomer, domain.UserRoleAuditor:
 		return true
 	default:
 		return false
