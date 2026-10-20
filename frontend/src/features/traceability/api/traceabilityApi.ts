@@ -5,7 +5,6 @@ import type {
   ProductTimeline,
   RecentProduct,
   TimelineStep,
-  TxProof,
 } from '../model/types'
 
 interface ApiEnvelope<T> {
@@ -36,14 +35,6 @@ interface TimelineStepResponse {
 interface TimelineResponse {
   product: { product_id: string; qr_code: string; sku_name: string; status: string }
   steps: TimelineStepResponse[]
-}
-
-interface TxProofResponse {
-  found: boolean
-  status: string
-  block_number?: number
-  confirmations?: number
-  gas_used?: number
 }
 
 function unwrap<T>(envelope: ApiEnvelope<T>): T {
@@ -78,16 +69,6 @@ export function mapTimeline(r: TimelineResponse): ProductTimeline {
   }
 }
 
-export function mapTxProof(r: TxProofResponse): TxProof {
-  return {
-    found: r.found,
-    status: r.status as TxProof['status'],
-    blockNumber: r.block_number ?? 0,
-    confirmations: r.confirmations ?? 0,
-    gasUsed: r.gas_used ?? 0,
-  }
-}
-
 export async function getRecentProducts(limit = 20): Promise<RecentProduct[]> {
   const { data } = await apiClient.get<ApiEnvelope<RecentProductResponse[]>>(
     '/products/recent',
@@ -108,11 +89,4 @@ export async function getProductTimeline(key: string): Promise<ProductTimeline> 
     { params: { key } }
   )
   return mapTimeline(unwrap(data))
-}
-
-export async function getTxProof(hash: string): Promise<TxProof> {
-  const { data } = await apiClient.get<ApiEnvelope<TxProofResponse>>(
-    `/onchain/tx/${hash}`
-  )
-  return mapTxProof(unwrap(data))
 }

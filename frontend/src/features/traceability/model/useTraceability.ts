@@ -4,7 +4,6 @@ import { isAxiosError } from 'axios'
 import {
   getProductTimeline,
   getRecentProducts,
-  getTxProof,
 } from '../api/traceabilityApi'
 
 const COLD_LOAD_RETRIES = 2
@@ -33,18 +32,6 @@ export function useProductTimeline(key: string | null) {
     queryKey: ['traceability', 'timeline', key],
     queryFn: () => getProductTimeline(key as string),
     enabled: key !== null && key !== '',
-    retry: retryColdLoadRace,
-    retryDelay: 400,
-  })
-}
-
-// Enabled only once the user clicks a hash. 404 from a not-yet-mined tx never
-// happens here (adapter returns found:false at 200); only real errors surface.
-export function useTxProof(hash: string | null) {
-  return useQuery({
-    queryKey: ['traceability', 'txProof', hash],
-    queryFn: () => getTxProof(hash as string),
-    enabled: hash !== null,
     retry: retryColdLoadRace,
     retryDelay: 400,
   })

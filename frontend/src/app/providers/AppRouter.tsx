@@ -3,6 +3,7 @@
 import { GuestOnlyRoute } from '@/app/providers/GuestOnlyRoute'
 import { ProtectedRoute } from '@/app/providers/ProtectedRoute'
 import { AnalyticsPage } from '@/pages/analytics'
+import { AuditPage } from '@/pages/audit'
 import { AssemblyPage } from '@/pages/assembly'
 import { HomePage } from '@/pages/home'
 import { LoginPage } from '@/pages/login'
@@ -64,6 +65,10 @@ const router = createBrowserRouter([
           {
             path: routes.trace,
             element: <TracePage />,
+          },
+          {
+            path: routes.audit,
+            element: <AuditPage />,
           },
           {
             path: routes.myKey,

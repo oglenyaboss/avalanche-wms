@@ -8,11 +8,8 @@ export type {
   RejectedAction,
 } from './api/chainReader'
 export { auditProduct } from './model/auditProduct'
-export type {
-  AuditCheck,
-  AuditStage,
-  AuditStatus,
-  DbAction,
-  DbDetails,
-  ProductAudit,
-} from './model/types'
+export { useAuditSettings } from './model/useAuditSettings'
+export { useProductAudit } from './model/useProductAudit'
+export type { AuditCheck, AuditStage, AuditStatus, DbAction, DbDetails, ProductAudit } from './model/types'
+export { AuditSettings } from './ui/AuditSettings'
+export { AuditStages } from './ui/AuditStages'
