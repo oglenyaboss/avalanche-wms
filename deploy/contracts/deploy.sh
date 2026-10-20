@@ -44,8 +44,10 @@ mkdir -p "$FOUNDRY_OUT" "$FOUNDRY_CACHE_PATH"
 
 EWOQ_ADDR=0x8db97C7cEcE249c2b98bDC0226Cc4C2A57BF52FC
 
-# live_addr <file>: печатает адрес из файла, если по нему есть байткод. Пусто — файла нет,
-# он пустой или кода нет. RPC-ошибка — FATAL: слепой redeploy осиротил бы старый контракт.
+# live_addr <file>: печатает адрес из файла, если по нему есть байткод. Пусто — файла нет
+# или он пустой. RPC-ошибка — FATAL: слепой redeploy осиротил бы старый контракт. Адрес без
+# кода — тоже FATAL: цепь сброшена, а тома с адресами и БД WMS живы, и передеплой оставил бы
+# в WMS ACTIVE-ключи, которых новый реестр не знает.
 # Сообщения идут в stderr, потому что stdout забирает вызывающий через $(...).
 live_addr() {
   local file=$1 existing code
@@ -64,7 +66,9 @@ live_addr() {
   if [ "${#code}" -gt 4 ]; then
     echo "$existing"
   else
-    echo "==> Stale $(basename "$file") ($existing has no code), redeploying" >&2
+    echo "FATAL: stale $(basename "$file") ($existing has no code) — chain was reset while other volumes survived" >&2
+    echo "       recreate volumes: docker compose --profile test down -v" >&2
+    exit 1
   fi
 }
 
