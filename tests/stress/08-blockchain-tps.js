@@ -13,8 +13,11 @@
  *                        ↑ blockchain TPS измеряется через run-all.sh мониторинг
  *
  * Каждая итерация выполняет putaway одного pre-seeded продукта:
- *   POST /putaway/scan-product      → продукт добавлен в корзину
- *   POST /putaway/scan-storage-bin  → продукт STORED + 1 outbox_event записан в Kafka-outbox
+ *   POST /putaway/scan-product          → продукт добавлен в корзину
+ *   POST /putaway/scan-storage-bin/draft + /submit → продукт STORED (подписанное действие)
+ *
+ * Метрика items_placed — товары из ответа submit (products_placed), а не строки
+ * outbox: одно подписанное действие покрывает много товаров (warehouse_actions.item_ids).
  *
  * Данные: 5000 продуктов в статусе RECEIVED в буфере BUFFER-01.
  * Засев:  tests/stress/setup/stress-seed.sql (секция 6, STRESS-TPS-QR-*).
@@ -22,6 +25,8 @@
  * Требования:
  *   - RECEIVING_BIN_ID  — UUID ячейки BUFFER-01
  *   - STORAGE_BIN_ID    — UUID ячейки A-01-01
+ *   - tests/stress/.signed/operators.json — операторы с ACTIVE-ключами
+ *     (`cd tests/e2e && go run ./cmd/stress-provision -operators 100`): один на VU
  *
  * Запуск:
  *   k6 run -e "WMS_URL=http://wms-service:8080" \
@@ -29,9 +34,9 @@
  *          -e "STORAGE_BIN_ID=<uuid>" \
  *          tests/stress/08-blockchain-tps.js
  *
- * После теста run-all.sh ждёт 60 секунд и измеряет:
- *   - WMS event-generation rate  = delta(outbox_events) / test_duration
- *   - Blockchain commit rate     = delta(onchain_events WHERE status='COMMITTED') / elapsed
+ * После теста run-all.sh ждёт 60 секунд и измеряет (в товарах, не в строках outbox):
+ *   - WMS item-generation rate   = delta(товаров подписанных действий) / test_duration
+ *   - Blockchain commit rate     = delta(товаров COMMITTED-действий) / elapsed
  *   - Backlog                    = outbox_events без соответствующей записи в onchain_events
  *
  * Целевые метрики (blockchain TPS = 1500/s):
@@ -47,17 +52,23 @@ import { Counter } from 'k6/metrics';
 import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders } from './lib/helpers.js';
+import { importSigner } from './lib/signer.js';
+import { loadOperators, signedPost } from './lib/signedflow.js';
 
 const TOTAL_PRODUCTS = 5000;
+const VUS = Number(__ENV.VUS) || 100;
+
+// Операторы с активными ключами (stress-provision): VU i подписывает оператором i.
+const OPERATORS = loadOperators();
 
 // UUIDs продуктов STRESS-TPS-QR-XXXXXX (pre-seeded в RECEIVED статусе, bin_id = BUFFER-01).
 // Генерируется run-all.sh перед тестом в /tmp/stress-tps-products.json.
 const PRODUCT_UUIDS = new SharedArray('tps_products', () =>
   JSON.parse(open('/tmp/stress-tps-products.json')));
 
-// Счётчик успешно записанных outbox-событий (= успешных scan-storage-bin).
+// Счётчик товаров, реально размещённых подписанным действием (products_placed submit-ответа).
 // Threshold 'count>=4750' означает: ≥95% из 5000 продуктов успешно помещено на склад.
-const outboxEventsGenerated = new Counter('outbox_events_generated');
+const itemsPlaced = new Counter('items_placed');
 
 export const options = {
   scenarios: {
@@ -65,7 +76,7 @@ export const options = {
       // closed-model: ровно TOTAL_PRODUCTS итераций, каждая — уникальный продукт.
       // После обработки всех 5000 продуктов тест завершается естественно.
       executor: 'shared-iterations',
-      vus: Number(__ENV.VUS) || 100,
+      vus: VUS,
       iterations: Number(__ENV.ITER) || TOTAL_PRODUCTS,
       maxDuration: '5m',
     },
@@ -75,9 +86,9 @@ export const options = {
     'http_req_duration{step:scan_storage_bin}': ['p(95)<500', 'p(99)<1000'],
     // При shared-iterations каждый продукт используется ровно один раз.
     http_req_failed: ['rate<0.05'],
-    // Ключевой порог: ≥95% из 5000 событий успешно сгенерировано.
+    // Ключевой порог: ≥95% из 5000 товаров успешно размещено подписанным действием.
     // Если WMS не справляется — этот порог не пройдёт.
-    'outbox_events_generated': ['count>=4750'],
+    'items_placed': ['count>=4750'],
   },
 };
 
@@ -94,21 +105,41 @@ export function setup() {
     );
   }
 
-  const token = login('operator', 'operator');
-  if (!token) {
-    exec.test.abort('setup: не удалось получить токен оператора. Проверьте WMS_URL.');
+  if (OPERATORS.length < VUS) {
+    exec.test.abort('[08-blockchain-tps] ABORT: нет операторов с ключами: ' +
+      'прогони cd tests/e2e && go run ./cmd/stress-provision -operators 100');
+  }
+
+  // Токены: VU i логинится оператором i (у каждого свой ключ подписи).
+  const tokens = [];
+  for (let i = 0; i < VUS; i++) {
+    const op = OPERATORS[i];
+    const t = login(op.username, op.password);
+    if (!t) {
+      exec.test.abort(`setup: не удалось залогинить ${op.username} (прогони stress-provision, проверь стек)`);
+    }
+    tokens.push(t);
   }
 
   return {
-    token,
+    tokens,
+    operators: OPERATORS,
     receivingBinId: __ENV.RECEIVING_BIN_ID,
     storageBinId:   __ENV.STORAGE_BIN_ID,
   };
 }
 
-export default function (data) {
-  const { token, receivingBinId, storageBinId } = data;
+// Подписант VU — импортируется один раз и кэшируется в переменной уровня модуля
+// (инит-контекст у каждого VU свой → кэш живёт на VU).
+let vuSigner = null;
+
+export default async function (data) {
+  const { tokens, operators, receivingBinId, storageBinId } = data;
+  const opIdx = (__VU - 1) % operators.length;
+  const token = tokens[opIdx];
   if (!token) return;
+  if (!vuSigner) vuSigner = await importSigner(operators[opIdx]);
+  const signer = vuSigner;
 
   // 404 = продукт не найден (данные не засеяны);
   // 409 = продукт не в статусе RECEIVED (уже обработан конкурентным VU — редко).
@@ -137,13 +168,13 @@ export default function (data) {
   check(scanProdRes, { 'scan_product: 200': (r) => r.status === 200 });
   if (scanProdRes.status !== 200) return;
 
-  // 2. scan-storage-bin: размещаем продукт → статус STORED.
-  //    Побочный эффект: INSERT INTO public.outbox_events → Debezium → Kafka → ledger-adapter → blockchain.
-  const storeBinRes = http.post(
-    `${BASE_URL}/putaway/scan-storage-bin`,
-    JSON.stringify({ product_ids: [productId], storage_bin_id: storageBinId }),
-    { headers: H, tags: { step: 'scan_storage_bin' } },
-  );
+  // 2. scan-storage-bin (подписанное действие): размещаем продукт → статус STORED.
+  //    Побочный эффект: одна строка outbox_events на действие (товары — в item_ids)
+  //    → Debezium → Kafka → ledger-adapter → blockchain.
+  const storeBin = await signedPost(H, signer,
+    '/putaway/scan-storage-bin/draft', '/putaway/scan-storage-bin/submit',
+    { product_ids: [productId], storage_bin_id: storageBinId }, { step: 'scan_storage_bin' });
+  const storeBinRes = storeBin.submitRes || storeBin.draftRes;
   const placed = check(storeBinRes, {
     'scan_storage_bin: 200': (r) => r.status === 200,
     'scan_storage_bin: products_placed >= 1': (r) => {
@@ -151,8 +182,8 @@ export default function (data) {
     },
   });
 
-  // Инкрементируем счётчик outbox-событий только при реальном успехе.
+  // Инкрементируем счётчик товаров только при реальном успехе.
   if (placed) {
-    outboxEventsGenerated.add(1);
+    try { itemsPlaced.add(JSON.parse(storeBinRes.body).data.products_placed || 0); } catch (_) {}
   }
 }

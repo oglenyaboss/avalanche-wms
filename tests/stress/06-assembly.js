@@ -5,11 +5,14 @@
  *   POST /assembly/allocate
  *   GET  /assembly/tasks?destination_id=<uuid>
  *   POST /assembly/pick  (×N для каждого товара)
- *   POST /assembly/scan-shipping-buffer
+ *   POST /assembly/scan-shipping-buffer/draft + /submit  (подписанное действие)
  *
  * Требования к данным:
  *   Перед запуском выполнить: tests/stress/setup/stress-seed.sql
  *   (создаёт STORED products и NEW orders для SHOP-5 / SHOP-7)
+ *   + tests/stress/.signed/operators.json — операторы с ACTIVE-ключами
+ *     (`cd tests/e2e && go run ./cmd/stress-provision -operators 100`):
+ *     один оператор на VU (своя корзина сборки и свой ключ подписи).
  *
  * Запуск:
  *   k6 run tests/stress/06-assembly.js
@@ -19,6 +22,14 @@ import { check, sleep } from 'k6';
 import exec from 'k6/execution';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders } from './lib/helpers.js';
+import { importSigner } from './lib/signer.js';
+import { loadOperators, signedPost } from './lib/signedflow.js';
+
+// Максимум VU в рампе — столько же операторов и токенов нужно в setup().
+const MAX_VUS = 40;
+
+// Операторы с активными ключами (stress-provision): VU i подписывает оператором i.
+const OPERATORS = loadOperators();
 
 export const options = {
   scenarios: {
@@ -27,7 +38,7 @@ export const options = {
       stages: [
         { duration: '30s', target: 5 },
         { duration: '2m',  target: 20 },
-        { duration: '3m',  target: 40 },
+        { duration: '3m',  target: MAX_VUS },
         { duration: '30s', target: 0 },
       ],
     },
@@ -59,21 +70,41 @@ export function setup() {
     exec.test.abort(msg);
   }
 
-  const token = login('operator', 'operator');
-  if (!token) {
-    exec.test.abort('setup: не удалось получить токен оператора.');
+  if (OPERATORS.length < MAX_VUS) {
+    exec.test.abort('[06-assembly] ABORT: нет операторов с ключами: ' +
+      'прогони cd tests/e2e && go run ./cmd/stress-provision -operators 100');
+  }
+
+  // Токены: VU i работает своим оператором — своя корзина сборки и свой ключ подписи.
+  const tokens = [];
+  for (let i = 0; i < MAX_VUS; i++) {
+    const op = OPERATORS[i];
+    const t = login(op.username, op.password);
+    if (!t) {
+      exec.test.abort(`setup: не удалось залогинить ${op.username} (прогони stress-provision, проверь стек)`);
+    }
+    tokens.push(t);
   }
   return {
-    token,
+    tokens,
+    operators: OPERATORS,
     destinationId: __ENV.DESTINATION_ID,
     shippingBinId: __ENV.SHIPPING_BIN_ID,
   };
 }
 
-export default function (data) {
-  const { token, destinationId, shippingBinId } = data;
-  // setup() гарантирует токен и env-переменные; сюда они приходят корректными.
+// Подписант VU — импортируется один раз и кэшируется в переменной уровня модуля
+// (инит-контекст у каждого VU свой → кэш живёт на VU).
+let vuSigner = null;
+
+export default async function (data) {
+  const { tokens, operators, destinationId, shippingBinId } = data;
+  // setup() гарантирует токены и env-переменные; сюда они приходят корректными.
+  const opIdx = (__VU - 1) % operators.length;
+  const token = tokens[opIdx];
   if (!token) return;
+  if (!vuSigner) vuSigner = await importSigner(operators[opIdx]);
+  const signer = vuSigner;
 
   // 409 = нет NEW-заказов; 422 = нет STORED-товаров (нормально после исчерпания пула).
   http.setResponseCallback(http.expectedStatuses(
@@ -145,11 +176,10 @@ export default function (data) {
     return;
   }
 
-  const shipBufRes = http.post(
-    `${BASE_URL}/assembly/scan-shipping-buffer`,
-    JSON.stringify({ buffer_bin_id: shippingBinId }),
-    { headers: H, tags: { step: 'ship_buffer' } },
-  );
+  const shipBuf = await signedPost(H, signer,
+    '/assembly/scan-shipping-buffer/draft', '/assembly/scan-shipping-buffer/submit',
+    { buffer_bin_id: shippingBinId }, { step: 'ship_buffer' });
+  const shipBufRes = shipBuf.submitRes || shipBuf.draftRes;
   check(shipBufRes, {
     'ship_buffer: 200': (r) => r.status === 200,
   });
