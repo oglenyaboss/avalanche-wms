@@ -37,7 +37,7 @@ func TestSignedPutaway_EndToEnd(t *testing.T) {
 	require.Equal(t, "TABLE_CLOSED", run.result.Status)
 
 	for _, pid := range run.productIDs {
-		waitForOnchainCommitted(t, ctx, env, eventIDForAggregate(t, ctx, env, pid, "receiving"), "receiving")
+		waitForOnchainCommitted(t, ctx, env, eventIDForAggregate(t, ctx, env, pid, "receiving"))
 	}
 
 	// ── Draft: action type 2, one part for the whole basket, ADR-0001 challenge ──
@@ -115,7 +115,7 @@ func TestSignedPutaway_EndToEnd(t *testing.T) {
 		"details_hash must be reproducible from the putaways domain row, not the details JSON")
 
 	// ── Chain: the action commits, the operation is APPLIED, items are PutAway(2) ──
-	waitForOnchainCommitted(t, ctx, env, actionID, "putaway")
+	waitForOnchainCommitted(t, ctx, env, actionID)
 	status := waitForOperationState(t, ctx, env, op.token, draft.OperationID, "APPLIED", nil)
 	require.Len(t, status.Parts, 1)
 	require.Equal(t, part.ActionID, status.Parts[0].ActionID)
@@ -258,7 +258,7 @@ func TestSignedPutaway_DraftStaleWhenProductMoved(t *testing.T) {
 	require.Len(t, run.productIDs, 2)
 
 	for _, pid := range run.productIDs {
-		waitForOnchainCommitted(t, ctx, env, eventIDForAggregate(t, ctx, env, pid, "receiving"), "receiving")
+		waitForOnchainCommitted(t, ctx, env, eventIDForAggregate(t, ctx, env, pid, "receiving"))
 	}
 
 	// Draft 1 covers both products; product 0 is then placed by a second
@@ -300,7 +300,7 @@ func TestSignedPutaway_RejectedActionBlocksPick(t *testing.T) {
 	sc := setupReceivingScaffold(t, ctx, env, 1)
 	run := receiveAndCloseSigned(t, ctx, env, op, sc, 1)
 
-	waitForOnchainCommitted(t, ctx, env, eventIDForAggregate(t, ctx, env, run.productIDs[0], "receiving"), "receiving")
+	waitForOnchainCommitted(t, ctx, env, eventIDForAggregate(t, ctx, env, run.productIDs[0], "receiving"))
 
 	draft := draftPlaceToStorageBin(t, env, op, []uuid.UUID{run.productIDs[0]}, sc.StorageBinID)
 	require.Len(t, draft.Parts, 1)
@@ -310,7 +310,7 @@ func TestSignedPutaway_RejectedActionBlocksPick(t *testing.T) {
 	require.Equal(t, 1, putaway.ProductsPlaced)
 	require.Equal(t, draft.OperationID, putaway.OperationID)
 
-	waitForOnchainCommitted(t, ctx, env, actionID, "putaway")
+	waitForOnchainCommitted(t, ctx, env, actionID)
 
 	// Simulate the contract rejecting the action: FAILED + RejectReason 12.
 	mustExec(t, ctx, env, `

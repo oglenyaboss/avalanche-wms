@@ -75,57 +75,42 @@ var aggregateActionType = map[string]int16{
 	"shipping":  4,
 }
 
-// outboxCountForAggregate returns the number of events a product has for an
-// aggregate type: legacy per-product outbox rows PLUS signed actions containing
-// the product (one warehouse action row = one event with event_id = action_id).
+// outboxCountForAggregate returns the number of submitted signed actions of the
+// stage containing the product.
 func outboxCountForAggregate(t *testing.T, ctx context.Context, env *env, aggregateID uuid.UUID, aggregateType string) int {
 	t.Helper()
 	var count int
 	err := env.db.QueryRow(ctx, `
-		SELECT (
-			SELECT count(*)
-			FROM public.outbox_events
-			WHERE aggregate_id = $1 AND aggregate_type = $2
-		) + (
-			SELECT count(*)
-			FROM public.warehouse_actions
-			WHERE submitted_at IS NOT NULL
-			  AND item_ids @> ARRAY[$1::uuid]
-			  AND action_type = $3
-		)`, aggregateID, aggregateType, aggregateActionType[aggregateType]).Scan(&count)
+		SELECT count(*)
+		FROM public.warehouse_actions
+		WHERE submitted_at IS NOT NULL
+		  AND item_ids @> ARRAY[$1::uuid]
+		  AND action_type = $2`, aggregateID, aggregateActionType[aggregateType]).Scan(&count)
 	require.NoError(t, err)
 	return count
 }
 
-// eventIDForAggregate returns the most recent event id for a product and
-// aggregate type: a legacy outbox event or the event id (action_id) of the
-// newest submitted signed action containing the product.
+// eventIDForAggregate returns the action id of the newest submitted signed action
+// of the stage containing the product (ordered by submitted_at DESC).
 func eventIDForAggregate(t *testing.T, ctx context.Context, env *env, productID uuid.UUID, aggregateType string) uuid.UUID {
 	t.Helper()
 	var eventID uuid.UUID
 	err := env.db.QueryRow(ctx, `
-		SELECT event_id FROM (
-			SELECT event_id, created_at
-			FROM public.outbox_events
-			WHERE aggregate_id = $1 AND aggregate_type = $2
-			UNION ALL
-			SELECT wa.action_id, wa.submitted_at
-			FROM public.warehouse_actions wa
-			WHERE wa.submitted_at IS NOT NULL
-			  AND wa.item_ids @> ARRAY[$1::uuid]
-			  AND wa.action_type = $3
-		) e
-		ORDER BY created_at DESC
-		LIMIT 1`, productID, aggregateType, aggregateActionType[aggregateType]).Scan(&eventID)
-	require.NoError(t, err, "outbox event for product %s aggregate_type %s", productID, aggregateType)
+		SELECT action_id
+		FROM public.warehouse_actions
+		WHERE submitted_at IS NOT NULL
+		  AND item_ids @> ARRAY[$1::uuid]
+		  AND action_type = $2
+		ORDER BY submitted_at DESC
+		LIMIT 1`, productID, aggregateActionType[aggregateType]).Scan(&eventID)
+	require.NoError(t, err, "submitted %s action for product %s", aggregateType, productID)
 	return eventID
 }
 
-// waitForOnchainCommitted blocks until the onchain_events row for an event id
-// reaches COMMITTED. The aggregate_type may be the stage's legacy value or
-// 'signed_action' — the adapter records multi-product signed actions under the
-// signed_action aggregate, and the event id of such an action is its action_id.
-func waitForOnchainCommitted(t *testing.T, ctx context.Context, env *env, eventID uuid.UUID, aggregateType string) {
+// waitForOnchainCommitted blocks until the onchain_events row for an action id
+// reaches COMMITTED. The row must be a signed action (aggregate_type
+// 'signed_action' — the event id of a signed action is its action_id).
+func waitForOnchainCommitted(t *testing.T, ctx context.Context, env *env, eventID uuid.UUID) {
 	t.Helper()
 	require.EventuallyWithT(t, func(c *assertCollect) {
 		var status string
@@ -135,7 +120,7 @@ func waitForOnchainCommitted(t *testing.T, ctx context.Context, env *env, eventI
 			FROM public.onchain_events
 			WHERE event_id = $1`, eventID).Scan(&status, &dbAggregate)
 		require.NoError(c, err)
-		require.Contains(c, []string{aggregateType, "signed_action"}, dbAggregate)
+		require.Equal(c, "signed_action", dbAggregate)
 		require.Equal(c, "COMMITTED", status)
 	}, 90*time.Second, 2*time.Second, "event %s did not become COMMITTED", eventID)
 }

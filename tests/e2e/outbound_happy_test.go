@@ -86,7 +86,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "receiving"))
 
 	receivingEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "receiving")
-	waitForOnchainCommitted(t, ctx, env, receivingEventID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, receivingEventID)
 	stageEventIDs["receiving"] = append(stageEventIDs["receiving"], receivingEventID)
 
 	// 6. Putaway: scan from buffer, place into storage bin, wait for putaway on-chain.
@@ -105,7 +105,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "putaway"))
 
 	putawayEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "putaway")
-	waitForOnchainCommitted(t, ctx, env, putawayEventID, "putaway")
+	waitForOnchainCommitted(t, ctx, env, putawayEventID)
 	stageEventIDs["putaway"] = append(stageEventIDs["putaway"], putawayEventID)
 
 	// 7. Allocate the dedicated order; only this run's product should be assigned.
@@ -149,7 +149,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	require.GreaterOrEqual(t, placed.OrdersAssembled, 1)
 
 	pickingEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "picking")
-	waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
+	waitForOnchainCommitted(t, ctx, env, pickingEventID)
 	stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
 	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "picking"))
 	requireOrderStatus(t, ctx, env, fixture.OrderID, "ASSEMBLED")
@@ -190,7 +190,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 		requireProductStatus(t, ctx, env, parsedProductID, "SHIPPED")
 
 		shippingEventID := eventIDForAggregate(t, ctx, env, parsedProductID, "shipping")
-		waitForOnchainCommitted(t, ctx, env, shippingEventID, "shipping")
+		waitForOnchainCommitted(t, ctx, env, shippingEventID)
 		stageEventIDs["shipping"] = append(stageEventIDs["shipping"], shippingEventID)
 
 		status := callItemStatus(t, ctx, env, parsedProductID)

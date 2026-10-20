@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const itemStatusABI = `[{"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"itemStatus","outputs":[{"internalType":"enum BatchMappingWMS.Status","name":"","type":"uint8"}],"stateMutability":"view","type":"function"}]`
+const itemStatusABI = `[{"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"itemStatus","outputs":[{"internalType":"enum SignedMappingWMS.Status","name":"","type":"uint8"}],"stateMutability":"view","type":"function"}]`
 
 // fsmStageOrder is the canonical FSM order the contract enforces for an item.
 var fsmStageOrder = []string{"receiving", "putaway", "picking", "shipping"}
