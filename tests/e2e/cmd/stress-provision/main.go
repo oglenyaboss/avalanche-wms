@@ -40,12 +40,10 @@ import (
 )
 
 const (
-	defaultOperators        = 70
-	defaultOut              = "tests/stress/.signed" // от корня репозитория
-	defaultDBURL            = "postgres://root:root@localhost:5432/wms_blockchain_db?sslmode=disable"
-	defaultWMSURL           = "http://localhost:8081"
-	defaultAdapterContainer = "ledger-adapter"
-	defaultAdapterHealthURL = "http://localhost:8085/health"
+	defaultOperators = 70
+	defaultOut       = "tests/stress/.signed" // от корня репозитория
+	defaultDBURL     = "postgres://root:root@localhost:5432/wms_blockchain_db?sslmode=disable"
+	defaultWMSURL    = "http://localhost:8081"
 )
 
 // ── software P-256 signer, byte-identical to tests/e2e/softauthn_test.go ─────
@@ -354,49 +352,6 @@ func registerOrg(root, fileRel string) error {
 	return nil
 }
 
-// restartAdapter restarts the ledger-adapter container: the owner tx consumed
-// one nonce of the shared deployer key, leaving the adapter's local nonce stale
-// (the e2e recreates the adapter for the same reason).
-func restartAdapter(container string) error {
-	out, err := exec.Command("docker", "restart", container).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker restart %s: %s: %w", container, strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// waitHealthy polls url until it answers 200 (the adapter /health after restart).
-func waitHealthy(ctx context.Context, url string, timeout time.Duration) error {
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := client.Do(req)
-		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-			lastErr = fmt.Errorf("status %d", resp.StatusCode)
-		} else {
-			lastErr = err
-		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			return fmt.Errorf("timeout waiting for %s: %w", url, lastErr)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
 // ── WMS HTTP client: login + success envelope, 401 → re-login once ───────────
 
 type wmsClient struct {
@@ -665,8 +620,6 @@ func envOr(key, def string) string {
 func run(ctx context.Context, n int, outDir string) error {
 	dbURL := envOr("DB_URL", defaultDBURL)
 	wmsURL := envOr("WMS_URL", defaultWMSURL)
-	adapterContainer := envOr("ADAPTER_CONTAINER", defaultAdapterContainer)
-	adapterHealthURL := envOr("ADAPTER_HEALTH_URL", defaultAdapterHealthURL)
 
 	// 1. Keys and usernames.
 	suffix, err := newSuffix()
@@ -716,16 +669,7 @@ func run(ctx context.Context, n int, outDir string) error {
 		return fmt.Errorf("register org: %w", err)
 	}
 
-	// 4. Fresh adapter nonce, then wait for its health endpoint.
-	log.Printf("restarting adapter container %s (stale deployer nonce)", adapterContainer)
-	if err := restartAdapter(adapterContainer); err != nil {
-		return fmt.Errorf("restart adapter: %w", err)
-	}
-	if err := waitHealthy(ctx, adapterHealthURL, 90*time.Second); err != nil {
-		return fmt.Errorf("adapter health: %w", err)
-	}
-
-	// 5. Admin login, then wait until the admin passkey is ACTIVE.
+	// 4. Admin login, then wait until the admin passkey is ACTIVE.
 	client := &wmsClient{
 		baseURL: wmsURL,
 		http:    &http.Client{Timeout: 30 * time.Second},
@@ -743,7 +687,7 @@ func run(ctx context.Context, n int, outDir string) error {
 		return fmt.Errorf("wait admin ACTIVE: %w", err)
 	}
 
-	// 6. Submit every operator's key-register action sequentially (one client).
+	// 5. Submit every operator's key-register action sequentially (one client).
 	for i := range p.operators {
 		if err := submitOperatorKey(ctx, client, p, &p.operators[i]); err != nil {
 			return fmt.Errorf("submit operator %d/%d: %w", i+1, n, err)
@@ -751,7 +695,7 @@ func run(ctx context.Context, n int, outDir string) error {
 		log.Printf("submitted %d/%d (%s)", i+1, n, p.operators[i].username)
 	}
 
-	// 7. Wait until every operator passkey is ACTIVE on chain.
+	// 6. Wait until every operator passkey is ACTIVE on chain.
 	usernames := make([]string, n)
 	for i := range p.operators {
 		usernames[i] = p.operators[i].username
@@ -765,7 +709,7 @@ func run(ctx context.Context, n int, outDir string) error {
 		return fmt.Errorf("wait operators ACTIVE: %w", err)
 	}
 
-	// 8. Credentials for k6.
+	// 7. Credentials for k6.
 	adminJSON, err := json.MarshalIndent(keyRecordFor(p.adminUser, p.adminKey, p.adminCred, p.adminKeyID), "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal admin.json: %w", err)
