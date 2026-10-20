@@ -235,7 +235,7 @@ export async function operator(data) {
     const bufRes = http.post(`${BASE_URL}/receiving/table/scan-buffer`,
       JSON.stringify({ cargoplace_id: cargoplaceId, buffer_bin_id: receivingBinId }), { headers: H });
     if (bufRes.status !== 200) { productIds.length = 0; }
-    closeCargoplace = true;
+    closeCargoplace = bufRes.status === 200;
   });
 
   if (closeCargoplace) {
