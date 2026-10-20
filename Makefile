@@ -103,11 +103,13 @@ connector-status:
 delete-connector:
 	@curl -X DELETE http://localhost:8083/connectors/outbox-connector
 
-stress: ## Run all stress tests 01–07 in Docker (seeds DB automatically)
+stress: ## Run all stress tests 01–08 in Docker (seeds DB; provision operators first: cd tests/e2e && go run ./cmd/stress-provision -operators 100)
 	$(COMPOSE) --profile stress build k6
 	$(COMPOSE) --profile stress up -d
 	@echo ""
 	@echo "Stress tests running in background."
+	@echo "Tests 05–08 need operators with active keys — provision them first"
+	@echo "(make stress does not provision): cd tests/e2e && go run ./cmd/stress-provision -operators 100"
 	@echo "Follow progress : make stress-logs"
 	@echo "Stop container  : docker compose --profile stress stop k6"
 
