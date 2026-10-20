@@ -3,10 +3,6 @@ set -euo pipefail
 
 # Ждёт пока весь test-profile стек не будет healthy + contract-deploy завершится.
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=lib/env.sh
-source "$HERE/lib/env.sh" 2>/dev/null || true
-
 echo "=== Waiting for services to be ready ==="
 
 wait_healthy() {
