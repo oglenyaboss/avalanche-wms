@@ -103,8 +103,8 @@ docker run --rm --network host --entrypoint cast ghcr.io/foundry-rs/foundry:stab
 `cannot issue transaction from non-allow listed address`. Деплой контракта с адреса вне
 deployer-списка проходит mempool (если отправитель разрешён в tx-списке), но падает
 в EVM: `tx.origin <адрес> is not authorized to deploy a contract`. Поэтому
-multi-signer-адреса адаптера (`PRIVATE_KEYS`) обязаны присутствовать в списке — на
-гео-стенде их разрешает `fund-signers.sh` (после фондирования выдаёт signer-ам роль
+адрес адаптера (`PRIVATE_KEY`) обязан присутствовать в списке — на
+гео-стенде его разрешает `fund-signers.sh` (после фондирования выдаёт signer-у роль
 `Enabled` от админа).
 
 Проверка стенда целиком (сам находит RPC):

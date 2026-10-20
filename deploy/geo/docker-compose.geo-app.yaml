@@ -30,10 +30,6 @@ services:
       RPC_URL: "${GEO_RPC_URL:?set GEO_RPC_URL via deploy/geo/run-app-on-geo.sh}"
       CONTRACT_ADDR: "${GEO_CONTRACT_ADDR:?run deploy/geo/contracts/deploy-geo.sh first}"
       PRIVATE_KEY: "0x56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027"  # ewoq, funded on geo
-      # PRIVATE_KEYS (comma-separated) включает multi-signer: flusher шардит in-flight
-      # tx по N аккаунтам (N× ёмкость txpool-слотов → насыщение WAN-цепи). Пусто →
-      # single-signer (PRIVATE_KEY). Аккаунты фондятся deploy/geo/fund-signers.sh.
-      PRIVATE_KEYS: "${PRIVATE_KEYS:-}"
       # WAN-цепь коммитит бёрстами: интервал блока под нагрузкой 25–100с (а холодный
       # первый блок ~33с), тогда как локальный дефолт RECEIPT_POLL_TIMEOUT=30s роняет
       # consumer по receipt-timeout на первом же медленном блоке (committed=0, коллапс).

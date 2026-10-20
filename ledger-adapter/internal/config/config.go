@@ -28,12 +28,6 @@ type Config struct {
 	ReconcileMinAge    time.Duration
 	PipelineWindow     int
 	LogLevel           string
-	// PrivateKeys — signer-аккаунт, ровно один: подписанные action'ы
-	// (ConsortiumRegistry.applyKeyActions) держат Kafka-порядок действий одной
-	// nonce-последовательностью, поэтому multi-signer шардирование запрещено
-	// (Load возвращает ошибку при >1). Если задан PRIVATE_KEYS (comma-separated)
-	// — используется он; иначе [PrivateKey].
-	PrivateKeys []string
 
 	// SignerMode: "static" (дефолт, ТОЛЬКО локальная разработка — приватник в env
 	// открытым текстом) | "kms"
@@ -149,29 +143,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("SIGNER_MODE must be \"static\" or \"kms\", got %q", c.SignerMode)
 	}
 
-	// PRIVATE_KEYS (comma-separated) исторически задавал несколько signer'ов;
-	// теперь ключ ровно один (см. проверку ниже). Падаем на единственный
-	// PRIVATE_KEY, если не задан. PRIVATE_KEY остаётся required (back-compat).
-	// В kms-режиме не применяется — signer определяется KMS_PUBLIC_KEYS.
-	if c.SignerMode == "static" {
-		if raw := os.Getenv("PRIVATE_KEYS"); raw != "" {
-			for _, k := range strings.Split(raw, ",") {
-				if k = strings.TrimSpace(k); k != "" {
-					c.PrivateKeys = append(c.PrivateKeys, k)
-				}
-			}
-		}
-		if len(c.PrivateKeys) == 0 {
-			c.PrivateKeys = []string{c.PrivateKey}
-		}
-	}
-
 	// Подписанные action'ы (ConsortiumRegistry.applyKeyActions) отправляются
 	// ровно одним signer'ом: порядок действий держится одной nonce-
 	// последовательностью, шардирование по нескольким аккаунтам нарушило бы
-	// Kafka-порядок (ADR-0001 §9). Отклоняем конфиг с более чем одним ключом —
-	// и в static, и в kms.
-	signerCount := len(c.PrivateKeys)
+	// Kafka-порядок (ADR-0001 §9). В static signer всегда один (PRIVATE_KEY),
+	// в kms отклоняем конфиг с более чем одним identifier'ом.
+	signerCount := 1
 	if c.SignerMode == "kms" {
 		signerCount = len(c.KMSPublicKeys)
 	}

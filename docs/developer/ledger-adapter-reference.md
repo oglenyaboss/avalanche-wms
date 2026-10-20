@@ -264,8 +264,7 @@ Liveness-проба: всегда `200 OK`, `{"status":"ok","time":"<RFC3339 UTC
 | `CONTRACT_ADDR` | да | — | hex-адрес `SignedMappingWMS`. Override: `CONTRACT_ADDR_FILE` |
 | `REGISTRY_ADDR` | нет | — | hex-адрес `ConsortiumRegistry`; невалидный адрес — ошибка старта, пустое значение — ключевые действия терминально фейлятся, `/registry/keys` отвечает 502. Override: `REGISTRY_ADDR_FILE` |
 | `SIGNER_MODE` | нет | `static` | `static` \| `kms` — источник подписи: локальный ключ (только локальная разработка) или внешний Web3Signer |
-| `PRIVATE_KEY` | да (static) | — | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE`. В kms-режиме не читается |
-| `PRIVATE_KEYS` | нет | — | историческая CSV-форма; signer ровно один — при >1 значении старт падает |
+| `PRIVATE_KEY` | да (static) | — | hex ECDSA-ключ (с/без `0x`) — единственный signer. Override: `PRIVATE_KEY_FILE`. В kms-режиме не читается |
 | `KMS_URL` | да (kms) | — | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
 | `KMS_PUBLIC_KEYS` | да (kms) | — | identifier единственного ключа (uncompressed X\|\|Y, из `GET /api/v1/eth1/publicKeys`); дубликаты и >1 ключа отклоняются. Override: `KMS_PUBLIC_KEYS_FILE` |
 | `PORT` | нет | `8085` | HTTP-порт эндпоинтов адаптера (§10) |
@@ -281,7 +280,7 @@ Liveness-проба: всегда `200 OK`, `{"status":"ok","time":"<RFC3339 UTC
 
 **Инварианты, проверяемые на старте** (`Load()` возвращает ошибку и прерывает запуск):
 
-- **Signer ровно один** — в static и kms: подписанные действия держат Kafka-порядок одной nonce-последовательностью, multi-signer шардирование нарушило бы порядок отзыва ключа (ADR-0001 §9). Отклоняется `PRIVATE_KEYS` с >1 ключом и `KMS_PUBLIC_KEYS` с >1 identifier'ом.
+- **Signer ровно один** — в static и kms: подписанные действия держат Kafka-порядок одной nonce-последовательностью, multi-signer шардирование нарушило бы порядок отзыва ключа (ADR-0001 §9). Отклоняется `KMS_PUBLIC_KEYS` с >1 identifier'ом.
 - `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT` — иначе reconcile-loop гонялся бы с in-flight `WaitReceipt` флашера.
 - `RECONCILE_INTERVAL > 0` — иначе `time.NewTicker` в reconcile-loop паникует (`time.ParseDuration` принимает `0s` без ошибки).
 - `PIPELINE_WINDOW ≥ 1`; значения выше потолка зажимаются с warning.
@@ -294,7 +293,7 @@ Liveness-проба: всегда `200 OK`, `{"status":"ok","time":"<RFC3339 UTC
 
 1. `config.Load()` — валидация env и инвариантов.
 2. `store.NewPool` + `store.NewRepository`.
-3. `buildSigner(cfg)` — ровно один `TxSigner`: static (`PrivateKeys[0]`, fallback `PRIVATE_KEY`) или kms (`KMS_PUBLIC_KEYS[0]`).
+3. `buildSigner(cfg)` — ровно один `TxSigner`: static (`PRIVATE_KEY`) или kms (`KMS_PUBLIC_KEYS[0]`).
 4. `chain.NewClientWithSigner` — один клиент обслуживает и отправку, и receipt-чтения (receipt'ы node-global); логирует адрес signer'а.
 5. `assertSignersFunded` — fail-fast, если signer не профинансирован (иначе out-of-funds реверты под нагрузкой).
 6. Отдельный `ethclient` для read-only резолверов: `NewWarehouseActions(CONTRACT_ADDR)` — всегда, `NewRegistry(REGISTRY_ADDR)` — при заданном адресе.
