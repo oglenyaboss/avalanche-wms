@@ -221,8 +221,8 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 			sql  string
 			args []any
 		}{
-			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id IN ` + prodSel + `)`, []any{shipmentID}},
-			{`DELETE FROM public.outbox_events WHERE aggregate_id IN ` + prodSel, []any{shipmentID}},
+			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel + `)`, []any{shipmentID}},
+			{`DELETE FROM public.outbox_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel + `)`, []any{shipmentID}},
 			{`DELETE FROM wms_ops.receiving_table WHERE cargoplace_id IN ` + cpSel, []any{shipmentID}},
 			{`DELETE FROM wms_ops.receiving_gate WHERE cargoplace_id IN ` + cpSel, []any{shipmentID}},
 			{`DELETE FROM wms_ops.receiving_gate WHERE shipment_id=$1`, []any{shipmentID}},

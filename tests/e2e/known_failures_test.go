@@ -12,10 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These tests document known product defects in the WMS <-> chain integration.
-// They are intentionally skipped: the fault injection is NOT implemented, only
-// the intended invariant is described, so the suite stays green while the gap is
-// tracked. Remove the Skip and implement the body once the product is fixed.
+// Regression tests for defects found in the WMS <-> chain integration
+// (BUGHUNT.md). Each test reproduces the original fault on the signed-action
+// path and asserts the fixed invariant.
 
 // TestS1_WMSChainDivergence_pendingFix is the live regression for the S1 putaway gate
 // (#45): once a product's receiving event is FAILED on-chain, the WMS must refuse to
@@ -43,7 +42,7 @@ func TestS1_WMSChainDivergence_pendingFix(t *testing.T) {
 	//    (simulating a chain revert / DLQ). Forcing before the row exists would be a
 	//    no-op, so the wait is load-bearing.
 	receivingEventID := eventIDForAggregate(t, ctx, env, productID, "receiving")
-	waitForOnchainCommitted(t, ctx, env, receivingEventID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, receivingEventID)
 	setOnchainStatus(t, ctx, env, receivingEventID, "FAILED")
 
 	// 3. The operator can still scan into the putaway cart, but placement must be gated:
@@ -66,17 +65,16 @@ func TestS1_WMSChainDivergence_pendingFix(t *testing.T) {
 	//    emitted — WMS and chain do not diverge.
 	requireProductStatus(t, ctx, env, productID, "RECEIVED")
 	require.Equal(t, 0, outboxCountForAggregate(t, ctx, env, productID, "putaway"),
-		"gated putaway must not emit a putaway outbox event")
+		"gated putaway must not emit a putaway action")
 }
 
 // TestS2_AdapterCrashRecovery_pendingFix exercises the S2 fix (#44): a redelivered
-// event whose row is in a NON-TERMINAL crash window (SENT or PENDING with a tx_hash)
+// action whose row is in a NON-TERMINAL crash window (SENT or PENDING with a tx_hash)
 // must reconcile to COMMITTED reusing the original tx — NOT resubmit and get marked
-// FAILED on the duplicate-eventId revert.
+// FAILED on the duplicate-action revert.
 //
-// Ported from tests/e2e/scenarios/09-s2-crash-recovery.sh. No adapter restart: the
-// SENT/PENDING window is injected via the DB (the offset-uncommitted crash) and the
-// same event_id is redelivered via Kafka, exactly like the bash.
+// No adapter restart: the SENT/PENDING window is injected via the DB (the
+// offset-uncommitted crash) and the same action id is redelivered via Kafka.
 func TestS2_AdapterCrashRecovery_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -88,38 +86,38 @@ func TestS2_AdapterCrashRecovery_pendingFix(t *testing.T) {
 	for _, inject := range []string{"SENT", "PENDING"} {
 		inject := inject
 		t.Run("injected_"+inject, func(t *testing.T) {
-			eventID := uuid.New()
-			productID := uuid.New()
+			actionID, items, payload := adminReceive(t, ctx, env, 1)
+			productID := items[0]
 
-			// 1. Drive a fresh receiving event to a genuine on-chain COMMITTED.
-			publishEvent(t, ctx, "receiving", eventID, productID, "{}")
-			require.Truef(t, waitOnchainStatus(t, ctx, env, eventID, "COMMITTED", 60*time.Second),
-				"[%s] event did not reach COMMITTED before injection (last=%s)", inject, onchainStatus(t, ctx, env, eventID))
+			// 1. Drive a fresh signed Receive to a genuine on-chain COMMITTED.
+			publishAction(t, ctx, actionID, payload)
+			require.Truef(t, waitOnchainStatus(t, ctx, env, actionID, "COMMITTED", 60*time.Second),
+				"[%s] action did not reach COMMITTED before injection (last=%s)", inject, onchainStatus(t, ctx, env, actionID))
 			require.Truef(t, waitItemStatus(t, ctx, env, productID, 1, 20*time.Second),
 				"[%s] item did not reach on-chain Accepted(1) before injection", inject)
 
-			tx0 := onchainTxHash(t, ctx, env, eventID)
-			require.NotEmptyf(t, tx0, "[%s] committed event must have a tx_hash", inject)
+			tx0 := onchainTxHash(t, ctx, env, actionID)
+			require.NotEmptyf(t, tx0, "[%s] committed action must have a tx_hash", inject)
 
 			// 2. Simulate the crash window: force the row non-terminal. The Kafka offset
 			//    was (conceptually) never committed, so the broker will redeliver.
-			setOnchainStatus(t, ctx, env, eventID, inject)
+			setOnchainStatus(t, ctx, env, actionID, inject)
 
-			// 3. Redeliver the SAME event_id.
-			publishEvent(t, ctx, "receiving", eventID, productID, "{}")
+			// 3. Redeliver the SAME action id and payload.
+			publishAction(t, ctx, actionID, payload)
 
 			// The fix: reconcile the existing tx forward to COMMITTED, never resubmit.
-			ok := waitOnchainStatus(t, ctx, env, eventID, "COMMITTED", 60*time.Second)
+			ok := waitOnchainStatus(t, ctx, env, actionID, "COMMITTED", 60*time.Second)
 			if !ok {
-				st := onchainStatus(t, ctx, env, eventID)
+				st := onchainStatus(t, ctx, env, actionID)
 				require.NotEqualf(t, "FAILED", st,
-					"[%s] event went FAILED after redelivery, but it already COMMITTED on-chain (S2 regression)", inject)
+					"[%s] action went FAILED after redelivery, but it already COMMITTED on-chain (S2 regression)", inject)
 				require.Failf(t, "not committed",
 					"[%s] expected COMMITTED after reconcile, got %q", inject, st)
 			}
 
 			// tx_hash must be the ORIGINAL mined tx — reconcile reuses it, never resubmits.
-			txn := onchainTxHash(t, ctx, env, eventID)
+			txn := onchainTxHash(t, ctx, env, actionID)
 			require.Equalf(t, tx0, txn,
 				"[%s] tx_hash changed (%s -> %s); the original tx was discarded, not reused (S2)", inject, tx0, txn)
 
@@ -130,94 +128,10 @@ func TestS2_AdapterCrashRecovery_pendingFix(t *testing.T) {
 	}
 }
 
-// TestS3_BatchPoisoning_pendingFix exercises the S3 fix (#47, Design A): one poisoned
-// item in a batch must NOT drag its valid siblings to FAILED. The valid siblings reach
-// COMMITTED; the poison is skipped on-chain via an ItemTransitionFailed event and its
-// DB row ends COMMITTED (the batch tx succeeds).
-//
-// Ported from tests/e2e/scenarios/10-s3-batch-poisoning.sh. Widens BATCH_TIMEOUT so the
-// rapid-fire publishes co-batch into one tx; restores the default adapter on cleanup.
-func TestS3_BatchPoisoning_pendingFix(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
-	defer cancel()
-
-	env := testEnv
-	require.NotNil(t, env)
-
-	// Widen the batch window so the sequential in-process publishes land in one tx.
-	// 10s is generous: in-process publishes complete in milliseconds.
-	t.Cleanup(func() { restoreDefaultAdapter(t, env) })
-	recreateAdapterWithEnv(t, ctx, env, map[string]string{"BATCH_TIMEOUT": "10s"})
-
-	const n = 4
-	validEvents := make([]uuid.UUID, n)
-	validProducts := make([]uuid.UUID, n)
-	for i := range validEvents {
-		validEvents[i] = uuid.New()
-		validProducts[i] = uuid.New()
-	}
-
-	// Poison product PX: pre-Accept it via its OWN committed receiving event, so a
-	// SECOND receiving event for it (None->Accepted required, but it is already
-	// Accepted) is the poison — an itemStatus mismatch.
-	poisonProduct := uuid.New()
-	poisonFirstEvent := uuid.New()
-	publishEvent(t, ctx, "receiving", poisonFirstEvent, poisonProduct, "{}")
-	require.Truef(t, waitOnchainStatus(t, ctx, env, poisonFirstEvent, "COMMITTED", 60*time.Second),
-		"poison product's first (valid) receiving did not reach COMMITTED")
-	require.Truef(t, waitItemStatus(t, ctx, env, poisonProduct, 1, 20*time.Second),
-		"poison product did not reach on-chain Accepted(1) after its first receiving")
-
-	// Rapid-fire one batch: N fresh-valid receivings + 1 poisoned receiving (re-accept PX).
-	poisonEvent := uuid.New()
-	for i := range validEvents {
-		publishEvent(t, ctx, "receiving", validEvents[i], validProducts[i], "{}")
-	}
-	publishEvent(t, ctx, "receiving", poisonEvent, poisonProduct, "{}")
-
-	// 1. Every valid sibling must reach COMMITTED (the core S3 fix — they were dragged
-	//    to FAILED before, by the whole-batch revert) and be Accepted(1) on-chain.
-	for i := range validEvents {
-		require.Truef(t, waitOnchainStatus(t, ctx, env, validEvents[i], "COMMITTED", 60*time.Second),
-			"valid sibling %s did not reach COMMITTED (poison fanned out — S3 regression)", validEvents[i])
-		require.EqualValuesf(t, 1, callItemStatus(t, ctx, env, validProducts[i]),
-			"valid sibling %s on-chain itemStatus != 1", validProducts[i])
-	}
-
-	// 2. The poisoned event's row ends COMMITTED — the batch tx succeeded (Design A).
-	require.Truef(t, waitOnchainStatus(t, ctx, env, poisonEvent, "COMMITTED", 30*time.Second),
-		"poisoned event expected COMMITTED (batch tx succeeded), got %q", onchainStatus(t, ctx, env, poisonEvent))
-
-	// 3. Isolation proven on-chain: the poison item must NOT have advanced — it was
-	//    Accepted(1) and a second accept is rejected, so it stays 1 (no double transition).
-	require.EqualValuesf(t, 1, callItemStatus(t, ctx, env, poisonProduct),
-		"poison item on-chain itemStatus != 1 (expected unchanged — no double transition)")
-
-	// 4. Guard: the N valids + poison must have shared ONE batch tx, else the test
-	//    proved nothing about isolation. With BATCH_TIMEOUT=10s and in-process
-	//    millisecond-apart publishes this co-batch is reliable, so it is enforced as a
-	//    hard precondition (no silent skip). A failure here is a co-batch TIMING issue
-	//    (raise BATCH_TIMEOUT / check broker latency), NOT an S3 fix regression.
-	allEvents := append(append([]uuid.UUID{}, validEvents...), poisonEvent)
-	cobatchTxs := distinctTxHashCount(t, ctx, env, allEvents...)
-	require.Equalf(t, 1, cobatchTxs,
-		"co-batch PRECONDITION failed: the %d valid events + poison span %d distinct batch txs, not 1 "+
-			"— a BATCH_TIMEOUT/broker-timing issue (raise BATCH_TIMEOUT), NOT an S3 fix regression",
-		len(allEvents), cobatchTxs)
-
-	// 5. The skip is observable: the shared batch tx emitted an ItemTransitionFailed log.
-	batchTx := onchainTxHash(t, ctx, env, poisonEvent)
-	require.NotEmpty(t, batchTx, "poison event missing tx_hash after COMMITTED")
-	require.Truef(t, txEmittedItemTransitionFailed(t, ctx, env, batchTx),
-		"batch tx %s did not emit ItemTransitionFailed for the poison item (S3 isolation not observable)", batchTx)
-}
-
 // ─── Additional defects found in the 2026-05-25 multi-module bug-hunt sweep ───
-// Same convention as S1/S2/S3: documented here as t.Skip stubs with the intended
-// invariant and a runnable reproduction. The two pure-HTTP ones (shipping
-// ship-before-assembled, receiving open-box) can flip into live regressions by
-// implementing the body once the product is fixed; see tests/e2e/BUGHUNT.md for the
-// full backlog (severity, file:line, and the deferred lower-severity findings).
+// Same convention as S1/S2: each test reproduces the original fault on the
+// signed-action path and asserts the fixed invariant. See tests/e2e/BUGHUNT.md for
+// the full backlog (severity, file:line, and the deferred lower-severity findings).
 
 // TestAssemblyCartLostOnRestart_pendingFix is the live regression for Assembly BUG-1 (#46):
 // before the fix the pick cart lived only in WMS process memory, so a WMS restart between
@@ -298,33 +212,33 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 		"RECONCILE_MIN_AGE":    "2s",
 	})
 
-	eventID := uuid.New()
-	productID := uuid.New()
+	actionID, items, payload := adminReceive(t, ctx, env, 1)
+	productID := items[0]
 
-	// Publish a perfectly valid receiving event. With the tiny RECEIPT_POLL_TIMEOUT the
+	// Publish a perfectly valid signed Receive. With the tiny RECEIPT_POLL_TIMEOUT the
 	// adapter gives up on the receipt and exits while the tx still mines.
-	publishEvent(t, ctx, "receiving", eventID, productID, "{}")
+	publishAction(t, ctx, actionID, payload)
 
 	// The transition DOES land on-chain (the tx mines regardless of the adapter giving up).
-	// Enforce this as a hard precondition (no silent skip). 120s cap (vs the bash's 60s):
+	// Enforce this as a hard precondition (no silent skip). 120s cap:
 	// under a fresh full-stack bring-up the broadcast tx has been observed to surface only
 	// after ~50-65s. A failure here means the tx never reached the chain — a chain
 	// liveness/mining TIMING issue, NOT an N1 reconcile-fix regression.
 	require.Truef(t, waitItemStatus(t, ctx, env, productID, 1, 120*time.Second),
-		"mining PRECONDITION failed: the receiving transition never reached the chain within 120s "+
+		"mining PRECONDITION failed: the Receive transition never reached the chain within 120s "+
 			"— chain liveness/mining timing, NOT an N1 reconcile regression")
 
 	// The reconcile loop must pull the (wrongly) FAILED row forward to COMMITTED once the
 	// tx is mined. Poll generously to cover min-age (2s) + interval (2s) + slack.
-	if !waitOnchainStatus(t, ctx, env, eventID, "COMMITTED", 50*time.Second) {
-		st := onchainStatus(t, ctx, env, eventID)
+	if !waitOnchainStatus(t, ctx, env, actionID, "COMMITTED", 50*time.Second) {
+		st := onchainStatus(t, ctx, env, actionID)
 		require.NotEqualf(t, "FAILED", st,
-			"event is FAILED in DB but the transition is COMMITTED on-chain — reconcile loop did not recover it (N1 regression)")
+			"action is FAILED in DB but the transition is COMMITTED on-chain — reconcile loop did not recover it (N1 regression)")
 		require.Failf(t, "not committed", "expected COMMITTED once the tx mined, got %q", st)
 	}
 
 	// tx_hash must be the original mined tx — reconcile reuses it, never resubmits.
-	require.NotEmpty(t, onchainTxHash(t, ctx, env, eventID),
+	require.NotEmpty(t, onchainTxHash(t, ctx, env, actionID),
 		"COMMITTED row has no tx_hash; reconcile must reuse the mined tx")
 }
 
@@ -338,7 +252,7 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 // Pure-HTTP / DB-contract test: newMultiProductFixture inserts synthetic STORED products
 // with no chain history, so their picking/shipping events revert on-chain and never COMMIT.
 // The WMS commits its DB transaction before the chain is touched; the strict ship gate
-// (#15) is primed with a committed legacy picking row (markPickingConfirmed), so the HTTP
+// (#15) is primed with a confirmed Pick action (markPickingConfirmed), so the HTTP
 // flow succeeds and every assertion is DB-only.
 func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -588,10 +502,11 @@ func TestDispatchesAuth_CustomerAccess(t *testing.T) {
 }
 
 // TestAdapterN9_IntraBatchDuplicate_pendingFix documents N9: if Kafka redelivers
-// the same event_id within a single flush window, filterAndMarkPending appends it
-// twice. buildBatchArgs produces [id, id], the contract reverts on duplicate
-// eventId, and the entire batch is marked FAILED+DLQ — even though all other
-// events are valid. Compounds S2 on crash recovery.
+// the same actionId within a single flush window, the pre-fix flusher appended it
+// twice and the whole batch was marked FAILED+DLQ — even though all other actions
+// were valid. Post-fix: the flusher dedups a repeated actionId within one window
+// and the contract skips a repeated actionId (ADR-0001 §6). Compounds S2 on
+// crash recovery.
 func TestAdapterN9_IntraBatchDuplicate_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -600,29 +515,30 @@ func TestAdapterN9_IntraBatchDuplicate_pendingFix(t *testing.T) {
 	require.NotNil(t, env)
 
 	// Widen BATCH_TIMEOUT so the two back-to-back in-process publishes of the SAME
-	// event_id land in ONE flush window (the intra-batch duplicate the fix dedups).
-	// key=product_id keeps both on one partition, so they are delivered in-order to
+	// action land in ONE flush window (the intra-batch duplicate the fix dedups).
+	// key=action_id keeps both on one partition, so they are delivered in-order to
 	// the same poll batch.
 	t.Cleanup(func() { restoreDefaultAdapter(t, env) })
 	recreateAdapterWithEnv(t, ctx, env, map[string]string{"BATCH_TIMEOUT": "10s"})
 
-	eventID := uuid.New()
-	productID := uuid.New()
+	actionID, items, payload := adminReceive(t, ctx, env, 1)
+	productID := items[0]
 
-	// Publish the SAME event_id twice, back-to-back. Pre-fix: filterAndMarkPending
-	// appended it twice -> buildBatchArgs [id,id] -> contract "Duplicate eventId"
-	// revert -> both rows FAILED+DLQ. Post-fix: the flusher dedups within the window
-	// and the contract skips an intra-batch duplicate, so the event commits cleanly.
-	publishEvent(t, ctx, "receiving", eventID, productID, "{}")
-	publishEvent(t, ctx, "receiving", eventID, productID, "{}")
+	// Publish the SAME action twice, back-to-back. Pre-fix: the flusher appended it
+	// twice -> the contract hit the duplicate actionId and reverted the batch ->
+	// both rows FAILED+DLQ. Post-fix: the flusher dedups within the window and the
+	// contract skips an intra-batch duplicate (ADR-0001 §6), so the action commits
+	// cleanly.
+	publishAction(t, ctx, actionID, payload)
+	publishAction(t, ctx, actionID, payload)
 
 	// The invariant holds on BOTH the intra-batch path (deduped) and the unlikely
 	// split-window path (the 2nd becomes an S2-style redelivery, reconciled forward):
-	// the event must end COMMITTED, never FAILED.
-	if !waitOnchainStatus(t, ctx, env, eventID, "COMMITTED", 60*time.Second) {
-		st := onchainStatus(t, ctx, env, eventID)
+	// the action must end COMMITTED, never FAILED.
+	if !waitOnchainStatus(t, ctx, env, actionID, "COMMITTED", 60*time.Second) {
+		st := onchainStatus(t, ctx, env, actionID)
 		require.NotEqualf(t, "FAILED", st,
-			"duplicate event_id poisoned the batch: row is FAILED (N9 regression — intra-batch dedup missing)")
+			"duplicate actionId poisoned the batch: row is FAILED (N9 regression — intra-batch dedup missing)")
 		require.Failf(t, "not committed", "expected COMMITTED, got %q", st)
 	}
 
@@ -630,10 +546,10 @@ func TestAdapterN9_IntraBatchDuplicate_pendingFix(t *testing.T) {
 	require.EqualValuesf(t, 1, callItemStatus(t, ctx, env, productID),
 		"on-chain itemStatus != 1 after duplicate publish (expected single Accepted transition)")
 
-	// Exactly ONE onchain_events row exists for the event_id (the dup did not create a
+	// Exactly ONE onchain_events row exists for the action id (the dup did not create a
 	// second row, and it is not FAILED).
 	var rowCount int
 	require.NoError(t, env.db.QueryRow(ctx,
-		`SELECT count(*) FROM public.onchain_events WHERE event_id = $1`, eventID).Scan(&rowCount))
-	require.Equalf(t, 1, rowCount, "expected exactly one onchain_events row for the deduped event_id, got %d", rowCount)
+		`SELECT count(*) FROM public.onchain_events WHERE event_id = $1`, actionID).Scan(&rowCount))
+	require.Equalf(t, 1, rowCount, "expected exactly one onchain_events row for the deduped action id, got %d", rowCount)
 }

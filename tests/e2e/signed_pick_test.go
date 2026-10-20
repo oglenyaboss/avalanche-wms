@@ -54,7 +54,7 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 	require.Len(t, run.productIDs, 2)
 	for _, pid := range run.productIDs {
 		e := eventIDForAggregate(t, ctx, env, pid, "receiving")
-		waitForOnchainCommitted(t, ctx, env, e, "receiving")
+		waitForOnchainCommitted(t, ctx, env, e)
 	}
 
 	// ── Signed putaway of both products into the storage bin ──
@@ -64,7 +64,7 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 	for _, pid := range run.productIDs {
 		requireProductStatus(t, ctx, env, pid, "STORED")
 		e := eventIDForAggregate(t, ctx, env, pid, "putaway")
-		waitForOnchainCommitted(t, ctx, env, e, "putaway")
+		waitForOnchainCommitted(t, ctx, env, e)
 		require.Equal(t, statusPutAway, callItemStatus(t, ctx, env, pid),
 			"product should be PutAway(2) on-chain after the signed putaway")
 	}
@@ -119,14 +119,14 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 		requireTaskStatus(t, ctx, env, parsed, "DONE")
 	}
 
-	// #14: the pick calls must not write legacy picking outbox rows — the picking
-	// event is the signed unload action submitted below.
-	var legacyPickingRows int
+	// #14: the pick calls must not emit anything themselves — the picking event
+	// is the signed unload action submitted below (no Pick action exists yet).
+	var pickActionRows int
 	err = env.db.QueryRow(ctx, `
-		SELECT count(*) FROM public.outbox_events
-		WHERE aggregate_id = ANY($1::uuid[]) AND aggregate_type = 'picking'`, productIDStrings).Scan(&legacyPickingRows)
+		SELECT count(*) FROM public.warehouse_actions
+		WHERE action_type = 3 AND item_ids && $1::uuid[]`, run.productIDs).Scan(&pickActionRows)
 	require.NoError(t, err)
-	require.Zero(t, legacyPickingRows, "pick must not write legacy picking outbox rows")
+	require.Zero(t, pickActionRows, "pick must not write any Pick action rows")
 
 	// ── Draft the signed unload into the destination's shipping buffer ──
 	draft := draftUnloadToShippingBuffer(t, env, op, bufferBinID.String())
@@ -145,9 +145,8 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 			sql  string
 			args []any
 		}{
-			{`DELETE FROM public.onchain_events WHERE event_id = ANY($1::uuid[])
-			   OR event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id = ANY($2::uuid[]))`, []any{[]uuid.UUID{actionID}, productIDStrings}},
-			{`DELETE FROM public.outbox_events WHERE event_id = ANY($1::uuid[]) OR aggregate_id = ANY($2::uuid[])`, []any{[]uuid.UUID{actionID}, productIDStrings}},
+			{`DELETE FROM public.onchain_events WHERE event_id = ANY($1::uuid[])`, []any{[]uuid.UUID{actionID}}},
+			{`DELETE FROM public.outbox_events WHERE event_id = ANY($1::uuid[])`, []any{[]uuid.UUID{actionID}}},
 			{`DELETE FROM wms_ops.assembly_tasks WHERE product_id = ANY($1::uuid[])`, []any{productIDStrings}},
 			{`DELETE FROM wms_ops.putaways WHERE product_id = ANY($1::uuid[])`, []any{productIDStrings}},
 			{`DELETE FROM wms_ops.receiving_table WHERE cargoplace_id IN ` + cpSel, []any{sc.CargoplaceCode}},
@@ -264,7 +263,7 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 	require.Equal(t, 2, tasksSeen)
 
 	// ── Chain: the action commits, every product is Picked(3) ──
-	waitForOnchainCommitted(t, ctx, env, actionID, "picking")
+	waitForOnchainCommitted(t, ctx, env, actionID)
 	operationStatus := waitForOperationState(t, ctx, env, op.token, draft.OperationID, "APPLIED", nil)
 	require.Len(t, operationStatus.Parts, 1)
 	require.Equal(t, part.ActionID, operationStatus.Parts[0].ActionID)
