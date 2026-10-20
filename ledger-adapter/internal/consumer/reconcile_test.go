@@ -195,8 +195,8 @@ func TestReconciler_SignedAction_RejectedReasonRecorded(t *testing.T) {
 	st := newStubStore()
 	applied, rejected := uuid.New(), uuid.New()
 	st.reconcilable = []store.ReconcileRow{
-		{EventID: applied, AggregateType: "signed_action", TxHash: "0xactions"},
-		{EventID: rejected, AggregateType: "signed_action", TxHash: "0xactions"},
+		{EventID: applied, TxHash: "0xactions"},
+		{EventID: rejected, TxHash: "0xactions"},
 	}
 	r := newReconcilerT(ch, st).WithRegistry(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
 		applied:  {Applied: true},
@@ -227,7 +227,7 @@ func TestReconciler_ResolverError_LeavesRows(t *testing.T) {
 	st := newStubStore()
 	id := uuid.New()
 	st.reconcilable = []store.ReconcileRow{
-		{EventID: id, AggregateType: "signed_action", TxHash: "0xactions"},
+		{EventID: id, TxHash: "0xactions"},
 	}
 	r := newReconcilerT(ch, st).WithRegistry(&stubResolver{err: errors.New("rpc down")})
 

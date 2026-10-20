@@ -55,7 +55,7 @@ func PackApplyActions(actions []WarehouseAction) ([]byte, error) {
 const (
 	txBaseGas           uint64 = 21_000 // база tx
 	actionGasFloor      uint64 = 70_000 // накладные одного действия (замер ~56–62k, запас)
-	receiveItemGasFloor uint64 = 26_000 // товар приёмки: запись нового слота
+	receiveItemGasFloor uint64 = 28_000 // товар приёмки: запись нового слота
 	moveItemGasFloor    uint64 = 9_000  // товар PutAway/Pick/Ship: перезапись слота
 )
 

@@ -59,3 +59,12 @@ func PackApplyKeyActions(actions []KeyAction) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// keyActionGasFloor — нижняя граница газа одного действия applyKeyActions.
+const keyActionGasFloor uint64 = 135_000 // одно ключевое действие: замер KeyRegister на узле ~118,8k с базой tx
+
+// ApplyKeyActionsGasFloor — нижняя граница газа tx applyKeyActions, если все
+// действия применятся: база tx и накладные каждого действия (ADR-0001, «Замеры газа»).
+func ApplyKeyActionsGasFloor(actions []KeyAction) uint64 {
+	return txBaseGas + uint64(len(actions))*keyActionGasFloor
+}

@@ -194,12 +194,12 @@ func TestRepository_ListReconcilable(t *testing.T) {
 
 	rows, err := repo.ListReconcilable(ctx, time.Minute)
 	require.NoError(t, err)
-	got := make(map[uuid.UUID]string, len(rows))
+	got := make(map[uuid.UUID]struct{}, len(rows))
 	for _, row := range rows {
-		got[row.EventID] = row.AggregateType
+		got[row.EventID] = struct{}{}
 	}
-	assert.Equal(t, "receiving", got[e1])
-	assert.Equal(t, "signed_action", got[e2])
+	assert.Contains(t, got, e2)
+	assert.NotContains(t, got, e1, "legacy event-per-product row is not resolvable — must not starve the sweep window")
 	assert.NotContains(t, got, eRejected, "rejected row is terminal — must not re-enter the sweep")
 	assert.NotContains(t, got, fresh)
 }

@@ -110,6 +110,9 @@ func (f *Flusher) keyTarget() actionTarget {
 		pack: func(msgs []*Message) ([]byte, error) {
 			return chain.PackApplyKeyActions(actionsOf(msgs))
 		},
+		gasFloor: func(msgs []*Message) uint64 {
+			return chain.ApplyKeyActionsGasFloor(actionsOf(msgs))
+		},
 	}
 }
 
