@@ -126,7 +126,7 @@ flowchart LR
 
 6. Нажимает "Завершить работу с грузоместом"
    → Система сверяет: expected_cargoplace_skus vs реальные products
-   → Создаются outbox events (по 1 на каждый product)
+   → Операция закрывается подписанным Receive-действием: draft → passkey-подпись → submit
    → Экран: "Грузоместо закрыто (принято: 10, ожидалось: 12, недостача: 2)"
 ```
 
@@ -155,11 +155,12 @@ graph TD
 | `products` | — | **INSERT** (status=RECEIVED, bin_id=NULL) |
 | `products.bin_id` | NULL | buffer_bin_id (при скане буфера) |
 | `receiving_table` | — | INSERT (лог каждого действия) |
-| `outbox_events` | — | **INSERT** (N events при CLOSE_CARGO) |
+| `warehouse_actions` | — | **INSERT** (строка на каждую часть Receive-операции, ≤2000 товаров) |
+| `outbox_events` | — | **INSERT** (1 строка на действие-часть при submit) |
 
 ### Блокчейн
 
-При закрытии грузоместа (`CLOSE_CARGO`) создаётся **N outbox events** — по одному на каждый созданный product. Debezium публикует их в `wms.receiving.v1`. Ledger Adapter вызывает `batchAccept(eventIds[], itemIds[])`. On-chain переход: **None → Accepted**.
+Закрытие грузоместа — подписанное действие: `POST /receiving/table/close-cargoplace/draft` строит части с challenge, оператор подписывает каждую passkey, `POST .../submit` проверяет подписи и пишет **одну outbox-строку на действие** (`wms.action.v1`). Debezium публикует их в топик `wms.events.v1`. Ledger Adapter вызывает `SignedMappingWMS.applyActions`. On-chain FSM — на каждый товар: **None → Accepted**.
 
 ### Подробнее
 
@@ -186,7 +187,7 @@ graph TD
 
 4. Сканирует ячейку хранения на мезонине
    → Все товары из "корзины" размещаются в эту ячейку
-   → Создаются outbox events (по 1 на каждый product)
+   → Операция закрывается подписанным PutAway-действием: draft → passkey-подпись → submit
    → Экран: "Размещено 3 товара в ячейку M2-A-03 ✓"
 
 5. Может вернуться к буферу и продолжить раскладку оставшихся
@@ -220,8 +221,9 @@ flowchart LR
 |----------|------|-------|
 | `products.status` | RECEIVED | STORED |
 | `products.bin_id` | buffer_bin_id | storage_bin_id |
-| `putaways` | — | INSERT (product_id, from_bin_id, bin_id, operator_id) |
-| `outbox_events` | — | **INSERT** (1 per product) |
+| `putaways` | — | INSERT (product_id, from_bin_id, bin_id, operator_id, action_id) |
+| `warehouse_actions` | — | **INSERT** (строка на каждую часть PutAway-операции) |
+| `outbox_events` | — | **INSERT** (1 строка на действие-часть при submit) |
 
 ### Ограничения в MVP
 
@@ -229,7 +231,7 @@ flowchart LR
 
 ### Блокчейн
 
-При размещении товаров в ячейку создаются outbox events → `wms.putaway.v1` → `batchPutAway(eventIds[], itemIds[])`. On-chain переход: **Accepted → PutAway**.
+Размещение корзины в ячейку — подписанное действие: `POST /putaway/scan-storage-bin/draft` → passkey-подпись → `POST .../submit` → **одна outbox-строка на действие-часть** (`wms.action.v1`, топик `wms.events.v1`). Ledger Adapter вызывает `SignedMappingWMS.applyActions`. On-chain переход (на каждый товар): **Accepted → PutAway**.
 
 ### Подробнее
 
@@ -264,9 +266,11 @@ flowchart LR
 2. Идёт к полкам, для каждого товара:
    → Сканирует QR товара
    → Экран: "Товар подобран ✓ (3/5)"
-   → Создаётся outbox event
+   → Товар в корзине оператора (ASSEMBLED + DONE-задача), без on-chain записи
 
-3. Когда все товары подобраны → заказ переходит в ASSEMBLED
+3. Приходит к буферу магазина, сканирует его
+   → Все собранные товары перемещаются в буфер (READY_TO_SHIP)
+   → Операция закрывается подписанным Pick-действием: draft → passkey-подпись → submit
 ```
 
 ### Что меняется в системе
@@ -278,12 +282,14 @@ flowchart LR
 | `products.status` | Подбор | ALLOCATED | ASSEMBLED |
 | `assembly_tasks.status` | Аллокация | — | INSERT (PENDING) |
 | `assembly_tasks.status` | Подбор | PENDING | DONE |
-| `orders.status` | — | NEW → ALLOCATED → ASSEMBLY_IN_PROGRESS → ASSEMBLED |
-| `outbox_events` | Подбор | — | **INSERT** (1 per product, type='picking') |
+| `products.status` | Выгрузка в буфер | ASSEMBLED | READY_TO_SHIP |
+| `orders.status` | — | NEW → ALLOCATED → ASSEMBLED |
+| `warehouse_actions` | Выгрузка в буфер | — | **INSERT** (строка на каждую часть Pick-операции) |
+| `outbox_events` | Выгрузка в буфер | — | **INSERT** (1 строка на действие-часть, тип 'signed_action') |
 
 ### Блокчейн
 
-При подборе каждого товара создаётся outbox event → `wms.picking.v1` → `batchPick(eventIds[], itemIds[])`. On-chain переход: **PutAway → Picked**.
+Подбор с полки (`/assembly/pick`) **не пишет в цепь**. On-chain переход выполняет выгрузка корзины в буфер магазина: `POST /assembly/scan-shipping-buffer/draft` → passkey-подпись → `POST .../submit` → **одна outbox-строка на действие-часть** (`wms.action.v1`, топик `wms.events.v1`) → `SignedMappingWMS.applyActions`. On-chain переход (на каждый товар): **PutAway → Picked**.
 
 ### Подробнее
 
@@ -299,15 +305,16 @@ flowchart LR
 ### Что делает оператор
 
 ```
-1. Выбирает заказ для отгрузки (статус ASSEMBLED / READY_TO_SHIP)
-   → Экран: список готовых заказов
+1. Сканирует QR буфера магазина
+   → Экран: список готовых к отгрузке товаров
 
-2. Сканирует QR каждого товара в заказе (верификация)
-   → Экран: "Товар подтверждён ✓ (3/5)"
+2. Сканирует QR водителя (dispatch_code)
+   → Рейс → AT_GATE, проверка destination
 
-3. Вводит номер транспортного средства, нажимает "Отгрузить"
-   → Все products → SHIPPED
-   → Создаются outbox events (по 1 на каждый product)
+3. Нажимает "Отгрузить" (весь буфер или выбранные товары)
+   → POST /shipping/ship/draft: буфер режется на части (≤2000 товаров)
+   → Оператор подписывает каждую часть passkey
+   → POST /shipping/ship/submit: товары → SHIPPED, одна outbox-строка на действие-часть
    → Заказ → SHIPPED
    → Экран: "Заказ отгружен: 5 товаров ✓"
 ```
@@ -316,14 +323,15 @@ flowchart LR
 
 | Сущность | Было | Стало |
 |----------|------|-------|
-| `products.status` | ASSEMBLED | SHIPPED |
-| `shippings` | — | INSERT (product_id, vehicle_number, operator_id) |
-| `orders.status` | ASSEMBLED / READY_TO_SHIP | SHIPPED |
-| `outbox_events` | — | **INSERT** (N events, type='shipping') |
+| `products.status` | READY_TO_SHIP | SHIPPED |
+| `shippings` | — | INSERT (product_id, dispatch_id, operator_id, action_id) |
+| `warehouse_actions` | — | INSERT (строка на каждую часть Ship-операции) |
+| `orders.status` | ASSEMBLED / PARTIALLY_SHIPPED | SHIPPED / PARTIALLY_SHIPPED |
+| `outbox_events` | — | **INSERT** (1 строка на действие-часть, type='signed_action') |
 
 ### Блокчейн
 
-При отгрузке создаются outbox events → `wms.shipping.v1` → `batchShip(eventIds[], itemIds[])`. On-chain переход: **Picked → Shipped**. Это **финальный переход** — после Shipped статус на блокчейне не меняется.
+Отгрузка — подписанное действие: `POST /shipping/ship/draft` → passkey-подпись каждой части → `POST .../submit` → **одна outbox-строка на действие-часть** (`wms.action.v1`, топик `wms.events.v1`) → `SignedMappingWMS.applyActions`. On-chain переход (на каждый товар): **Picked → Shipped**. Это **финальный переход** — после Shipped статус на блокчейне не меняется.
 
 ### Подробнее
 
@@ -348,25 +356,25 @@ flowchart TD
         T2["Скан ШК → определяем SKU"]
         T3["Скан QR → product создан (RECEIVED)"]
         T4["Скан буфера → product.bin_id = buffer"]
-        T5["Закрытие грузоместа → outbox events"]
+        T5["Закрытие грузоместа →\nподписанное Receive-действие"]
     end
 
     subgraph PUT["3. Раскладка"]
         P1["Скан буфера → Скан товаров → Скан ячейки"]
         P2["product: RECEIVED → STORED\nbin_id: buffer → storage"]
-        P3["outbox events"]
+        P3["подписанное PutAway-действие"]
     end
 
     subgraph ASM["4. Сборка"]
         A1["Аллокация: STORED → ALLOCATED"]
         A2["Подбор: ALLOCATED → ASSEMBLED"]
-        A3["outbox events (только при подборе)"]
+        A3["Выгрузка корзины в буфер →\nподписанное Pick-действие"]
     end
 
     subgraph SHIP["5. Отгрузка"]
-        S1["Верификация → Отгрузка"]
-        S2["product: ASSEMBLED → SHIPPED"]
-        S3["outbox events (финальные)"]
+        S1["Скан буфера → Скан водителя → draft"]
+        S2["product: READY_TO_SHIP → SHIPPED"]
+        S3["подписанное Ship-действие (финальное)"]
     end
 
     E --> G --> T1 --> T2 --> T3 --> T4 --> T5
@@ -377,17 +385,17 @@ flowchart TD
 
 ## Параллельный on-chain трек
 
-Каждый outbox event проходит один и тот же путь:
+Каждое подписанное действие проходит один и тот же путь:
 
 ```
-outbox_events (PG) → Debezium (CDC) → Kafka topic → Ledger Adapter → BatchMappingWMS (Blockchain)
+warehouse_actions (draft) → подпись passkey → outbox_events (PG) → Debezium (CDC) → Kafka wms.events.v1 → Ledger Adapter → SignedMappingWMS (Blockchain)
 ```
 
-| Этап WMS | Outbox aggregate_type | Kafka topic | Контракт | On-chain переход |
-|----------|----------------------|-------------|----------|-----------------|
-| Стол приёмки (CLOSE_CARGO) | `receiving` | `wms.receiving.v1` | `batchAccept` | None → Accepted |
-| Раскладка | `putaway` | `wms.putaway.v1` | `batchPutAway` | Accepted → PutAway |
-| Сборка (подбор) | `picking` | `wms.picking.v1` | `batchPick` | PutAway → Picked |
-| Отгрузка | `shipping` | `wms.shipping.v1` | `batchShip` | Picked → Shipped |
+| Этап WMS | Подписанное действие (action_type) | Контракт | On-chain переход |
+|----------|------------------------------------|----------|------------------|
+| Стол приёмки (close-cargoplace) | Receive (1) | `SignedMappingWMS.applyActions` | None → Accepted |
+| Раскладка (scan-storage-bin) | PutAway (2) | `SignedMappingWMS.applyActions` | Accepted → PutAway |
+| Сборка (выгрузка корзины, scan-shipping-buffer) | Pick (3) | `SignedMappingWMS.applyActions` | PutAway → Picked |
+| Отгрузка (ship) | Ship (4) | `SignedMappingWMS.applyActions` | Picked → Shipped |
 
-**КПП** — единственный этап без on-chain записи (товары ещё не существуют).
+**КПП** — единственный этап без on-chain записи (товары ещё не существуют). Подбор с полки (`/assembly/pick`) тоже без on-chain записи — Pick-действие уходит в цепь при выгрузке корзины.
