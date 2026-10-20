@@ -187,12 +187,12 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 }
 
-// TestAdapterN1_ReceiptTimeoutDivergence_pendingFix documents a CRITICAL bug found in
+// TestAdapterN1_ReceiptTimeoutDivergence_pendingFix guards a CRITICAL bug found in
 // the sweep, distinct from S2 and needing NO crash: on a WaitReceipt timeout the
-// flusher marks the event FAILED (ledger-adapter/internal/consumer/flusher.go:124-129)
-// even though the tx may still be mining. Under chain congestion the tx mines moments
-// later -> chain shows the transition COMMITTED while the DB row is terminal FAILED,
-// with no reconciliation path back out of FAILED.
+// flusher used to mark the event FAILED even though the tx might still be mining, so
+// the chain showed the transition COMMITTED while the DB row stayed terminal FAILED.
+// Now Confirm stalls instead (ledger-adapter/internal/consumer/flusher_confirm.go:43-48):
+// the row stays SENT and the reconcile loop commits it from the receipt.
 func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -250,7 +250,8 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 // completes to SHIPPED (PARTIALLY_SHIPPED -> SHIPPED is covered by TestPartialShipment_MofN).
 //
 // Pure-HTTP / DB-contract test: newMultiProductFixture inserts synthetic STORED products
-// with no chain history, so their picking/shipping events revert on-chain and never COMMIT.
+// with no chain history, so the contract rejects their pick/ship actions (ActionRejected)
+// and they never COMMIT.
 // The WMS commits its DB transaction before the chain is touched; the strict ship gate
 // (#15) is primed with a confirmed Pick action (markPickingConfirmed), so the HTTP
 // flow succeeds and every assertion is DB-only.

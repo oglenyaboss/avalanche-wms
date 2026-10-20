@@ -90,10 +90,10 @@ func (r *Repository) Timeline(ctx context.Context, key string) (Timeline, error)
 		       chain_updated_at, error_message
 		FROM (
 			SELECT CASE wa.action_type WHEN 1 THEN 'receiving' WHEN 2 THEN 'putaway'
-				                WHEN 3 THEN 'picking' WHEN 4 THEN 'shipping' END,
-			       oe.event_type, oe.created_at, wa.action_id,
-			       onc.tx_hash, onc.status::text,
-			       onc.updated_at, onc.error_message
+				                WHEN 3 THEN 'picking' WHEN 4 THEN 'shipping' END AS stage,
+			       oe.event_type, oe.created_at, wa.action_id AS event_id,
+			       onc.tx_hash, onc.status::text AS chain_status,
+			       onc.updated_at AS chain_updated_at, onc.error_message
 			FROM public.warehouse_actions wa
 			JOIN public.outbox_events oe ON oe.event_id = wa.action_id
 			LEFT JOIN public.onchain_events onc ON onc.event_id = wa.action_id
