@@ -44,6 +44,19 @@ VALUES (
 )
 ON CONFLICT (username) DO NOTHING;
 
+-- 1.2) Auditor for the read-only audit endpoint (#18)
+INSERT INTO public.users (user_id, username, password_hash, role, is_active, created_at, updated_at)
+VALUES (
+  gen_random_uuid(),
+  'auditor',
+  crypt('auditor', gen_salt('bf')),
+  'AUDITOR',
+  true,
+  now(),
+  now()
+)
+ON CONFLICT (username) DO NOTHING;
+
 -- 2) Warehouse
 INSERT INTO wms_inventory.warehouses (name, address, contact, created_at, updated_at)
 VALUES (

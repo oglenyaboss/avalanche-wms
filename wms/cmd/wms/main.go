@@ -14,6 +14,7 @@ import (
 
 	"wms/internal/analytics"
 	"wms/internal/assembly"
+	"wms/internal/audit"
 	"wms/internal/auth"
 	"wms/internal/config"
 	"wms/internal/destinations"
@@ -127,6 +128,8 @@ func main() {
 	productsSvc := products.NewService(productsRepo)
 	productsHandler := products.NewHandler(productsSvc)
 
+	auditHandler := audit.NewHandler(audit.NewRepository(dbPool))
+
 	// ledgerClient is a concrete *ledger.Client and is nil when LEDGER_ADAPTER_URL is
 	// unset. Assign THROUGH the interface var so a typed-nil pointer doesn't defeat
 	// the handler's `h.ledger == nil` check (a nil *ledger.Client stored directly in
@@ -169,6 +172,10 @@ func main() {
 	productsRouter := r.PathPrefix("/products").Subrouter()
 	productsRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	productsHandler.RegisterRoutes(productsRouter)
+
+	auditRouter := r.PathPrefix("/audit").Subrouter()
+	auditRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
+	auditHandler.RegisterRoutes(auditRouter)
 
 	onchainRouter := r.PathPrefix("/onchain").Subrouter()
 	onchainRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
