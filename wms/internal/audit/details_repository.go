@@ -152,9 +152,9 @@ func (r *Repository) shipDetails(ctx context.Context, a Action) (Details, error)
 		return Details{}, fmt.Errorf("audit.Repository.Details products: %w", err)
 	}
 	defer orderRows.Close()
-	orders, err := collectUUIDs(orderRows, "products")
+	orders, err := pgx.CollectRows(orderRows, pgx.RowTo[uuid.UUID])
 	if err != nil {
-		return Details{}, err
+		return Details{}, fmt.Errorf("audit.Repository.Details products: %w", err)
 	}
 
 	binID, err := r.shippingBufferBin(ctx, a)
@@ -200,7 +200,7 @@ func (r *Repository) shippingBufferBin(ctx context.Context, a Action) (uuid.UUID
 	return *bins[0], nil
 }
 
-// collectUUIDs requires at least one row and collects the single uuid column into a slice.
+// collectUUIDs requires at least one row (every assembly task has an order) and collects the single uuid column into a slice.
 func collectUUIDs(rows pgx.Rows, table string) ([]uuid.UUID, error) {
 	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
 	if err != nil {
