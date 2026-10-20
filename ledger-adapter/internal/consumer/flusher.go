@@ -44,9 +44,10 @@ type InflightTx struct {
 }
 
 // ErrConfirmStalled — tx не замайнилась и не реверта в пределах receiptTimeout
-// (или receipt RPC недоступен). В pipeline'е это триггерит recovery (reseed nonce
-// + abandon окна), НЕ DLQ: tx может ещё быть в mempool, строки остаются SENT
-// (видимы, не потеряны) для redelivery/reconcile (invariant 4).
+// (или receipt RPC недоступен). В pipeline'е recovery — рестарт процесса
+// (pipeline.go:48-56), НЕ DLQ: tx может ещё быть в mempool, строки остаются SENT
+// (видимы, не потеряны) для redelivery/reconcile (invariant 4). Устаревший после
+// внешней tx nonce перечитывается на «nonce too low» в chain.Client.send.
 var ErrConfirmStalled = errors.New("confirm stalled")
 
 // Flusher — pipeline: окно Kafka-сообщений режется на сегменты складских и

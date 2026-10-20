@@ -430,10 +430,8 @@ func TestKeyConfirmation_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	registryAddr := common.HexToAddress(registryHex)
 
-	// 1. Owner registers the organization together with the admin key; the
-	//    adapter signs with the same deployer key, so give it a fresh nonce.
+	// 1. Owner registers the organization together with the admin key.
 	registerOrgOnChain(t, ctx, env, owner, registryAddr, fx)
-	recreateAdapterWithEnv(t, ctx, env, nil)
 
 	// 2. The admin's own passkey becomes ACTIVE through the registry status sync.
 	adminToken := loginAs(t, env, fx.adminUser, fx.password)
@@ -518,7 +516,6 @@ func TestKeyConfirmation_EndToEnd(t *testing.T) {
 	assertion2 := softSign(fx.adminKey, challenge2)
 
 	revokeKeyOnChain(t, ctx, env, owner, registryAddr, fx.adminKeyID)
-	recreateAdapterWithEnv(t, ctx, env, nil)
 
 	var sent2 confirmationDTO
 	postJSON(t, env, adminToken, "/passkeys/actions/"+draft2.ActionID+"/submit", map[string]string{
@@ -565,7 +562,6 @@ func TestKeyConfirmation_SecondDraftRejectedAfterSubmit(t *testing.T) {
 	// The admin's own passkey must be ACTIVE (via registry status sync) before
 	// the submit repository transaction accepts the signer.
 	registerOrgOnChain(t, ctx, env, owner, registryAddr, fx)
-	recreateAdapterWithEnv(t, ctx, env, nil)
 
 	adminToken := loginAs(t, env, fx.adminUser, fx.password)
 	waitForOrganization(t, ctx, env, adminToken, 60*time.Second, func(org organizationDTO) bool {

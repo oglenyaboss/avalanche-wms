@@ -121,7 +121,6 @@ func setupConsortium(t *testing.T, ctx context.Context, env *env) error {
 		return err
 	}
 	registerOrgOnChain(t, ctx, env, owner, common.HexToAddress(registryHex), fx)
-	recreateAdapterWithEnv(t, ctx, env, nil)
 
 	adminToken := loginAs(t, env, fx.adminUser, fx.password)
 	waitForOrganization(t, ctx, env, adminToken, 60*time.Second, func(org organizationDTO) bool {
