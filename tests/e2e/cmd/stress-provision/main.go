@@ -486,9 +486,9 @@ func (c *wmsClient) call(ctx context.Context, method, path string, in, out any) 
 		return fmt.Errorf("%s %s: status %d: %s", method, path, status, body)
 	}
 	var envelope struct {
-		Success bool            `json:"success"`
-		Data    json.RawMessage `json:"data"`
-		Error   json.RawMessage `json:"error"`
+		Success bool             `json:"success"`
+		Data    json.RawMessage  `json:"data"`
+		Error   *json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return fmt.Errorf("%s %s: %w: %s", method, path, err, body)
@@ -668,7 +668,7 @@ func run(ctx context.Context, n int, outDir string) error {
 	if err != nil {
 		return fmt.Errorf("resolve out dir: %w", err)
 	}
-	if err := os.MkdirAll(absOut, 0o700); err != nil {
+	if err := os.MkdirAll(absOut, 0o755); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
 	}
 	root, err := repoRoot()
@@ -684,7 +684,7 @@ func run(ctx context.Context, n int, outDir string) error {
 	if err != nil {
 		return fmt.Errorf("marshal org.json: %w", err)
 	}
-	if err := os.WriteFile(orgPath, append(orgJSON, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(orgPath, append(orgJSON, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", orgPath, err)
 	}
 	log.Printf("registering org on chain: make registry-cli ARGS=\"register-org --file %s\" (cwd %s)", fileRel, root)

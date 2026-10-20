@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,6 +11,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -144,4 +147,26 @@ func TestUsernames(t *testing.T) {
 	require.Equal(t, "stress-sop-a1b2c3-001", ops[0])
 	require.Equal(t, "stress-sop-a1b2c3-099", ops[98])
 	require.Equal(t, "stress-sop-a1b2c3-120", ops[119])
+}
+
+func TestCallAcceptsNullError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"organization":{"org_id":"o1","name":"n"},"members":[]},"error":null}`))
+	}))
+	defer srv.Close()
+	c := &wmsClient{baseURL: srv.URL, http: srv.Client(), token: "t"}
+
+	var org organizationDTO
+	require.NoError(t, c.call(context.Background(), http.MethodGet, "/passkeys/organization", nil, &org))
+	require.Equal(t, "o1", org.Organization.OrgID)
+}
+
+func TestCallRejectsAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":false,"data":null,"error":{"code":"X","message":"m"}}`))
+	}))
+	defer srv.Close()
+	c := &wmsClient{baseURL: srv.URL, http: srv.Client(), token: "t"}
+
+	require.Error(t, c.call(context.Background(), http.MethodGet, "/x", nil, nil))
 }
