@@ -38,7 +38,7 @@ func TestNoop_AllocateNothing(t *testing.T) {
 	t.Cleanup(func() {
 		if _, err := env.db.Exec(context.Background(),
 			`DELETE FROM wms_inventory.destinations WHERE code = $1`, code); err != nil {
-			t.Logf("noop cleanup: %v", err)
+			t.Errorf("noop cleanup: %v", err)
 		}
 	})
 

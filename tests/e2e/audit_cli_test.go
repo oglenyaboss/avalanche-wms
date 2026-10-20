@@ -309,7 +309,9 @@ func TestAudit_BackdatedRow_MissingOnChain(t *testing.T) {
 		       salt, details_hash, challenge, details, now() - interval '1 day', now() - interval '1 day'
 		FROM public.warehouse_actions WHERE action_id = $1`, fx.putawayActionID, newActionID, newOperationID)
 	t.Cleanup(func() {
-		_, _ = env.db.Exec(context.Background(), `DELETE FROM public.warehouse_actions WHERE action_id = $1`, newActionID)
+		if _, err := env.db.Exec(context.Background(), `DELETE FROM public.warehouse_actions WHERE action_id = $1`, newActionID); err != nil {
+			t.Errorf("backdated action cleanup (warehouse_actions %s): %v", newActionID, err)
+		}
 	})
 
 	stdout, code := runAudit(t, ctx, env, "product", fx.productIDs[0].String())

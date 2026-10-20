@@ -251,7 +251,7 @@ func TestShipping_DestinationMismatch(t *testing.T) {
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("DestinationMismatch cleanup (%s): %v", s.sql, err)
+				t.Errorf("DestinationMismatch cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})

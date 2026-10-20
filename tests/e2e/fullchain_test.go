@@ -92,7 +92,7 @@ func newFreshOutboundSKU(t *testing.T, ctx context.Context, env *env) (uuid.UUID
 			{`DELETE FROM wms_inventory.skus WHERE sku_id=$1`, []any{skuID}},
 		} {
 			if _, err := env.db.Exec(cleanupCtx, stmt.sql, stmt.args...); err != nil {
-				t.Logf("fresh sku cleanup (%s): %v", stmt.sql, err)
+				t.Errorf("fresh sku cleanup (%s): %v", stmt.sql, err)
 			}
 		}
 	})
@@ -146,22 +146,44 @@ func setupReceivingScaffoldWithSKU(t *testing.T, ctx context.Context, env *env, 
 	require.NoError(t, err, "resolve receiving scaffold ids")
 	sc.SKUID = skuID
 
-	// Register cleanup for the scaffold rows; product/box/ops rows are cleaned
-	// by the caller's own cleanup since they depend on the API flow.
+	// Register cleanup for everything keyed by this scaffold: not only the
+	// scaffold rows themselves but also the rows the HTTP flow creates
+	// indirectly (receiving_table/gate logs, boxes from scan-box, products from
+	// scan-qr, signed receive/close actions and their outbox/onchain rows).
+	// Cleanups run LIFO, so this runs after the caller's own cleanup and sweeps
+	// whatever it missed — e.g. when the test failed midway and never resolved
+	// the product IDs — instead of failing the cargoplace/shipment DELETEs with
+	// 23503 and leaking the rows (GitHub issue #44).
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		cpSel := `(SELECT cargoplace_id FROM wms_inventory.cargoplaces WHERE cargoplace_code=$1)`
+		prodSel := `(SELECT product_id FROM wms_inventory.products WHERE cargoplace_id IN ` + cpSel + `)`
 		stmts := []struct {
 			sql  string
 			args []any
 		}{
+			// Chain rows of the signed actions over this cargoplace's products
+			// (event_id = action_id), resolved while warehouse_actions still exist.
+			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel + `)`, []any{cpCode}},
+			{`DELETE FROM public.outbox_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel + `)`, []any{cpCode}},
+			// Ops rows referencing the products, the cargoplace or the actions.
+			{`DELETE FROM wms_ops.shippings WHERE product_id IN ` + prodSel, []any{cpCode}},
+			{`DELETE FROM wms_ops.assembly_tasks WHERE product_id IN ` + prodSel, []any{cpCode}},
+			{`DELETE FROM wms_ops.putaways WHERE product_id IN ` + prodSel, []any{cpCode}},
+			{`DELETE FROM wms_ops.receiving_table WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
+			{`DELETE FROM wms_ops.receiving_gate WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
+			// The signed actions themselves, after their ops children.
+			{`DELETE FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel, []any{cpCode}},
+			// Inventory children of the cargoplace, then the scaffold rows.
+			{`DELETE FROM wms_inventory.products WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
+			{`DELETE FROM wms_inventory.boxes WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
 			{`DELETE FROM wms_inventory.expected_cargoplace_skus WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
 			{`DELETE FROM wms_inventory.cargoplaces WHERE cargoplace_code=$1`, []any{cpCode}},
 			{`DELETE FROM wms_inventory.inbound_shipments WHERE ttn_code=$1`, []any{ttnCode}},
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("receivingScaffold cleanup (%s): %v", s.sql, err)
+				t.Errorf("receivingScaffold cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})
@@ -339,10 +361,11 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, op *signed
 	fx.PutawayEventIDs = putawayEventIDs
 
 	// Register cleanup for the API-created rows + outbound fixtures. The
-	// receivingScaffold cleanup (shipment, cargoplace, expected_skus) is
-	// registered separately by setupReceivingScaffold. Cleanups run in LIFO
-	// order, so this cleanup (products/ops/outbound) runs before the scaffold
-	// cleanup (shipment/cargoplace), preserving FK order.
+	// receivingScaffold cleanup (chain/ops/inventory rows keyed by the
+	// cargoplace, then shipment/cargoplace) is registered separately by
+	// setupReceivingScaffold. Cleanups run in LIFO order, so this cleanup
+	// (products/ops/outbound) runs before the scaffold cleanup, preserving FK
+	// order; the scaffold sweep catches anything this cleanup missed.
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		cpSel := `(SELECT cargoplace_id FROM wms_inventory.cargoplaces WHERE cargoplace_code=$1)`
@@ -370,7 +393,7 @@ func newFullChainFixture(t *testing.T, ctx context.Context, env *env, op *signed
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("fullChainFixture cleanup (%s): %v", s.sql, err)
+				t.Errorf("fullChainFixture cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})
@@ -721,7 +744,7 @@ func TestFullChain_MultiBoxReceiving(t *testing.T) {
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("R2 cleanup (%s): %v", s.sql, err)
+				t.Errorf("R2 cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})
@@ -857,7 +880,7 @@ func TestFullChain_BatchPutaway(t *testing.T) {
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("P2 cleanup (%s): %v", s.sql, err)
+				t.Errorf("P2 cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})

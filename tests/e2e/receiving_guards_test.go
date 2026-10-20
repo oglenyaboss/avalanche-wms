@@ -120,7 +120,7 @@ func newGateFixture(t *testing.T, ctx context.Context, env *env) gateFixture {
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("gateFixture cleanup (%s): %v", s.sql, err)
+				t.Errorf("gateFixture cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})
@@ -250,11 +250,15 @@ func TestReceiving_ScanTTN_AlreadyClosed(t *testing.T) {
 		cleanupCtx := context.Background()
 		if _, err := env.db.Exec(cleanupCtx,
 			`DELETE FROM wms_ops.receiving_gate WHERE shipment_id IN (SELECT shipment_id FROM wms_inventory.inbound_shipments WHERE ttn_code=$1)`, ttnCode); err != nil {
-			t.Logf("closed-shipment cleanup (gate logs): %v", err)
+			t.Errorf("closed-shipment cleanup (gate logs): %v", err)
+		}
+		if _, err := env.db.Exec(cleanupCtx,
+			`DELETE FROM wms_inventory.cargoplaces WHERE shipment_id IN (SELECT shipment_id FROM wms_inventory.inbound_shipments WHERE ttn_code=$1)`, ttnCode); err != nil {
+			t.Errorf("closed-shipment cleanup (cargoplaces): %v", err)
 		}
 		if _, err := env.db.Exec(cleanupCtx,
 			`DELETE FROM wms_inventory.inbound_shipments WHERE ttn_code=$1`, ttnCode); err != nil {
-			t.Logf("closed-shipment cleanup: %v", err)
+			t.Errorf("closed-shipment cleanup: %v", err)
 		}
 	})
 
