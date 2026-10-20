@@ -204,13 +204,41 @@ func (c *Client) send(ctx context.Context, to common.Address, data []byte, label
 	}
 
 	if err := c.eth.SendTransaction(ctx, signed); err != nil {
+		if isNonceTooLowError(err) {
+			// Nonce занят tx с того же адреса извне (owner-CLI на общем
+			// deployer-ключе): без перечитывания retry вечно переиспользует
+			// устаревший nonce. Отправка остаётся одна на вызов — flusher
+			// ретраит следующим тиком уже с актуальным nonce.
+			if rerr := c.reseedLocked(ctx); rerr != nil {
+				c.nonceSeeded = false
+			}
+		}
 		return common.Hash{}, fmt.Errorf("%w: send tx: %v", ErrChainTransient, err)
 	}
 	// nonce++ ТОЛЬКО после успешного SendTransaction — никаких дыр в nonce
-	// (invariant 3). При любой ошибке выше nonce не трогался → retry
-	// переиспользует то же значение.
+	// (invariant 3). При ошибке выше nonce не продвигается; исключение —
+	// «nonce too low», где он перечитывается из сети под sendMu.
 	c.nonce++
 	return signed.Hash(), nil
+}
+
+// isNonceTooLowError распознаёт отказ txpool'а «nonce too low» (geth
+// core.ErrNonceTooLow, текст с префиксом «next nonce N, tx nonce M»).
+func isNonceTooLowError(err error) bool {
+	return strings.Contains(err.Error(), "nonce too low")
+}
+
+// reseedLocked пере-инициализирует локальный nonce из on-chain PendingNonceAt.
+// Требует удержания sendMu (send зовёт его уже под мьютексом — Lock здесь
+// невозможен, это дедлок).
+func (c *Client) reseedLocked(ctx context.Context) error {
+	n, err := c.eth.PendingNonceAt(ctx, c.signer.Address())
+	if err != nil {
+		return err
+	}
+	c.nonce = n
+	c.nonceSeeded = true
+	return nil
 }
 
 // ReseedNonce пере-инициализирует локальный nonce из on-chain PendingNonceAt.
@@ -220,11 +248,8 @@ func (c *Client) send(ctx context.Context, to common.Address, data []byte, label
 func (c *Client) ReseedNonce(ctx context.Context) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	n, err := c.eth.PendingNonceAt(ctx, c.signer.Address())
-	if err != nil {
+	if err := c.reseedLocked(ctx); err != nil {
 		return fmt.Errorf("reseed nonce: %w", err)
 	}
-	c.nonce = n
-	c.nonceSeeded = true
 	return nil
 }

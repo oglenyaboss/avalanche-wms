@@ -19,22 +19,27 @@ import (
 // Считает вызовы PendingNonceAt и записывает все отправленные tx, чтобы тесты
 // могли проверить nonce/gasPrice подписанной транзакции без живого RPC.
 type fakeEthBackend struct {
-	mu            sync.Mutex
-	nonce         uint64
-	pendingNonceN int
-	gasPrice      *big.Int
-	estimateGas   uint64
-	chainID       *big.Int
-	sentTxs       []*types.Transaction
-	sendErr       error // если != nil — SendTransaction падает (и НЕ записывает tx)
-	sendErrOnce   bool  // если true — sendErr срабатывает только на первом вызове
-	sendCalls     int
+	mu                sync.Mutex
+	nonce             uint64
+	pendingNonceN     int
+	pendingNonceErr   error // если != nil — PendingNonceAt падает на вызове № pendingNonceErrAt
+	pendingNonceErrAt int   // номер вызова PendingNonceAt (1-based), на котором срабатывает pendingNonceErr; 0 — всегда
+	gasPrice          *big.Int
+	estimateGas       uint64
+	chainID           *big.Int
+	sentTxs           []*types.Transaction
+	sendErr           error // если != nil — SendTransaction падает (и НЕ записывает tx)
+	sendErrOnce       bool  // если true — sendErr срабатывает только на первом вызове
+	sendCalls         int
 }
 
 func (f *fakeEthBackend) PendingNonceAt(_ context.Context, _ common.Address) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pendingNonceN++
+	if f.pendingNonceErr != nil && (f.pendingNonceErrAt == 0 || f.pendingNonceErrAt == f.pendingNonceN) {
+		return 0, f.pendingNonceErr
+	}
 	return f.nonce, nil
 }
 
@@ -142,6 +147,113 @@ func TestClient_NonceUnchangedOnSendFailure(t *testing.T) {
 	}
 	if eth.sentTxs[0].Nonce() != 10 {
 		t.Errorf("nonce must be reused after failure: want 10, got %d", eth.sentTxs[0].Nonce())
+	}
+}
+
+// externalTxBackend — fakeEthBackend с хуком onSendErr: тест двигает pending
+// nonce сразу после отбитой отправки, изображая внешнюю tx с того же адреса,
+// которая уже заняла nonce.
+type externalTxBackend struct {
+	*fakeEthBackend
+	onSendErr func()
+}
+
+func (b *externalTxBackend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
+	err := b.fakeEthBackend.SendTransaction(ctx, tx)
+	if err != nil && b.onSendErr != nil {
+		b.onSendErr()
+	}
+	return err
+}
+
+// TestClient_NonceTooLowReseeds: внешняя tx с того же ключа съела локальный
+// nonce → pool отвечает «nonce too low»; send перечитывает pending nonce, и
+// retry уходит уже с ним — без рестарта адаптера (issue #43).
+func TestClient_NonceTooLowReseeds(t *testing.T) {
+	eth := &fakeEthBackend{
+		nonce:       5,
+		sendErr:     errors.New("nonce too low: next nonce 7, tx nonce 5"),
+		sendErrOnce: true,
+	}
+	c := newTestClient(t, &externalTxBackend{fakeEthBackend: eth, onSendErr: func() { eth.nonce = 7 }})
+
+	if _, err := sendOne(context.Background(), c); !errors.Is(err, ErrChainTransient) {
+		t.Fatalf("nonce too low must classify as ErrChainTransient, got %v", err)
+	}
+	if eth.pendingNonceN != 2 {
+		t.Errorf("PendingNonceAt: want 2 calls (seed + reseed), got %d", eth.pendingNonceN)
+	}
+	if _, err := sendOne(context.Background(), c); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if _, err := sendOne(context.Background(), c); err != nil {
+		t.Fatalf("send 3: %v", err)
+	}
+	if len(eth.sentTxs) != 2 {
+		t.Fatalf("expected 2 sent txs, got %d", len(eth.sentTxs))
+	}
+	if got := eth.sentTxs[0].Nonce(); got != 7 {
+		t.Errorf("retry nonce: want 7 (reseeded), got %d", got)
+	}
+	if got := eth.sentTxs[1].Nonce(); got != 8 {
+		t.Errorf("post-reseed nonce: want 8 (nonce++), got %d", got)
+	}
+	if eth.pendingNonceN != 2 {
+		t.Errorf("reseeded nonce must not be seeded again: PendingNonceAt calls %d, want 2", eth.pendingNonceN)
+	}
+}
+
+// TestClient_NonceTooLowReseedFailureReseedsLater: сам reseed упал (RPC блип) →
+// seed-флаг сброшен, следующий send сеет nonce заново.
+func TestClient_NonceTooLowReseedFailureReseedsLater(t *testing.T) {
+	eth := &fakeEthBackend{
+		nonce:             5,
+		sendErr:           errors.New("nonce too low: next nonce 9, tx nonce 5"),
+		sendErrOnce:       true,
+		pendingNonceErr:   errors.New("rpc unavailable"),
+		pendingNonceErrAt: 2,
+	}
+	c := newTestClient(t, &externalTxBackend{fakeEthBackend: eth, onSendErr: func() { eth.nonce = 9 }})
+
+	if _, err := sendOne(context.Background(), c); !errors.Is(err, ErrChainTransient) {
+		t.Fatalf("first send must be ErrChainTransient, got %v", err)
+	}
+	if eth.pendingNonceN != 2 {
+		t.Fatalf("PendingNonceAt: want 2 calls (seed + failed reseed), got %d", eth.pendingNonceN)
+	}
+	if _, err := sendOne(context.Background(), c); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if eth.pendingNonceN != 3 {
+		t.Errorf("next send must seed again: PendingNonceAt calls %d, want 3", eth.pendingNonceN)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 sent tx, got %d", len(eth.sentTxs))
+	}
+	if got := eth.sentTxs[0].Nonce(); got != 9 {
+		t.Errorf("reseeded nonce: want 9, got %d", got)
+	}
+}
+
+// TestClient_OtherSendErrorKeepsNonce: прочие отказы отправки («already known»)
+// nonce не перечитывают и не сбрасывают seed — поведение прежнее.
+func TestClient_OtherSendErrorKeepsNonce(t *testing.T) {
+	eth := &fakeEthBackend{nonce: 10, sendErr: errors.New("already known"), sendErrOnce: true}
+	c := newTestClient(t, eth)
+	if _, err := sendOne(context.Background(), c); !errors.Is(err, ErrChainTransient) {
+		t.Fatalf("already known must stay ErrChainTransient, got %v", err)
+	}
+	if _, err := sendOne(context.Background(), c); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 successful tx, got %d", len(eth.sentTxs))
+	}
+	if got := eth.sentTxs[0].Nonce(); got != 10 {
+		t.Errorf("nonce must be reused: want 10, got %d", got)
+	}
+	if eth.pendingNonceN != 1 {
+		t.Errorf("PendingNonceAt must stay seed-only: calls %d, want 1", eth.pendingNonceN)
 	}
 }
 
