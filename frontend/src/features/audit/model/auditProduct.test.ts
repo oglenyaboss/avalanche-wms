@@ -164,11 +164,26 @@ describe('auditProduct', () => {
     expect(stages[0].signature).toBe('ok')
   })
 
-  it('flags missing DB details via detailsError', async () => {
-    const action = dbAction({ details: null, detailsError: 'Строка putaways не найдена' })
+  it('maps a missing domain row code to a readable problem', async () => {
+    const action = dbAction({ details: null, detailsError: 'DOMAIN_ROW_MISSING' })
     const stages = await auditProduct(dbAudit(action), mockChain())
     expect(stages[0].detailsHash).toBe('mismatch')
-    expect(stages[0].problems).toContain('Строка putaways не найдена')
+    expect(stages[0].problems).toContain('В БД нет строки этапа для товара этого действия')
+  })
+
+  it('maps an inconsistent domain rows code to a readable problem', async () => {
+    const action = dbAction({ details: null, detailsError: 'DOMAIN_INCONSISTENT' })
+    const stages = await auditProduct(dbAudit(action), mockChain())
+    expect(stages[0].detailsHash).toBe('mismatch')
+    expect(stages[0].problems).toContain('Детали действия в БД расходятся между товарами')
+  })
+
+  it('falls back to a generic problem for an unknown detailsError code', async () => {
+    const action = dbAction({ details: null, detailsError: 'SOMETHING_ELSE' })
+    const stages = await auditProduct(dbAudit(action), mockChain())
+    expect(stages[0].detailsHash).toBe('mismatch')
+    expect(stages[0].problems).toContain('Хеш деталей из БД недоступен')
+    expect(stages[0].problems).not.toContain('SOMETHING_ELSE')
   })
 
   it('marks a chain action unknown to the DB as missingInDb, ordered by block', async () => {

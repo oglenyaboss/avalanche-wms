@@ -14,6 +14,14 @@ import (
 	"wms/internal/signedaction"
 )
 
+// DetailsErrorRowMissing is the detailsError code sent when the domain row
+// behind an action is absent.
+const DetailsErrorRowMissing = "DOMAIN_ROW_MISSING"
+
+// DetailsErrorInconsistent is the detailsError code sent when the domain rows
+// behind an action disagree on a single detail value.
+const DetailsErrorInconsistent = "DOMAIN_INCONSISTENT"
+
 // productActions is the slice of *Repository the handler needs (test seam).
 type productActions interface {
 	ProductID(ctx context.Context, key string) (uuid.UUID, error)
@@ -96,8 +104,13 @@ func (h *Handler) actionView(ctx context.Context, a Action) (actionView, error) 
 	switch {
 	case err == nil:
 		v.Details = newDetailsView(d)
-	case errors.Is(err, ErrDomainRowMissing), errors.Is(err, ErrDomainInconsistent):
-		msg := err.Error()
+	case errors.Is(err, ErrDomainRowMissing):
+		log.Printf("audit: action %s details: %v", a.ActionID, err)
+		msg := DetailsErrorRowMissing
+		v.DetailsError = &msg
+	case errors.Is(err, ErrDomainInconsistent):
+		log.Printf("audit: action %s details: %v", a.ActionID, err)
+		msg := DetailsErrorInconsistent
 		v.DetailsError = &msg
 	default:
 		return actionView{}, err
