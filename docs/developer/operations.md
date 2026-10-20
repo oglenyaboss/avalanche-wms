@@ -53,7 +53,7 @@ openssl rand -hex 32
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | доступ к PostgreSQL | по умолчанию `root` / `root` / `wms_blockchain_db` |
 | `RPC_URL` | RPC EVM-узла для ledger-adapter | в профиле `test` перетирается файлом из shared-тома |
 | `PRIVATE_KEY` | приватный ключ для подписи он-чейн транзакций | в профиле `test` перетирается файлом из shared-тома; в kms-режиме (`docker-compose.kms.yaml`, `make kms-up`) не используется вовсе — подпись в Web3Signer |
-| `CONTRACT_ADDR` | адрес задеплоенного `BatchMappingWMS` | в профиле `test` перетирается файлом из shared-тома |
+| `CONTRACT_ADDR` | адрес задеплоенного `SignedMappingWMS` | в профиле `test` перетирается файлом из shared-тома |
 
 > В профиле `test` значения `RPC_URL`/`PRIVATE_KEY`/`CONTRACT_ADDR` подставляются автоматически из shared-тома `shared_state` (`*_FILE`-переменные ledger-adapter имеют приоритет над прямыми env). Их ручная установка нужна только для запуска против внешнего узла.
 >
@@ -77,14 +77,13 @@ make up                 # = docker compose up -d
 docker compose --profile test up -d
 ```
 
-Дополнительно поднимает узел `subnet-node1` (Avalanche Subnet-EVM), one-shot `subnet-init` (создаёт сабнет + цепочку через Go wallet SDK и пишет динамический `rpc_url.txt`) и one-shot `contract-deploy`, который деплоит `ConsortiumRegistry` (первым), затем `BatchMappingWMS` и пишет `rpc_url.txt` / `registry_addr.txt` / `contract_addr.txt` / `deployer_key.txt` в том `shared_state`. Подробности — [deploy/subnet/README.md](../../deploy/subnet/README.md).
+Дополнительно поднимает узел `subnet-node1` (Avalanche Subnet-EVM), one-shot `subnet-init` (создаёт сабнет + цепочку через Go wallet SDK и пишет динамический `rpc_url.txt`) и one-shot `contract-deploy`, который деплоит `ConsortiumRegistry` (первым), затем `SignedMappingWMS` (с адресом реестра в конструкторе) и пишет `rpc_url.txt` / `registry_addr.txt` / `contract_addr.txt` / `deployer_key.txt` в том `shared_state`. Подробности — [deploy/subnet/README.md](../../deploy/subnet/README.md); как зарегистрировать первую организацию и подтвердить ключи — [README «Стенд с реестром»](./README.md#стенд-с-реестром-первый-запуск).
 
-**Обязательный шаг после старта — регистрация Debezium-коннектора.** Коннектор **не регистрируется автоматически** (нет init-скрипта/`depends_on`, у Debezium нет healthcheck). Без него CDC-конвейер мёртв:
+**Регистрация Debezium-коннектора — автоматическая.** One-shot `connector-init` (`deploy/debezium/register-connector.sh`) ждёт Connect REST на `:8083`, создаёт `outbox-connector` (201) или обновляет его конфиг из `deploy/debezium/connectors/postgres-connector.json` (409 → PUT). Проверка и ручная перерегистрация:
 
 ```bash
-# Дождитесь готовности Debezium (Connect REST на :8083), затем:
-make register-connector       # POST deploy/debezium/connectors/postgres-connector.json
-make connector-status         # проверка статуса outbox-connector
+make connector-status         # GET /connectors/outbox-connector/status
+make register-connector       # POST/PUT вручную — после правки коннектора на живом стенде
 ```
 
 Полная последовательность «с нуля» (режим B):
@@ -94,8 +93,7 @@ cp .env.example .env
 # отредактируйте JWT_SECRET!
 docker compose --profile test up -d
 make ps                        # дождаться healthy у postgres/kafka/subnet-node1
-make register-connector        # после готовности debezium
-make connector-status
+make connector-status          # коннектор уже зарегистрирован connector-init
 ```
 
 ### 1.4. Проверка состояния
@@ -112,7 +110,7 @@ curl -s localhost:8085/health  # health ledger-adapter
 | Host-порт | Сервис | Назначение |
 |-----------|--------|-----------|
 | `8081` | `wms_app` (`wms-service`) | WMS HTTP REST API (внутри контейнера `8080`) |
-| `8085` | `ledger-adapter` | HTTP (только `/health`) |
+| `8085` | `ledger-adapter` | HTTP (только loopback): `/health`, `/onchain/tx/{hash}`, `/registry/keys/{keyId}` |
 | `8080` | `kafka-ui` | Kafbat UI |
 | `8083` | `debezium` | Kafka Connect REST API |
 | `9090` | `prometheus` | Prometheus UI |
@@ -142,9 +140,10 @@ curl -s localhost:8085/health  # health ledger-adapter
 | `wms_app` | build `./wms/Dockerfile` | `8081:8080` | `postgres` (healthy), `ledger-adapter` (started), `db-init` (completed), `kafka-init` (completed) | `curl -f localhost:8080/health` (10s/5s/5 ретраев) |
 | `postgres` | `postgres:17` | `5432:5432` | — | `pg_isready -U <user> -d <db>` (5s/3s/10) |
 | `db-init` | `postgres:17` (one-shot) | — | `postgres` (healthy) | — |
-| `kafka` | `apache/kafka:3.7.0` (KRaft) | `9092`, `9999` | — | `kafka-broker-api-versions.sh` (сбрасывает `KAFKA_OPTS`/`JMX_PORT`) |
+| `kafka` | `apache/kafka:3.7.0` (KRaft) | `9092`, `9999` | — | `nc -z localhost 9092` (10s/10s/15 ретраев, старт 30s) |
 | `kafka-init` | `apache/kafka:3.7.0` (one-shot) | — | `kafka` (healthy), `db-init` (completed) | — |
-| `debezium` | `debezium/connect:2.5` | `8083`, `9012` | `db-init` (completed), `kafka-init` (completed) | **нет** (Compose не ждёт готовности) |
+| `debezium` | `debezium/connect:2.6` | `8083`, `9012` | `db-init` (completed), `kafka-init` (completed) | **нет** (Compose не ждёт готовности) |
+| `connector-init` | `curlimages/curl:8.11.1` (one-shot) | — | `debezium` (started) | — |
 | `kafka-ui` | `ghcr.io/kafbat/kafka-ui:v1.5.0` | `8080:8080` | `kafka` (started) | — |
 | `prometheus` | `prom/prometheus:latest` | `${PROMETHEUS_PORT:-9090}:9090` | — | — |
 | `grafana` | `grafana/grafana:latest` | `3000:3000` | `prometheus` | — |
@@ -160,9 +159,10 @@ curl -s localhost:8085/health  # health ledger-adapter
 
 - **`postgres`** запускается командой `postgres -c wal_level=logical` — логическая репликация обязательна для Debezium. Монтирует `seed.sql` read-only.
 - **`db-init`** (скрипт `deploy/db-init.sh`) делает 5 шагов: миграции (`wms/migrations/migrate.sh`) → создание роли репликации `debezium` → grant `SELECT` на `public.outbox_events` → создание publication `outbox_publication FOR TABLE public.outbox_events` → seed admin-пользователя; опционально `seed.sql` если `SEED_DATA != false`. Слот репликации `debezium_outbox` создаётся самим Debezium при первом старте коннектора, а не `db-init`.
+- **`connector-init`** (скрипт `deploy/debezium/register-connector.sh`) регистрирует `outbox-connector` при каждом `up`: 201 — создан, 409 — обновляет конфиг через PUT; ошибка Connect — exit `1` (см. §1.3).
 - **`postgres-exporter`** обращается к БД по имени контейнера `postgres_db`, а не по имени сервиса `postgres`.
 - **`ledger-adapter`** монтирует `shared_state:/shared:ro` и читает `rpc_url.txt`/`contract_addr.txt`/`registry_addr.txt`/`deployer_key.txt`, записанные `contract-deploy`. Healthcheck отсутствует — downstream используют `condition: service_started`.
-- **`contract-deploy`** деплоит сначала `ConsortiumRegistry` (`/shared/registry_addr.txt`, ewoq nonce 0), затем `BatchMappingWMS` (`/shared/contract_addr.txt`, nonce 1). Идемпотентен по каждому файлу: если `/shared/contract_addr.txt` содержит адрес с ненулевым байткодом (`cast code` длиннее 4 символов) — выходит `0` без передеплоя; если файл есть, но байткод пустой — передеплоивает; если `cast code` падает с RPC-ошибкой — завершается с exit `1` (не передеплоивает «вслепую»). Полный сброс блокчейн-состояния: `docker compose --profile test down -v`.
+- **`contract-deploy`** деплоит сначала `ConsortiumRegistry` (`/shared/registry_addr.txt`, ewoq nonce 0), затем `SignedMappingWMS` (`/shared/contract_addr.txt`, nonce 1, конструктор получает адрес реестра). Идемпотентен по каждому файлу: если `/shared/contract_addr.txt` содержит адрес с ненулевым байткодом (`cast code` длиннее 4 символов) — выходит `0` без передеплоя; если файл есть, но байткод пустой — передеплоивает; если `cast code` падает с RPC-ошибкой — завершается с exit `1` (не передеплоивает «вслепую»). Полный сброс блокчейн-состояния: `docker compose --profile test down -v`.
 
 ---
 
@@ -191,52 +191,33 @@ EventRouter:
 | `event.id` | `event_id` |
 | `event.key` | `aggregate_id` |
 | `event.type` | `event_type` |
-| `event.payload` | `payload_hash` |
+| `event.payload` | `payload` (конверт подписанного действия, ADR-0001 §9) |
 | `route.by.field` | `aggregate_type` |
 | `route.topic.replacement` | **`wms.events.v1`** (статично — все события на один топик) |
 | доп. | `aggregate_type` кладётся в **Kafka-header** `aggregate_type` |
 
-### 3.2. Маршрутизация — два слоя (важно!)
+### 3.2. Маршрутизация и диспетчеризация
 
-**Слой 1 — фактическая runtime-маршрутизация (актуальная).** EventRouter имеет статичную замену `route.topic.replacement = wms.events.v1`. То есть **все** outbox-события, независимо от `aggregate_type`, попадают в **единственный топик `wms.events.v1`**. Тип агрегата едет в Kafka-header `aggregate_type`. `ledger-adapter` потребляет только `wms.events.v1` (топик захардкожен в `main.go`) и диспетчеризует по header'у на Solidity-метод:
+EventRouter имеет статичную замену `route.topic.replacement = wms.events.v1`. То есть **все** outbox-события, независимо от `aggregate_type`, попадают в **единственный топик `wms.events.v1`**. Тип агрегата едет в Kafka-header `aggregate_type`.
 
-| `aggregate_type` (header, lower-case) | Solidity-метод |
+`ledger-adapter` потребляет только `wms.events.v1` (топик захардкожен в `main.go`). Единственный принимаемый `aggregate_type` — **`signed_action`**: это строка подписанного действия (ADR-0001 §9), value — JSON-конверт. Любой другой агрегат адаптер отправляет в DLQ и коммитит offset. По типу действия (поле `actionType` конверта: 1–4 складские, 5–6 ключевые) адаптер режет окно на сегменты и вызывает:
+
+| Типы действий | Solidity-метод |
 |---------------------------------------|----------------|
-| `receiving` | `batchAccept` |
-| `putaway` | `batchPutAway` |
-| `picking` | `batchPick` |
-| `shipping` | `batchShip` |
+| `Receive`, `PutAway`, `Pick`, `Ship` (1–4) | `SignedMappingWMS.applyActions(Action[])` |
+| `KeyRegister`, `KeyRevoke` (5–6) | `ConsortiumRegistry.applyKeyActions(KeyAction[])` |
 
-> Литералы `aggregate_type` — строчные и для этапа сборки это **`picking`**, а не `assembly`. Это значения, которые WMS реально пишет в `outbox_events` (см. [wms-reference](./wms-reference.md)).
-
-**Слой 2 — устаревшая per-aggregate схема (legacy / rollback).** `kafka-init` создаёт ещё 4 per-aggregate топика, соответствующих значениям колонки `event_type` в `outbox_events`:
-
-| `event_type` в `outbox_events` | Legacy-топик |
-|--------------------------------|--------------|
-| `wms.receiving.v1` | `wms.receiving.v1` |
-| `wms.putaway.v1` | `wms.putaway.v1` |
-| `wms.picking.v1` | `wms.picking.v1` |
-| `wms.shipping.v1` | `wms.shipping.v1` |
-
-**Эти 4 топика создаются, но коннектором НЕ наполняются** (EventRouter маршрутизирует всё в `wms.events.v1`). Они оставлены «на откат» и трафика не получают.
-
-> **Расхождение с другими доками.** В [index.md](../index.md) встречается формулировка «4 топика + DLQ». Это описание прежнего дизайна. Актуально: один рабочий топик `wms.events.v1` + DLQ; четыре per-aggregate топика — legacy.
+> Литерал агрегата в БД/Kafka — `signed_action`; этап складского действия кодируется числом в конверте (ADR-0001 §1), а не строкой `aggregate_type`.
 
 ### 3.3. Все топики, создаваемые `kafka-init`
 
-`deploy/kafka-init.sh` создаёт **7 топиков**, все с `--partitions 1 --replication-factor 1`:
+`deploy/kafka-init.sh` создаёт **3 топика**, все с `--partitions 1 --replication-factor 1`:
 
 | Топик | Статус |
 |-------|--------|
 | `__debezium-heartbeat.wms` | служебный heartbeat Debezium |
-| **`wms.events.v1`** | **рабочий** — все outbox-события; **должен оставаться 1 партиция** (FSM-порядок зависит от single-partition гарантии Kafka) |
-| `wms.receiving.v1` | legacy / rollback |
-| `wms.putaway.v1` | legacy / rollback |
-| `wms.picking.v1` | legacy / rollback |
-| `wms.shipping.v1` | legacy / rollback |
+| **`wms.events.v1`** | **рабочий** — все outbox-события (подписанные действия); **должен оставаться 1 партиция** (порядок действий в цепи = порядку коммитов в БД, ADR-0001 §9) |
 | `wms.dlq.v1` | **DLQ** ledger-adapter (failed/непарсящиеся сообщения) |
-
-> **Инвариант:** `wms.events.v1` нельзя расширять до >1 партиции — корректность FSM ledger-adapter держится на порядке внутри одной партиции.
 
 Внутренние storage-топики Debezium Connect: `debezium_configs`, `debezium_offsets`, `debezium_statuses`; внутренний DLQ Connect — `debezium_dlq`.
 
@@ -269,26 +250,29 @@ EventRouter:
 
 ### 4.2. ledger-adapter (`ledger-adapter/internal/config/config.go`)
 
-Для пяти обязательных переменных поддерживается оверрайд через `<NAME>_FILE`: если файл существует, берётся его trim-содержимое (так профиль `test` подставляет значения из `shared_state`).
+Для секретов (`KAFKA_BROKERS` / `DB_URL` / `RPC_URL` / `CONTRACT_ADDR` / `PRIVATE_KEY` и др.) поддерживается оверрайд через `<NAME>_FILE`: если файл существует, берётся его trim-содержимое (так профиль `test` подставляет значения из `shared_state`).
 
 | Переменная | Обязательна | Default | Тип | Описание |
 |-----------|-------------|---------|-----|----------|
 | `KAFKA_BROKERS` | **да** | — | string | CSV брокеров, напр. `kafka:9092`. Есть `KAFKA_BROKERS_FILE` |
 | `DB_URL` | **да** | — | string | pgx DSN. Есть `DB_URL_FILE` |
 | `RPC_URL` | **да** | — | string | RPC EVM-узла. Есть `RPC_URL_FILE` (`/shared/rpc_url.txt`) |
-| `CONTRACT_ADDR` | **да** | — | string | hex-адрес `BatchMappingWMS`. Есть `CONTRACT_ADDR_FILE` (`/shared/contract_addr.txt`) |
-| `PRIVATE_KEY` | **да** | — | string | hex ECDSA-ключ (`0x` срезается). Есть `PRIVATE_KEY_FILE` (`/shared/deployer_key.txt`) |
-| `PORT` | нет | `8085` | string | HTTP-порт `/health` |
+| `CONTRACT_ADDR` | **да** | — | string | hex-адрес `SignedMappingWMS`. Есть `CONTRACT_ADDR_FILE` (`/shared/contract_addr.txt`) |
+| `REGISTRY_ADDR` | нет | — | string | hex-адрес `ConsortiumRegistry` (`/shared/registry_addr.txt` через `REGISTRY_ADDR_FILE`); без него ключевые действия не отправляются, `/registry/keys/{keyId}` отвечает 502 |
+| `SIGNER_MODE` | нет | `static` | string | `static` (приватник в env — только локальная разработка) или `kms` (подпись в Web3Signer: `KMS_URL` + `KMS_PUBLIC_KEYS` — identifier единственного ключа) |
+| `PRIVATE_KEY` | **да** (static) | — | string | hex ECDSA-ключ (`0x` срезается). Есть `PRIVATE_KEY_FILE` (`/shared/deployer_key.txt`); в kms-режиме не читается |
+| `PORT` | нет | `8085` | string | HTTP-порт `/health`, `/onchain/tx`, `/registry/keys` |
 | `KAFKA_GROUP_ID` | нет | `ledger-adapter` | string | consumer group |
 | `DLQ_TOPIC` | нет | `wms.dlq.v1` | string | топик для failed/непарсящихся |
 | `LOG_LEVEL` | нет | `info` | string | зарезервирован, пока не подключён к slog |
-| `BATCH_SIZE` | нет | `10` | int | макс. событий на одну он-чейн транзакцию |
-| `BATCH_TIMEOUT` | нет | `100ms` | duration | макс. время накопления батча |
+| `BATCH_SIZE` | нет | `10` | int | макс. сообщений в окне флаша |
+| `BATCH_TIMEOUT` | нет | `100ms` | duration | макс. время накопления окна |
+| `PIPELINE_WINDOW` | нет | `3` | int | сколько batch-tx держать in-flight одновременно (потолок 8 — 50% от `TxPoolAccountSlots` узла) |
 | `RECEIPT_POLL_TIMEOUT` | нет | `30s` | duration | таймаут поллинга receipt'а |
 | `RECONCILE_INTERVAL` | нет | `30s` | duration | период фоновой сверки. Должен быть `> 0` |
 | `RECONCILE_MIN_AGE` | нет | `1m` | duration | мин. возраст «зависшей» SENT/FAILED-строки. Должен быть `> RECEIPT_POLL_TIMEOUT` |
 
-> **Стартовые инварианты** (`Load()` падает при нарушении): `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT` (иначе reconciler гоняется с in-flight `WaitReceipt`) и `RECONCILE_INTERVAL > 0`.
+> **Стартовые инварианты** (`Load()` падает при нарушении): signer **ровно один** (подписанные действия держат Kafka-порядок одной nonce-цепочкой; `PRIVATE_KEYS` с >1 ключом или `KMS_PUBLIC_KEYS` с >1 identifier'ом отклоняются), `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT` (иначе reconciler гоняется с in-flight `WaitReceipt`) и `RECONCILE_INTERVAL > 0`.
 
 ### 4.3. Init / прочее (Compose)
 
@@ -306,15 +290,25 @@ PostgreSQL 17, три схемы. Подробный справочник по �
 
 | Схема | Назначение | Основные таблицы |
 |-------|-----------|------------------|
-| `public` | сквозное: пользователи, auth, трекинг outbox/onchain | `users`, `evm_addresses`, `outbox_events`, `onchain_events`, `schema_migrations` |
+| `public` | сквозное: пользователи, ключи, трекинг outbox/onchain | `users`, `evm_addresses`, `organizations`, `passkey_credentials`, `warehouse_actions`, `key_actions`, `outbox_events`, `onchain_events`, `schema_migrations` |
 | `wms_inventory` | доменные сущности | `skus`, `sku_barcodes`, `warehouses`, `bins`, `destinations`, `inbound_shipments`, `cargoplaces`, `boxes`, `expected_cargoplace_skus`, `orders`, `order_lines`, `outbound_dispatches`, `products` |
-| `wms_ops` | append-only история операций | `receiving_gate`, `receiving_table`, `putaways`, `assembly_tasks`, `shippings` + views `v_putaways_with_chain` / `v_shippings_with_chain` / `v_assembly_tasks_with_chain` |
+| `wms_ops` | append-only история операций | `receiving_gate`, `receiving_table`, `putaways`, `assembly_tasks`, `shippings` |
 
 Ключевые точки для операций:
 
-- `public.outbox_events` — источник CDC (append-only, без `status`/`processed`; Debezium читает WAL). `event_id` — ключ идемпотентности.
-- `public.onchain_events` — статус он-чейн (`PENDING`/`SENT`/`COMMITTED`/`FAILED`), пишется ledger-adapter'ом; матчится с `outbox_events` по `event_id`.
-- Views `v_*_with_chain` (миграция 0008) делают `LEFT JOIN` ops-таблиц к `public.onchain_events`, отдавая `chain_status` через `COALESCE(..., 'PENDING')`.
+- `public.outbox_events` — источник CDC (append-only; Debezium читает WAL). `event_id` — ключ идемпотентности; у подписанного действия `event_id = aggregate_id = action_id`, `payload` — конверт действия (ADR-0001 §9).
+- `public.warehouse_actions` (миграция 0016) / `public.key_actions` (0015) — строки подписанных складских/ключевых действий: `action_type` (1 Receive, 2 PutAway, 3 Pick, 4 Ship; 5 KeyRegister, 6 KeyRevoke), `item_ids uuid[]`, `submitted_at`.
+- `public.onchain_events` — статус он-чейн (`PENDING`/`SENT`/`COMMITTED`/`FAILED` + `reject_reason`), пишется ledger-adapter'ом; матчится с действием по `event_id = action_id`.
+- Вьюхи `wms_ops.*_with_chain` (миграция 0008) **удалены** миграцией 0021: они связывали операции с событиями «на товар» по `event_id`, которых после перехода на подписанные действия больше нет (связь идёт через `action_id`, и старые вьюхи показывали врущий `PENDING`). Эквивалент — прямой джойн действия к он-чейн статусу, как в гейте WMS (`wms/internal/ledger/chain_status.go`):
+
+```sql
+SELECT wa.*, oe.status AS chain_status
+FROM wms_ops.putaways p
+JOIN public.warehouse_actions wa ON wa.action_id = p.action_id
+LEFT JOIN public.onchain_events oe ON oe.event_id = wa.action_id;
+```
+
+> Точную связь колонок ops-таблиц с `warehouse_actions` смотри в `wms-reference`; `ledger.CheckChainStatus` матчит товары через `warehouse_actions.item_ids && $1::uuid[]`.
 
 ### 5.1. Миграции
 
@@ -363,17 +357,17 @@ URL: `http://localhost:3000`, креды `admin` / `admin`.
 
 ## 7. Avalanche subnet (локальный блокчейн)
 
-Профиль `test` поднимает single-node `avalanchego` v1.14.0 (`subnet-node1`) с плагином subnet-evm, через one-shot `subnet-init` создаёт кастомный сабнет + цепочку (Go wallet SDK, локальная подпись ключом ewoq) и деплоит `BatchMappingWMS.sol` на эту цепочку **Subnet-EVM** (chainID `99999`, динамический RPC-путь `/ext/bc/<blockchainID>/rpc`). `blockchainID` детерминируется на bootstrap'е и пишется в `shared_state` (`rpc_url.txt`). Полная документация, обоснование «Subnet-EVM вместо встроенного C-Chain», prefunded-ключ ewoq и троублшутинг — в [deploy/subnet/README.md](../../deploy/subnet/README.md).
+Профиль `test` поднимает single-node `avalanchego` v1.14.0 (`subnet-node1`) с плагином subnet-evm, через one-shot `subnet-init` создаёт кастомный сабнет + цепочку (Go wallet SDK, локальная подпись ключом ewoq) и деплоит контракты `ConsortiumRegistry.sol` и `SignedMappingWMS.sol` на эту цепочку **Subnet-EVM** (chainID `99999`, динамический RPC-путь `/ext/bc/<blockchainID>/rpc`). `blockchainID` детерминируется на bootstrap'е и пишется в `shared_state` (`rpc_url.txt`). Полная документация, обоснование «Subnet-EVM вместо встроенного C-Chain», prefunded-ключ ewoq и троублшутинг — в [deploy/subnet/README.md](../../deploy/subnet/README.md).
 
 Быстрый старт:
 
 ```bash
-# только блокчейн-часть (узел + bootstrap сабнета + деплой контракта)
+# только блокчейн-часть (узел + bootstrap сабнета + деплой контрактов)
 docker compose --profile test up -d subnet-node1 subnet-init contract-deploy
 
-# проверка артефактов деплоя
-docker run --rm -v blockchain_project_shared_state:/s alpine cat /s/rpc_url.txt
-docker run --rm -v blockchain_project_shared_state:/s alpine cat /s/contract_addr.txt
+# проверка артефактов деплоя (том compose называет по каталогу репо: <каталог>_shared_state)
+docker run --rm -v "$(basename "$PWD")_shared_state:/shared:ro" alpine:3 \
+  sh -c 'cat /shared/rpc_url.txt /shared/registry_addr.txt /shared/contract_addr.txt'
 
 # весь стек сразу
 docker compose --profile test up -d
@@ -382,7 +376,7 @@ docker compose --profile test up -d
 docker compose --profile test down -v
 ```
 
-`contract-deploy` идемпотентен: проверяет `/shared/registry_addr.txt` и `/shared/contract_addr.txt`, при живом контракте — не передеплоит. Деплой: сначала `forge create ConsortiumRegistry` ключом ewoq (проверка `owner()==ewoq`, запись `registry_addr.txt`), затем `forge create BatchMappingWMS` (проверка `itemStatus(0)==0`), запись `rpc_url.txt` / `contract_addr.txt` / `deployer_key.txt` в `shared_state`.
+`contract-deploy` идемпотентен: проверяет `/shared/registry_addr.txt` и `/shared/contract_addr.txt`, при живом контракте — не передеплоит. Деплой: сначала `forge create ConsortiumRegistry` ключом ewoq (проверка `owner()==ewoq`, запись `registry_addr.txt`), затем `forge create SignedMappingWMS --constructor-args <registry>` (проверки `itemStatus(0)==0` и `registry()==<registry>`), запись `rpc_url.txt` / `contract_addr.txt` / `deployer_key.txt` в `shared_state`. Ключ ewoq из `deployer_key.txt` — это владелец реестра: он же подписывает транзакции адаптера и команды `registry-cli`.
 
 ### 7.1. Allow-list отправителей транзакций и деплоеров
 

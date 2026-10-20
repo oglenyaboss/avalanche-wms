@@ -1,27 +1,25 @@
 # Ledger Adapter — справочник разработчика
 
-**Версия:** 1.0
-**Дата:** 2026-05-31
+**Версия:** 2.0
+**Дата:** 2026-10-20
 **Аудитория:** команда, принимающая сервис на сопровождение (hand-off)
 
-Этот документ описывает внутреннее устройство `ledger-adapter` — Go-сервиса-моста между WMS-аутбоксом и смарт-контрактом `BatchMappingWMS`. Архитектурный контекст «зачем блокчейн» и выбор подхода см. в [BatchMappingWMS — подход](../integration/batch-mapping-approach.md); общий маппинг операций — в [Маппинг WMS → Блокчейн](../integration/blockchain-mapping.md); форматы данных на каждом стыке — в [Контракт данных](../integration/data-contract.md). Здесь — устройство кода, типы, сигнатуры, конфигурация и инварианты.
-
-Справочник по самому контракту (FSM, сигнатуры, события, revert-условия) вынесен в отдельный файл: [Smart Contract Reference](smart-contract-reference.md).
+Этот документ описывает внутреннее устройство `ledger-adapter` — Go-сервиса-моста между WMS-аутбоксом и контрактами `SignedMappingWMS` (складские действия) и `ConsortiumRegistry` (ключевые действия) на Avalanche Subnet-EVM. Модель подписанных действий — [ADR-0001](../adr/0001-signed-actions.md); сигнатуры и события контрактов — [Smart Contract Reference](smart-contract-reference.md); общий маппинг операций — [Маппинг WMS → Блокчейн](../integration/blockchain-mapping.md); форматы данных на каждом стыке — [Контракт данных](../integration/data-contract.md).
 
 ---
 
 ## 1. Назначение моста
 
-`ledger-adapter` — это **однонаправленный потребитель** Kafka, превращающий доменные события WMS в batch-транзакции к контракту `BatchMappingWMS` на Avalanche Subnet-EVM.
+`ledger-adapter` — это **однонаправленный потребитель** Kafka, превращающий подписанные складские действия WMS в транзакции к контрактам.
 
-Полный путь события: WMS пишет доменное событие в `public.outbox_events` → Debezium (CDC) публикует его в один Kafka-топик `wms.events.v1` → `ledger-adapter` потребляет топик, накапливает события в окно (по времени/размеру), группирует по стадии и отправляет **одну транзакцию на под-батч** в FSM-порядке (`receiving → putaway → picking → shipping`). Прогресс каждого события фиксируется в `public.onchain_events`, а фоновый reconcile-loop устраняет расхождения БД ↔ chain после таймаутов receipt-поллинга или падения процесса.
+Полный путь действия: WMS пишет строку в `public.outbox_events` (`aggregate_type = 'signed_action'`, `payload` — подписанный конверт, ADR-0001 §9) → Debezium (CDC) публикует её в единственный Kafka-топик `wms.events.v1` → `ledger-adapter` потребляет топик, накапливает окно (по времени/размеру), режет его на сегменты складских и ключевых действий, пакует в чанки по calldata и отправляет **одну транзакцию на чанк** в Kafka-порядке. Исход каждого действия (применено / отклонено с причиной) разбирается из логов receipt'а и пишется в `public.onchain_events`; фоновый reconcile-loop подтягивает застрявшие строки.
 
 > **У адаптера нет бизнес-REST-интерфейса на запись.** HTTP-эндпоинты только читают: `GET /health` (liveness), `GET /onchain/tx/{hash}` (receipt транзакции для доказательства on-chain) и `GET /registry/keys/{keyId}` (статус ключа в `ConsortiumRegistry`), см. §9. Chain-status gate (`ledger.CheckChainStatus` на стороне WMS) читает `public.onchain_events` напрямую через общий PostgreSQL, а не через адаптер.
 
 ```
-WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter → BatchMappingWMS
+WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter → SignedMappingWMS / ConsortiumRegistry
                                                               │
-                                                              └──→ public.onchain_events (статус: PENDING/SENT/COMMITTED/FAILED)
+                                                              └──→ public.onchain_events (PENDING/SENT/COMMITTED/FAILED + reject_reason)
 ```
 
 Соответствие этапов жизненного цикла товара — см. потоковые диаграммы: [Приёмка на столе](../flows/receiving-table-flow.md), [Раскладка](../flows/putaway-flow.md), [Сборка](../flows/assembly-flow.md), [Отгрузка](../flows/shipping-flow.md), а также [Сквозной путь товара](../business-process/end-to-end-flow.md) и [DFD](../business-process/data-flow-diagrams.md).
@@ -32,23 +30,33 @@ WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter 
 
 | Пакет / файл | Ответственность |
 |---|---|
-| `cmd/adapter/main.go` | Точка входа: собирает все компоненты, поднимает `errgroup` (consumer-goroutine + reconcile-goroutine) и отдельный HTTP-сервер |
-| `internal/config/config.go` | `Load()` — чтение env, `_FILE`-override для секретов, валидация обязательных полей и инвариантов на старте |
-| `internal/chain/abi.go` | Встраивает `SignedMappingWMS.abi.json` как `ContractABI string` через `//go:embed` |
-| `internal/chain/client.go` | `Client` — обёртка над `ethclient`; ABI-паковка; пайплайн nonce/gas/sign/send; диспетчер `BatchCall`; классификация ошибок (revert vs transient) |
-| `internal/chain/convert.go` | `UUIDToUint256` — `keccak256(UUID-строка) → *big.Int` (совпадает с Solidity-конвенцией) |
+| `cmd/adapter/main.go` | Точка входа: config → pool → signer → chain client → резолверы → DLQ → Flusher/Reconciler → consumer + HTTP |
+| `internal/config/config.go` | `Load()` — чтение env, `_FILE`-override для секретов, валидация обязательных полей и инвариантов (в т.ч. «signer ровно один») |
+| `internal/chain/client.go` | `Client` — обёртка над `ethclient`: единый путь `SendCalldata` (nonce/gas/sign/send), классификация ошибок (revert vs transient) |
+| `internal/chain/abi.go` | Встраивает `SignedMappingWMS.abi.json` и `ConsortiumRegistry.abi.json` через `//go:embed` |
+| `internal/chain/warehouseactions.go` | `WarehouseAction`, `PackApplyActions`; резолвер исходов складских действий (логи `ActionApplied`/`ActionRejected` + fallback `actionState`) |
+| `internal/chain/keyactions.go` | `KeyAction`, `WebAuthnAuth`, `PackApplyKeyActions` |
+| `internal/chain/registry.go` | `Registry` — read-only реестра (`getKey`) + резолвер исходов ключевых действий |
+| `internal/chain/actioncontract.go` | Общая plumbing резолверов: `eth_call`, `actionState`, reason из журнала `ActionRejected` |
+| `internal/chain/signer.go` | `TxSigner`: static (локальный ECDSA) и интерфейс для kms; `ErrSignerTransient` |
 | `internal/chain/receipt.go` | `WaitReceipt` — поллинг receipt'а с экспоненциальным backoff и таймаутом |
-| `internal/consumer/message.go` | Тип `Message` и `Parse()` — извлечение `EventID`/`ProductID`/`AggregateType` из Kafka-заголовков и ключа |
-| `internal/consumer/batcher.go` | `Batcher` — потокобезопасный аккумулятор; флаш по размеру/времени; `Unshift` для retry |
-| `internal/consumer/consumer.go` | `Consumer` — fetch-loop `kafka.Reader` → `Parse` → `Batcher` → `Flusher`; коммит offset'ов только после успешного флаша |
-| `internal/consumer/flusher.go` | `Flusher` — группировка по `AggregateType`, FSM-порядок, фильтр идемпотентности, вызов контракта, выставление статусов в БД |
-| `internal/consumer/reconcile.go` | `Reconciler` — фоновая сверка stuck-строк `SENT`/`FAILED`; общий примитив `reconcileReceipt` |
+| `internal/chain/convert.go` | `UUIDToUint256` — `keccak256(UUID-строка) → *big.Int` (совпадает с контрактом) |
+| `internal/consumer/message.go` | `ActionEnvelope` + `Parse()` — разбор Kafka-сообщения подписанного действия |
+| `internal/consumer/batcher.go` | `Batcher` — потокобезопасный аккумулятор окна; флаш по размеру/времени; `Unshift` для retry |
+| `internal/consumer/consumer.go` | `Consumer` — fetch-loop → `Parse` → `Batcher` → `Flusher.Send` → `Pipeline` |
+| `internal/consumer/flusher.go` | `Flusher` — idempotency-фильтр, `Send` (сегменты), Confirm-примитивы |
+| `internal/consumer/flusher_actions.go` | `splitSegments`, `sendActions` — чанкирование по calldata, терминальные фейлы |
+| `internal/consumer/flusher_confirm.go` | `Confirm` — receipt → `applyActionOutcomes` (COMMITTED / FAILED + reject_reason) |
+| `internal/consumer/pipeline.go` | `Pipeline` — окно in-flight tx + FIFO-collector, коммит Kafka-offset'ов по подтверждённому префиксу |
+| `internal/consumer/reconcile.go` | `Reconciler` — фоновая сверка stuck-строк; `reconcileReceipt`/`applyActionOutcomes` |
 | `internal/store/pool.go` | `NewPool` — `pgxpool` (`MaxConns=10`, `MinConns=1`, `MaxConnIdleTime=30s`, startup-ping 10s) |
-| `internal/store/onchain_events.go` | `Repository` — весь SQL по `public.onchain_events`; тип `ReconcileRow` |
+| `internal/store/onchain_events.go` | `Repository` — весь SQL по `public.onchain_events` (включая `reject_reason`); тип `ReconcileRow` |
 | `internal/dlq/producer.go` | `Producer` — `kafka.Writer` (acks `RequireAll`) в DLQ-топик; `PublishAll` сохраняет исходный payload и добавляет метаданные |
 | `internal/handler/handler.go` | `Handler`: `/health`, `/onchain/tx/{hash}`, `/registry/keys/{keyId}` (§9) |
+| `cmd/registry-cli/` | CLI владельца консорциума: `register-org` / `add-admin-key` / `list` ([ledger-adapter/README.md](../../ledger-adapter/README.md)) |
+| `cmd/kms-init/` | bootstrap kms-профиля: ключи в Web3Signer, фондирование, allow-list, публикация identifier'ов |
 
-Принцип «многих маленьких файлов»: каждый пакет имеет узкую ответственность, интерфейсы определены на стороне потребителя (`consumer`), а конкретные реализации (`chain.Client`, `store.Repository`, `dlq.Producer`) их удовлетворяют.
+Принцип «многих маленьких файлов»: каждый пакет имеет узкую ответственность, интерфейсы определены на стороне потребителя (`consumer`, `handler`), а конкретные реализации (`chain.Client`, `store.Repository`, `dlq.Producer`) их удовлетворяют.
 
 ---
 
@@ -60,456 +68,325 @@ WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter 
 const eventsTopic = "wms.events.v1"
 ```
 
-> **Один топик, не топик-на-стадию.** В ранней версии было по топику на `aggregate_type`. Текущий код (рефактор мая 2026) использует один топик `wms.events.v1`; стадия передаётся в Kafka-заголовке `aggregate_type`, а не выводится из имени топика. README-таблица с четырьмя топиками (`wms.receiving.v1` и т.п.) отражает прошлый дизайн.
+> **Одна партиция — часть контракта.** Порядок действий в цепи равен порядку коммитов в БД; на этом держится семантика отзыва ключа (ADR-0001 §7). Расширять топик до >1 партиции нельзя.
 
 **Consumer group** — env `KAFKA_GROUP_ID`, по умолчанию `ledger-adapter`.
 
-**Конфигурация `kafka.ReaderConfig`** (`internal/consumer/consumer.go`):
+**Конфигурация `kafka.ReaderConfig`** (`internal/consumer/consumer.go`): `MinBytes=1`, `MaxBytes=10e6` (10 MB), `MaxWait=100ms`.
 
-| Параметр | Значение |
-|---|---|
-| `MinBytes` | `1` |
-| `MaxBytes` | `10e6` (10 MB) |
-| `MaxWait` | `100ms` |
+**Формат сообщения** (выставляется Debezium Outbox EventRouter; соединяется с ADR-0001 §9):
 
-**Формат сообщения** (выставляется Debezium Outbox EventRouter):
-
-| Поле | Источник | Назначение |
+| Поле | Источник | Содержимое |
 |---|---|---|
-| Key | `aggregate_id` (UUID товара) | `Message.ProductID` |
-| Header `id` | `event_id` (UUID события) | `Message.EventID` |
-| Header `aggregate_type` | `receiving` / `putaway` / `picking` / `shipping` | `Message.AggregateType` |
-| Value | сырой outbox-payload | непрозрачен для адаптера; сохраняется для republish в DLQ |
+| Key | `aggregate_id` | `actionId` — обязан совпадать с header `id` |
+| Header `id` | `event_id` | UUID действия (`Message.EventID`) |
+| Header `aggregate_type` | `aggregate_type` | **`signed_action`** — единственное принимаемое значение |
+| Value | колонка `payload` | JSON-строка с конвертом действия (ниже) |
+
+Конверт (`ActionEnvelope` в `message.go`): `version` (1), `actionId`, `actionType` (1–6), `itemIds` (UUID товаров), `detailsHash` (только складские), `subjectKey` (qx/qy регистрируемого ключа — только ключевые), `keyId` (ключ подписанта) и `webauthn` (`authenticatorData`, `clientDataJSON`, `challengeIndex`, `typeIndex`, `r`, `s`).
 
 **Цикл обработки** (`Consumer.Run`):
 
-1. Goroutine `fetchLoop` читает сообщения из `kafka.Reader` в канал `msgCh`.
-2. Основной `select` обрабатывает: отмену контекста, ошибки чтения, новые сообщения и тикер 50ms (для флаша по таймауту).
-3. Каждое сообщение проходит `Parse`; ошибка парсинга → публикация в DLQ (offset всё равно коммитится, чтобы не зациклиться на «ядовитом» сообщении).
-4. Валидное сообщение кладётся в `Batcher`.
-5. По `ShouldFlush()` (размер ≥ `BATCH_SIZE` или прошло `BATCH_TIMEOUT`) вызывается `flush`.
-6. `flush`: `Batcher.Drain()` → `Flusher.Flush()` → коммит Kafka-offset'ов. При ошибке флаша — `Batcher.Unshift()` возвращает сообщения обратно, **offset'ы не коммитятся** (at-least-once).
-7. При завершении (ctx cancel) — `finalFlush` с фоновым контекстом на 5 секунд.
+1. `fetchLoop` читает сообщения в канал; основной `select`: отмена, ошибки чтения, сообщения и тикер 50ms.
+2. Каждое сообщение проходит `Parse`; ошибка парсинга (в т.ч. `aggregate_type ≠ signed_action`) → DLQ, offset коммитится **в FIFO-порядке через pipeline** (zero-tx batch), чтобы не зациклиться на «ядовитом» сообщении.
+3. Валидное сообщение кладётся в `Batcher`; по `ShouldFlush()` (размер ≥ `BATCH_SIZE` или прошло `BATCH_TIMEOUT`) окно дренируется.
+4. `Flusher.Send` режет окно на сегменты и чанки и возвращает отправленные tx; `Consumer` кладёт их в `Pipeline.Submit`; при transient-ошибке — `Batcher.Unshift` и retry на следующем тике, offset'ы не коммитятся.
+5. Collector (одна горутина) подтверждает batch'и FIFO и коммитит offsets по полностью подтверждённому batch'у (§5).
+6. На завершении (ctx cancel) — graceful drain окна.
 
-> Consumer работает **в одной goroutine**. Последовательная обработка батчей — необходимое условие для FSM-упорядочивания (см. §4). Параллельные consumer-goroutine сломали бы гарантии порядка.
+> Consumer работает **в одной goroutine** — условие сохранения Kafka-порядка в nonce-цепочке signer'а.
 
 ---
 
-## 4. Batch-flusher
+## 4. Send: окно → сегменты → чанки
 
-`Flusher` (`internal/consumer/flusher.go`) — сердце пайплайна. Он принимает дренированный батч смешанных по стадии сообщений и выполняет их в строгом FSM-порядке.
-
-### Окно и размер батча
+### Окно
 
 | Параметр | Env | По умолчанию | Смысл |
 |---|---|---|---|
-| Размер | `BATCH_SIZE` | `10` | макс. сообщений в одном флаше (и, как следствие, в одной транзакции под-батча) |
+| Размер окна | `BATCH_SIZE` | `10` | макс. сообщений в одном слитом окне |
 | Окно | `BATCH_TIMEOUT` | `100ms` | макс. время накопления до флаша по таймауту |
+| In-flight tx | `PIPELINE_WINDOW` | `3` | сколько batch-tx держать неподтверждёнными одновременно; зажимается сверху до `perSignerWindow = 8` (50% от `TxPoolAccountSlots=16` узла) |
 
-`Batcher.ShouldFlush()` возвращает `true`, если `len(msgs) >= maxSize` **или** `time.Since(firstAt) >= timeout`.
+### Сегменты
 
-### FSM-порядок и группировка
+`Flusher.Send` (`splitSegments` в `flusher_actions.go`) режет окно на **подряд идущие** сегменты одного вида: складские действия (`WarehouseAction != nil`) и ключевые (`KeyAction != nil`). Порядок сообщений внутри сегмента сохраняется — отзыв ключа нельзя переставить раньше действий, которые были до него (ADR-0001 §9). Сегменты обрабатываются в Kafka-порядке, все tx уходят с одного signer'а одной nonce-цепочкой.
 
-`Flusher.Flush` группирует сообщения по `AggregateType`, затем обрабатывает под-батчи в фиксированном порядке `fsmOrder`:
-
-```go
-fsmOrder = []string{"receiving", "putaway", "picking", "shipping"}
-```
-
-Сообщения с неизвестным `aggregate_type` уходят в DLQ. Если под-батч падает, `Flush` возвращает ошибку **без коммита offset'ов**; на retry уже-`COMMITTED` события отфильтровываются в `filterAndMarkPending`.
-
-> FSM-порядок гарантируется **внутри окна флаша**, а не глобально. События разных окон упорядочены Kafka-offset'ами (consumer одногоупен). В рамках одного смешанного батча `receiving` всегда обрабатывается раньше `putaway` и т.д.
-
-### Соответствие стадии и функции контракта
-
-`BatchCall` диспетчеризует по карте `aggregateToMethod` (`internal/chain/client.go`):
-
-| `AggregateType` | Solidity-метод | On-chain переход |
+| Вид сегмента | Метод | Контракт |
 |---|---|---|
-| `receiving` | `batchAccept(uint256[] eventIds, uint256[] itemIds)` | `None → Accepted` |
-| `putaway` | `batchPutAway(uint256[] eventIds, uint256[] itemIds)` | `Accepted → PutAway` |
-| `picking` | `batchPick(uint256[] eventIds, uint256[] itemIds)` | `PutAway → Picked` |
-| `shipping` | `batchShip(uint256[] eventIds, uint256[] itemIds)` | `Picked → Shipped` |
+| складские действия | `applyActions(Action[])` | `SignedMappingWMS` (`CONTRACT_ADDR`) |
+| ключевые действия | `applyKeyActions(KeyAction[])` | `ConsortiumRegistry` (`REGISTRY_ADDR`) |
 
-Точные сигнатуры, события и условия revert контракта — см. [Smart Contract Reference](smart-contract-reference.md).
+Без `REGISTRY_ADDR` ключевые действия терминально фейлятся («applyKeyActions: contract not configured» — DLQ + FAILED), складские работают.
 
-### Пайплайн `flushSubBatch`
+### Пайплайн `sendActions` (для каждого сегмента)
 
-Для каждого под-батча (`Flusher.flushSubBatch`):
+1. `filterAndMarkPending` — фильтр идемпотентности (см. §6), вставка новых строк со статусом `PENDING`.
+2. `maxActionChunk` — жадная упаковка подряд идущих действий в **чанк ≤ 120 000 байт calldata** (`maxActionCalldata`): узел subnet-evm отклоняет tx больше 131 072 байт, при таком объёме газ не упирается в лимит блока (ADR-0001 §9–10). Действие, не пакующееся в ABI, или превышающее лимит в одиночку, — терминальный фейл одного действия (DLQ + FAILED), остальные идут дальше.
+3. `chain.SendCalldata` — отправка готовых calldata по общему пути `send`: локальный монотонный nonce (seed из `PendingNonceAt` один раз, `++` только после успешной отправки), `SuggestGasPrice × 3` (запас против underpricing in-flight tx при росте base fee), `EstimateGas`, gas limit = **оценка × 3/2** (`gasLimitHeadroomNum/Den` — запас на разрыв «estimate видит ранний статус товара → к майнингу статус уже изменился»), legacy-tx, подпись `TxSigner`, `SendTransaction`. Ошибки: revert на estimate → `ErrChainRevert` (терминально), сеть/RPC/KMS-недоступность → `ErrChainTransient` (retry, nonce не тратится).
+4. `store.MarkSent` — `tx_hash` + статус `SENT`; tx попадает в `InflightTx` окна pipeline.
 
-1. `filterAndMarkPending` — фильтр идемпотентности (см. §5), вставка новых строк со статусом `PENDING`.
-2. `buildBatchArgs` — конвертация `event_id`/`product_id` (UUID) → `uint256` через `UUIDToUint256`.
-3. `chain.BatchCall` — отправка транзакции в контракт.
-4. `store.MarkSent` — `tx_hash` + статус `SENT`.
-5. `chain.WaitReceipt` — блокирующий поллинг receipt'а с таймаутом `RECEIPT_POLL_TIMEOUT`.
-6. `store.MarkCommitted` (`receipt.Status == 1`) **или** `recordFailure` (`receipt.Status == 0` либо таймаут).
+> **Свойство порядка.** Жадная упаковка в calldata-лимит сохраняет Kafka-порядок и внутри чанка, и между чанками/tx: nonce-цепочка одного signer'а исполняется строго по порядку отправки.
 
-### Поллинг receipt'а
+## 5. Pipeline, Confirm и исходы действий
 
-`chain.WaitReceipt` создаёт дочерний контекст с таймаутом и поллит с экспоненциальным backoff: `50ms → 100ms → 200ms → 500ms → 1s → 2s` (далее держит 2s). `ethereum.NotFound` → продолжаем поллинг; **любая другая RPC-ошибка → немедленный возврат** (без повторов). Кратковременный сбой RPC во время поллинга приводит к таймауту и `recordFailure`; восстановление — через reconcile-loop.
+`Pipeline` (`pipeline.go`) — окно in-flight batch'ей и единственная горутина-collector:
 
-### Обработка отказа
+- `Submit` блокируется при заполненном окне (backpressure; `PIPELINE_WINDOW`).
+- Collector подтверждает tx одного batch'а **параллельно** (до 16 одновременных receipt-poll'ов, `maxConfirmConcurrency`), порядок между batch'ами — FIFO.
+- Kafka-offsets batch'а коммитятся только когда **все** его tx терминально успешны. Пустой txs (всё скиплнулось/DLQ) проходит через collector тоже — коммит offset'ов строго в очереди.
+- `ErrConfirmStalled` (tx не замайнилась и не ревертнулась за `RECEIPT_POLL_TIMEOUT`) → окно бросается **без коммита offsets** → `ErrPipelineStalled` → процесс рестартует: свежий nonce (`ReseedNonce` не нужен — рестарт пересеивает его), Kafka redelivers незакоммиченное окно, SENT-строки подтягивает reconcile. Recovery = рестарт процесса, не in-place reopen.
 
-`recordFailure` сначала публикует в DLQ, затем вызывает `MarkFailed`. Порядок «DLQ → MarkFailed» намеренный: если бы `MarkFailed` шёл первым и затем падал DLQ, FAILED-строка была бы пропущена `filterAndMarkPending` на retry, а её DLQ-запись так и не появилась бы (тихая потеря). Обратный порядок ценой возможного дубля в DLQ исключает потерю.
+`Confirm` (`flusher_confirm.go`) для одной in-flight tx:
 
----
+1. `chain.WaitReceipt` — поллинг с экспоненциальным backoff `50ms → … → 2s`, таймаут `RECEIPT_POLL_TIMEOUT`; `ethereum.NotFound` → продолжаем, другая RPC-ошибка → немедленный возврат (stall).
+2. `receipt.Status == 0` → `recordFailure` (DLQ → MarkFailed, «execution reverted»).
+3. Успех → `applyActionOutcomes`: резолверы складских (`SignedMappingWMS`) и ключевых (`ConsortiumRegistry`) действий разбирают исходы **каждого действия**:
+   - логи receipt'а своего контракта: `ActionApplied` (topic1 = actionId) → Applied; `ActionRejected` (topic1 = actionId, reason в data) → код причины;
+   - действие без лога в этом receipt'е (повторная отправка, ADR-0001 §6) — fallback по `actionState`: `Applied` → Applied, `Rejected` → reason из журнала (`FilterLogs` по `ActionRejected` с topic1 = actionId), `None` → контракт действие не знает.
+   - Applied → `MarkCommitted`; отклонённые группируются по reason → `MarkRejected` (статус `FAILED` + `reject_reason`); id без исхода ни в одном контракте — ошибка (строки остаются SENT, retry/reconcile).
 
-## 5. Идемпотентность (`event_id` / `processedEventIds`)
+> **Контракт пишет исход на каждое действие** (ADR-0001 §6): batch-транзакция коммитится даже при отклонённых действиях, поэтому `receipt.Status == 1` не означает, что все действия применены — только разбор логов даёт истину.
 
-Идемпотентность реализована на **трёх уровнях**:
+## 6. Идемпотентность (`actionId`)
 
 | Уровень | Механизм | Где |
 |---|---|---|
-| Внутри батча | дедуп по `event_id` через `seen`-map | `filterAndMarkPending` |
-| В БД | `INSERT ... ON CONFLICT (event_id) DO NOTHING` | `InsertPending` + `UNIQUE (event_id)` |
-| On-chain | `mapping(uint256 => bool) processedEventIds` | контракт `BatchMappingWMS` |
+| Внутри окна | дедуп по `event_id` через `seen`-map | `filterAndMarkPending` |
+| В БД | `INSERT ... ON CONFLICT (event_id) DO NOTHING`, `UNIQUE (event_id)` | `InsertPending` |
+| On-chain | `actionState(actionId) != None` → тихий пропуск | оба контракта |
 
-**Логика `filterAndMarkPending`** для каждого сообщения (с предварительным intra-batch дедупом по `event_id`):
+**Логика `filterAndMarkPending`** для каждого сообщения:
 
 | Состояние в БД | Действие |
 |---|---|
 | Нет в БД | `InsertPending` + добавить в pending |
 | Статус `COMMITTED` | skip (уже подтверждено) |
-| Есть `tx_hash` (любой статус) | `reconcileReceipt` — однократная проверка receipt'а, **без переотправки** |
+| Есть `tx_hash` (любой статус) | `reconcileReceipt` — однократная проверка receipt'а, **без переотправки** (tx_hash остаётся стабильным, S2) |
 | Статус `FAILED`, `tx_hash` пуст | skip (терминально, транзакция никогда не отправлялась) |
-| Статус `PENDING`, `tx_hash` пуст | warning + переотправка (добавить в pending) |
+| Статус `PENDING`, `tx_hash` пуст | warning + переотправка; если tx всё же ушла, а `MarkSent` упал — контракт пропустит повтор `actionId`, первая tx осиротеет в БД |
 
-> **On-chain идемпотентность.** Контракт хранит `eventId → bool`. Если адаптер отправит тот же `eventId` дважды (например, после падения между `BatchCall` и `MarkSent`), контракт молча пропустит дубликат. См. известный gap «crash-recovery double-submit» в §10.
-
----
-
-## 6. Reconcile-loop
+## 7. Reconcile-loop
 
 `Reconciler` (`internal/consumer/reconcile.go`) — фоновая read-mostly сверка, которая подтягивает БД к on-chain-истине. **Никогда не переотправляет транзакции.**
 
-`Reconciler.Run` — тикер с периодом `RECONCILE_INTERVAL`; каждый тик вызывает `reconcileOnce`, логирует ошибки, но не падает на транзиентных сбоях.
+`reconcileOnce` каждый тик (`RECONCILE_INTERVAL`):
 
-`reconcileOnce`:
-
-1. `ListReconcilable(minAge)` — выбирает строки `status IN ('SENT','FAILED')` с непустым `tx_hash`, старше `RECONCILE_MIN_AGE`, `ORDER BY updated_at ASC LIMIT 1000`.
+1. `ListReconcilable(minAge)` — строки `status IN ('SENT','FAILED')` с непустым `tx_hash`, **без `reject_reason`** (отклонение контракта — терминальный исход, их не перечитывают), старше `RECONCILE_MIN_AGE`, `ORDER BY updated_at ASC LIMIT 1000`.
 2. Группирует строки по `tx_hash` (одна проверка receipt'а на batch-транзакцию).
-3. Для каждой транзакции вызывает `reconcileReceipt`.
+3. Для каждой транзакции `reconcileReceipt` — тот же примитив, что и в redelivery-пути flusher'а: mined + success → `applyActionOutcomes` (COMMITTED / MarkRejected); mined + revert → `MarkFailed`; не замайнено → строка остаётся как есть.
 
-**`reconcileReceipt`** (общий примитив, без поллинга — одна проверка):
+> **Reconcile-FAILED НЕ публикуется в DLQ** (в отличие от синхронного `recordFailure`). После перехода на подписанные действия revert замайненной tx — редкость (батч не ревертится из-за отклонённого действия); полноценная видимость отказов — открытый TODO(#41).
 
-| Результат | Действие | terminal |
-|---|---|---|
-| `ethereum.NotFound` | строка остаётся как есть | `false` |
-| `receipt.Status == 1` | `MarkCommitted` | `true` |
-| `receipt.Status == 0` | `MarkFailed` (reason: `reconcile: tx reverted on-chain`) | `true` |
+## 8. Хранилище `onchain_events`
 
-> **Reconcile-FAILED НЕ публикуется в DLQ** (в отличие от синхронного `recordFailure`). Это известный gap (TODO #41). Приемлемо, поскольку валидные переходы контракта после фикса больше не ревертятся; полная видимость планируется через reverse-outbox (#41) / chain-status gate (#45).
-
----
-
-## 7. Хранилище `onchain_events`
-
-Таблица `public.onchain_events` **создаётся миграциями WMS** (`wms/migrations/0001_init.up.sql`), не адаптером — у адаптера нет своего раннера миграций, он предполагает, что схема существует. Подробная схема БД — см. [Схема БД](../db/Database_ru_v2.md) и [ER-диаграмма](../data-model/er-diagram.md).
+Таблица `public.onchain_events` **создаётся миграциями WMS** (`wms/migrations/`), не адаптером — у адаптера нет своего раннера миграций, он предполагает, что схема существует. Подробная схема БД — см. [Схема БД](../db/Database_ru_v2.md) и [ER-диаграмма](../data-model/er-diagram.md).
 
 | Колонка | Тип | Примечание |
 |---|---|---|
 | `id` | `bigserial` | PRIMARY KEY |
-| `event_id` | `uuid` | `UNIQUE` (`onchain_events_event_id_unique`) |
-| `aggregate_type` | `text` | `receiving` / `putaway` / `picking` / `shipping` |
+| `event_id` | `uuid` | `UNIQUE`; для подписанных действий = `actionId` |
+| `aggregate_type` | `text` | для действий — `signed_action` |
 | `tx_hash` | `text` | `NULL` до `MarkSent` |
 | `status` | `public.onchain_event_status` | ENUM, по умолчанию `PENDING` |
-| `error_message` | `text` | заполняется `MarkFailed` |
-| `created_at` | `timestamptz` | `DEFAULT now()` |
-| `updated_at` | `timestamptz` | обновляется триггером `trg_onchain_events_set_updated_at` |
+| `reject_reason` | `smallint` | код `RejectReason` (ADR-0001 §6), если контракт отклонил действие (миграция 0015) |
+| `error_message` | `text` | заполняется `MarkFailed`/`MarkRejected` |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` — триггером |
 
-**ENUM** `public.onchain_event_status`: `PENDING`, `SENT`, `COMMITTED`, `FAILED`.
-
-**Индексы:** `idx_onchain_events_status` на `(status)`, `idx_onchain_events_created_at` на `(created_at)`.
+**ENUM** `public.onchain_event_status`: `PENDING`, `SENT`, `COMMITTED`, `FAILED`. Индексы: `idx_onchain_events_status`, `idx_onchain_events_created_at`.
 
 **Статусная машина строки:**
 
 ```
-PENDING ──MarkSent──► SENT ──receipt.Status=1──► COMMITTED  (терминально)
-                            │
-                            └──receipt.Status=0 / timeout / revert──► FAILED  (терминально)
+PENDING ──MarkSent──► SENT ──receipt + логи──► COMMITTED (Applied)
+                            │              └─► FAILED + reject_reason (ActionRejected)
+                            └─revert / timeout / RPC-fail──► FAILED
 ```
 
-**SQL-операции репозитория** (`store.Repository`):
-
-| Метод | SQL | Защита |
-|---|---|---|
-| `Exists` | `SELECT 1 ... WHERE event_id=$1` | — |
-| `InsertPending` | `INSERT ... ON CONFLICT (event_id) DO NOTHING` | идемпотентно |
-| `StatusAndTx` | `SELECT status::text, tx_hash WHERE event_id=$1` | — |
-| `MarkSent` | `UPDATE ... SET tx_hash=$2, status='SENT' WHERE event_id=ANY($1) AND status <> 'COMMITTED'` | guard `<> COMMITTED` |
-| `MarkCommitted` | `UPDATE ... SET status='COMMITTED' WHERE event_id=ANY($1)` | forward-only безопасно |
-| `MarkFailed` | `UPDATE ... SET status='FAILED', tx_hash=COALESCE(NULLIF($2,''), tx_hash), error_message=$3 WHERE event_id=ANY($1) AND status <> 'COMMITTED'` | guard `<> COMMITTED` |
-| `ListReconcilable` | `SELECT event_id, tx_hash WHERE status IN ('SENT','FAILED') AND tx_hash IS NOT NULL AND tx_hash <> '' AND updated_at < now() - make_interval(secs => $1) ORDER BY updated_at ASC LIMIT 1000` | `LIMIT 1000` |
+**SQL-операции репозитория** (`store.Repository`): `Exists`, `InsertPending` (ON CONFLICT no-op), `StatusAndTx`, `MarkSent` (guard `<> 'COMMITTED'`), `MarkCommitted`, `MarkFailed` (guard `<> 'COMMITTED'`, tx_hash не затирается пустым), `MarkRejected` (FAILED + reject_reason + error_message), `Status`, `ListReconcilable`.
 
 > **Guard `status <> 'COMMITTED'` в `MarkSent`/`MarkFailed`** критичен: если reconcile-loop пометил строку `COMMITTED`, а запоздавший `WaitReceipt`-таймаут вызовет `MarkFailed` на ту же строку — без guard'а `COMMITTED` был бы перезатёрт на `FAILED`. Guard делает такой `UPDATE` no-op.
 
----
+## 9. DLQ
 
-## 8. DLQ
-
-`dlq.Producer` (`internal/dlq/producer.go`) — `kafka.Writer` с acks `RequireAll` и балансировщиком `kafka.Hash`. Топик — env `DLQ_TOPIC`, по умолчанию `wms.dlq.v1`.
-
-`PublishAll(ctx, msgs []*Message, reason string)` для каждого сообщения формирует `kafka.Message`, копируя исходные key/value/headers и добавляя метаданные:
-
-| Заголовок | Значение |
-|---|---|
-| `original_topic` | исходный топик сообщения |
-| `reason` | причина отправки в DLQ |
-| `failed_at` | RFC3339 UTC timestamp |
+`dlq.Producer` (`internal/dlq/producer.go`) — `kafka.Writer` с acks `RequireAll`; топик — env `DLQ_TOPIC`, по умолчанию `wms.dlq.v1`. `PublishAll` копирует исходные key/value/headers и добавляет заголовки `original_topic`, `reason`, `failed_at` (RFC3339 UTC).
 
 **Что попадает в DLQ:**
 
-- Сообщения с ошибкой парсинга (`Parse` вернул ошибку) и неизвестным `aggregate_type`.
-- Под-батчи, чья синхронная отправка завершилась отказом (`recordFailure`: `receipt.Status=0`, таймаут, `ErrChainRevert`).
+- Сообщения с ошибкой `Parse` — в том числе `aggregate_type ≠ 'signed_action'` (адаптер принимает только подписанные действия).
+- Терминальные фейлы сегмента/чанка через `recordFailure`: контракт не сконфигурирован, действие не пакуется в ABI или превышает calldata-лимит, revert на `EstimateGas` (`ErrChainRevert`), `receipt.Status == 0` в Confirm.
 
-**Что НЕ попадает в DLQ:** строки, помеченные `FAILED` фоновым reconcile-loop (см. §6, TODO #41).
+**Что НЕ попадает в DLQ:** строки, помеченные `FAILED` фоновым reconcile-loop (см. §7, TODO #41).
 
----
+## 10. REST-эндпоинты адаптера
 
-## 9. REST-эндпоинты адаптера
-
-Три эндпоинта, все только на чтение и без аутентификации: они отдают данные, которые и так публичны в цепи. Бизнес-REST-поверхности на запись нет.
+Три эндпоинта, все только на чтение и без аутентификации: они отдают данные, которые и так публичны в цепи. Бизнес-REST-поверхности на запись нет. Порт публикуется только на loopback (`127.0.0.1:8085`); публичный вход — аутентифицированный прокси WMS.
 
 ### `GET /health`
 
-| Свойство | Значение |
-|---|---|
-| Путь | `/health` (точное совпадение `http.ServeMux`) |
-| Аутентификация | нет |
-| Тело запроса | нет |
-| Обработчик | `handler.Handler.Health` |
-
-**Успешный ответ** — `200 OK`, `Content-Type: application/json`:
-
-```json
-{"status":"ok","time":"2026-05-31T04:55:00Z"}
-```
-
-(`time` — RFC3339 UTC; тело собирается inline как `map[string]any`, Go-структуры нет.)
-
-**Ошибки:** не определены. Обработчик всегда пишет 200 (процесс жив = healthy); ошибка записи тела молча игнорируется.
-
-**Вызывающая сторона:** `wms/internal/ledger/client.go` — `Client.HealthCheck()` (GET с таймаутом 5s, ожидает 200).
-
-> **Это liveness-проба, не readiness.** Возвращает 200, пока жив Go-процесс, независимо от доступности Kafka, PostgreSQL или RPC. Добавление readiness-пробы (проверка pool/Kafka/RPC) отслеживается в `TODO(#50)`. E2E-набор компенсирует это отдельным probe'ом готовности consumer'а.
+Liveness-проба: всегда `200 OK`, `{"status":"ok","time":"<RFC3339 UTC>"}`. Не проверяет Kafka/БД/RPC (TODO #50). Вызывающая сторона: `wms/internal/ledger/client.go` — `Client.HealthCheck()`.
 
 ### `GET /onchain/tx/{hash}`
 
-| Свойство | Значение |
-|---|---|
-| Путь | `/onchain/tx/{hash}`, `hash` — `0x` и 64 hex-символа |
-| Аутентификация | нет |
-| Тело запроса | нет |
-| Обработчик | `handler.Handler.TxProof` |
-
-Один живой запрос receipt к RPC, без поллинга, таймаут 4 с.
+Один живой запрос receipt к RPC (без поллинга), таймаут 4 с. `hash` — `0x` и 64 hex-символа.
 
 | Ситуация | Ответ |
 |---|---|
 | `hash` не по формату | `400` `{"error":"INVALID_TX_HASH"}` |
-| нет RPC-клиента или ошибка RPC | `502` `{"error":"CHAIN_UNREACHABLE"}` |
+| нет клиента или ошибка RPC | `502` `{"error":"CHAIN_UNREACHABLE"}` |
 | receipt ещё нет | `200` `{"found":false,"status":"pending"}` |
-| receipt есть | `200` `{"found":true,"status":"success","block_number":123,"confirmations":4,"gas_used":21000}` |
+| receipt есть | `200` `{"found":true,"status":"success"|"failed","block_number":…,"confirmations":…,"gas_used":…}` |
 
-`status` — `success` или `failed` по статусу receipt. `block_number`, `confirmations` и `gas_used` не попадают в ответ, когда равны нулю; `confirmations` — голова цепи минус блок receipt.
-
-**Вызывающая сторона:** `wms/internal/ledger/client.go` — `Client.GetTxReceipt()`; наружу его отдаёт аутентифицированный `GET /onchain/tx/{hash}` WMS.
+Нулевые `block_number`/`confirmations`/`gas_used` в ответ не попадают; `confirmations` = голова цепи минус блок receipt, при отстающей голове зажимается до 0. Вызывающая сторона: `Client.GetTxReceipt()`; наружу его отдаёт аутентифицированный `GET /onchain/tx/{hash}` WMS.
 
 ### `GET /registry/keys/{keyId}`
 
-| Свойство | Значение |
-|---|---|
-| Путь | `/registry/keys/{keyId}`, `keyId` — `0x` и 64 hex-символа (`keccak256(qx ‖ qy)`) |
-| Аутентификация | нет |
-| Тело запроса | нет |
-| Обработчик | `handler.Handler.RegistryKey` |
-
-Читает `getKey(bytes32)` у `ConsortiumRegistry` (адрес из `REGISTRY_ADDR`) через `chain.Registry`, таймаут 4 с.
+Читает `getKey(bytes32)` у `ConsortiumRegistry` (адрес из `REGISTRY_ADDR`), таймаут 4 с. `keyId` — `0x` и 64 hex-символа (`keccak256(qx ‖ qy)`).
 
 | Ситуация | Ответ |
 |---|---|
 | `keyId` не по формату | `400` `{"error":"INVALID_KEY_ID"}` |
 | `REGISTRY_ADDR` не задан или ошибка RPC | `502` `{"error":"CHAIN_UNREACHABLE"}` |
 | ключа нет в реестре | `200` `{"found":false}` |
-| ключ есть | `200` `{"found":true,"org_id":"<uuid>","role":"admin","active":true}` |
+| ключ есть | `200` `{"found":true,"org_id":"<uuid>","role":"admin"|"operator","active":true|false}` |
 
-`role` — `admin` или `operator`; `active` становится `false` после отзыва ключа.
+Вызывающая сторона: сервис passkey WMS — при чтении синхронизирует статус ключа (`PENDING` → `ACTIVE` или `REVOKED`).
 
-**Вызывающая сторона:** сервис passkey WMS: при чтении синхронизирует статус ключа (`PENDING` → `ACTIVE` или `REVOKED`).
+## 11. Конфигурация (env-переменные)
 
----
+Все переменные читаются `config.Load()` (`internal/config/config.go`). Для секретов поддерживается `<NAME>_FILE`-override: если `<NAME>_FILE` задан и файл читается, используется его trim'нутое содержимое; если файл не найден — warning в stderr и fallback на прямой env. Так профиль `test` подставляет артефакты `contract-deploy` из тома `shared_state`.
 
-## 10. Конфигурация (env-переменные)
-
-Все переменные читаются `config.Load()` (`internal/config/config.go`). Для пяти обязательных секретов поддерживается `<NAME>_FILE`-override: если `<NAME>_FILE` задан и файл читается, используется его trim'нутое содержимое; если файл не найден — warning в stderr и fallback на прямой env.
-
-| Переменная | Обяз. | По умолчанию | Тип | Описание |
-|---|:---:|---|---|---|
-| `KAFKA_BROKERS` | да | — | `string` | CSV-список брокеров. Override: `KAFKA_BROKERS_FILE` |
-| `DB_URL` | да | — | `string` | pgx DSN. Override: `DB_URL_FILE` |
-| `RPC_URL` | да | — | `string` | RPC Avalanche Subnet-EVM. Override: `RPC_URL_FILE` |
-| `CONTRACT_ADDR` | да | — | `string` | hex-адрес `BatchMappingWMS`. Override: `CONTRACT_ADDR_FILE` |
-| `REGISTRY_ADDR` | нет | — | `string` | hex-адрес `ConsortiumRegistry`; без него `GET /registry/keys/{keyId}` отвечает 502. Override: `REGISTRY_ADDR_FILE` |
-| `PRIVATE_KEY` | да (static) | — | `string` | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE`. В kms-режиме не читается |
-| `SIGNER_MODE` | нет | `static` | `string` | `static` \| `kms`: источник подписи — локальные ключи (только локальная разработка: приватник в env открытым текстом) или внешний Web3Signer |
-| `KMS_URL` | да (kms) | — | `string` | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
-| `KMS_PUBLIC_KEYS` | да (kms) | — | `string` | CSV identifier'ов (uncompressed X\|\|Y pubkey, 0x+128 hex) из `GET /api/v1/eth1/publicKeys`; определяет и multi-signer шардирование. Override: `KMS_PUBLIC_KEYS_FILE` |
-| `PORT` | нет | `8085` | `string` | HTTP-порт эндпоинтов адаптера (§9) |
-| `KAFKA_GROUP_ID` | нет | `ledger-adapter` | `string` | Kafka consumer group |
-| `DLQ_TOPIC` | нет | `wms.dlq.v1` | `string` | Kafka DLQ-топик |
-| `BATCH_SIZE` | нет | `10` | `int` | макс. событий на транзакцию; невалидный int → default + warning |
-| `BATCH_TIMEOUT` | нет | `100ms` | `time.Duration` | макс. окно накопления; невалидный → default + warning |
-| `RECEIPT_POLL_TIMEOUT` | нет | `30s` | `time.Duration` | макс. ожидание `WaitReceipt` |
-| `RECONCILE_INTERVAL` | нет | `30s` | `time.Duration` | период reconcile-sweep'а; должен быть `> 0` |
-| `RECONCILE_MIN_AGE` | нет | `1m` | `time.Duration` | мин. возраст stuck-строки для reconcile; должен быть `> RECEIPT_POLL_TIMEOUT` |
-| `LOG_LEVEL` | нет | `info` | `string` | **зарезервировано**: читается в `Config.LogLevel`, но пока не подключено к slog (`main.go` создаёт `slog.NewJSONHandler(os.Stdout, nil)` без level-фильтра) |
+| Переменная | Обяз. | По умолчанию | Описание |
+|---|:---:|---|---|
+| `KAFKA_BROKERS` | да | — | CSV-список брокеров. Override: `KAFKA_BROKERS_FILE` |
+| `DB_URL` | да | — | pgx DSN. Override: `DB_URL_FILE` |
+| `RPC_URL` | да | — | RPC Avalanche Subnet-EVM. Override: `RPC_URL_FILE` |
+| `CONTRACT_ADDR` | да | — | hex-адрес `SignedMappingWMS`. Override: `CONTRACT_ADDR_FILE` |
+| `REGISTRY_ADDR` | нет | — | hex-адрес `ConsortiumRegistry`; невалидный адрес — ошибка старта, пустое значение — ключевые действия терминально фейлятся, `/registry/keys` отвечает 502. Override: `REGISTRY_ADDR_FILE` |
+| `SIGNER_MODE` | нет | `static` | `static` \| `kms` — источник подписи: локальный ключ (только локальная разработка) или внешний Web3Signer |
+| `PRIVATE_KEY` | да (static) | — | hex ECDSA-ключ (с/без `0x`). Override: `PRIVATE_KEY_FILE`. В kms-режиме не читается |
+| `PRIVATE_KEYS` | нет | — | историческая CSV-форма; signer ровно один — при >1 значении старт падает |
+| `KMS_URL` | да (kms) | — | базовый URL Web3Signer (eth1 mode). Override: `KMS_URL_FILE` |
+| `KMS_PUBLIC_KEYS` | да (kms) | — | identifier единственного ключа (uncompressed X\|\|Y, из `GET /api/v1/eth1/publicKeys`); дубликаты и >1 ключа отклоняются. Override: `KMS_PUBLIC_KEYS_FILE` |
+| `PORT` | нет | `8085` | HTTP-порт эндпоинтов адаптера (§10) |
+| `KAFKA_GROUP_ID` | нет | `ledger-adapter` | Kafka consumer group |
+| `DLQ_TOPIC` | нет | `wms.dlq.v1` | Kafka DLQ-топик |
+| `BATCH_SIZE` | нет | `10` | макс. сообщений в окне; невалидный int → default + warning |
+| `BATCH_TIMEOUT` | нет | `100ms` | окно накопления; невалидный → default + warning |
+| `PIPELINE_WINDOW` | нет | `3` | in-flight batch-tx; зажимается до `perSignerWindow = 8` |
+| `RECEIPT_POLL_TIMEOUT` | нет | `30s` | макс. ожидание `WaitReceipt` |
+| `RECONCILE_INTERVAL` | нет | `30s` | период reconcile-sweep'а; должен быть `> 0` |
+| `RECONCILE_MIN_AGE` | нет | `1m` | мин. возраст stuck-строки для reconcile |
+| `LOG_LEVEL` | нет | `info` | **зарезервировано**: читается в `Config.LogLevel`, но не подключено к slog (`main.go` создаёт `slog.NewJSONHandler(os.Stdout, nil)` без level-фильтра) |
 
 **Инварианты, проверяемые на старте** (`Load()` возвращает ошибку и прерывает запуск):
 
-- `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT` — иначе reconcile-loop мог бы гоняться с in-flight `WaitReceipt` флашера и перезаписать статус строки. Значения по умолчанию (`1m > 30s`) удовлетворяют инварианту.
-- `RECONCILE_INTERVAL > 0` — иначе `time.NewTicker` в reconcile-loop паникует. `time.ParseDuration` принимает `0s`/`-5s` без ошибки, поэтому проверка явная.
+- **Signer ровно один** — в static и kms: подписанные действия держат Kafka-порядок одной nonce-последовательностью, multi-signer шардирование нарушило бы порядок отзыва ключа (ADR-0001 §9). Отклоняется `PRIVATE_KEYS` с >1 ключом и `KMS_PUBLIC_KEYS` с >1 identifier'ом.
+- `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT` — иначе reconcile-loop гонялся бы с in-flight `WaitReceipt` флашера.
+- `RECONCILE_INTERVAL > 0` — иначе `time.NewTicker` в reconcile-loop паникует (`time.ParseDuration` принимает `0s` без ошибки).
+- `PIPELINE_WINDOW ≥ 1`; значения выше потолка зажимаются с warning.
 
-> **Hardcoded, не настраивается через env:** конфигурация пула (`MaxConns=10`, `MinConns=1`, `MaxConnIdleTime=30s`, startup-ping 10s) и `kafka.ReaderConfig` (`MinBytes=1`, `MaxBytes=10MB`, `MaxWait=100ms`).
+> **Hardcoded, не настраивается через env:** пул (`MaxConns=10`, `MinConns=1`, `MaxConnIdleTime=30s`, startup-ping 10s), `kafka.ReaderConfig` (`MinBytes=1`, `MaxBytes=10MB`, `MaxWait=100ms`), calldata-лимит чанка (120 000 байт), headroom'ы цены/лимита газа, `maxConfirmConcurrency = 16`.
 
----
-
-## 11. Точка входа `cmd/adapter/main.go`
+## 12. Точка входа `cmd/adapter/main.go`
 
 Порядок сборки в `run()`:
 
 1. `config.Load()` — валидация env и инвариантов.
-2. `store.NewPool(ctx, cfg.DbURL)` — `pgxpool`, startup-ping (10s).
-3. `store.NewRepository(pool)`.
-4. `buildSigners(cfg)` + цикл `chain.NewClientWithSigner(...)` — один Client на signer: в static-режиме signer'ы — это `PRIVATE_KEYS` (fallback `PRIVATE_KEY`), в kms — по одному на каждый `KMS_PUBLIC_KEYS` (адрес выводится из public key, приватник адаптеру не нужен). Каждый Client логирует адрес signer'а. 
-5. `dlq.NewProducer(brokers, cfg.DLQTopic)`.
-6. `consumer.NewFlusher(cli, repo, prod, cfg.ReceiptPollTimeout, log)`.
-7. `consumer.NewReconciler(cli, repo, cfg.ReconcileInterval, cfg.ReconcileMinAge, log)`.
-8. `errgroup.WithContext(rootCtx)` — две goroutine:
-   - **g1 (Consumer):** `consumer.NewConsumer(brokers, "wms.events.v1", cfg.KafkaGroupID, flusher, prod, cfg.BatchSize, cfg.BatchTimeout, tlog).Run(gCtx)` — одна goroutine, один топик.
-   - **g2 (Reconciler):** `reconciler.Run(gCtx)`.
-9. `startHTTPServer(log, cfg.Port)` — `http.Server` на `:8085`, `ReadHeaderTimeout=5s`.
-10. На `SIGTERM`/`SIGINT`: отмена контекста → Consumer `finalFlush` (5s) → `g.Wait()` → `srv.Shutdown` (10s).
+2. `store.NewPool` + `store.NewRepository`.
+3. `buildSigner(cfg)` — ровно один `TxSigner`: static (`PrivateKeys[0]`, fallback `PRIVATE_KEY`) или kms (`KMS_PUBLIC_KEYS[0]`).
+4. `chain.NewClientWithSigner` — один клиент обслуживает и отправку, и receipt-чтения (receipt'ы node-global); логирует адрес signer'а.
+5. `assertSignersFunded` — fail-fast, если signer не профинансирован (иначе out-of-funds реверты под нагрузкой).
+6. Отдельный `ethclient` для read-only резолверов: `NewWarehouseActions(CONTRACT_ADDR)` — всегда, `NewRegistry(REGISTRY_ADDR)` — при заданном адресе.
+7. `dlq.NewProducer`; `Flusher` (+`WithWarehouseActions`/`WithRegistry`), `Reconciler` (те же резолверы).
+8. `errgroup`: g1 — `Consumer.Run` (fetch → batcher → Send → Pipeline), g2 — `Reconciler.Run`.
+9. `startHTTPServer` на `:PORT` (`ReadHeaderTimeout=5s`).
+10. На `SIGTERM`/`SIGINT`: отмена контекста → graceful drain окна → `g.Wait()` → `srv.Shutdown` (10s).
 
----
-
-## 12. Ключевые типы и сигнатуры
-
-### Интерфейсы (определены на стороне `consumer`, для DI/тестов)
+## 13. Ключевые типы и сигнатуры
 
 ```go
-// internal/consumer/flusher.go
+// internal/consumer — интерфейсы для DI/тестов, определены на стороне потребителя
 type ChainCaller interface {
-    BatchCall(ctx context.Context, aggregateType string, eventIDs, itemIDs []*big.Int) (common.Hash, error)
+    SendCalldata(ctx context.Context, to common.Address, data []byte) (common.Hash, error)
     TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error)
 }
-
 type Store interface {
-    Exists(ctx context.Context, eventID uuid.UUID) (bool, error)
-    StatusAndTx(ctx context.Context, eventID uuid.UUID) (status, txHash string, err error)
-    InsertPending(ctx context.Context, eventID uuid.UUID, aggType string) error
-    MarkSent(ctx context.Context, ids []uuid.UUID, txHash string) error
-    MarkCommitted(ctx context.Context, ids []uuid.UUID) error
-    MarkFailed(ctx context.Context, ids []uuid.UUID, txHash, reason string) error
+    Exists(ctx, eventID) (bool, error)
+    StatusAndTx(ctx, eventID) (status, txHash string, err error)
+    InsertPending(ctx, eventID, aggType string) error
+    MarkSent(ctx, ids []uuid.UUID, txHash string) error
+    MarkCommitted(ctx, ids []uuid.UUID) error
+    MarkFailed(ctx, ids []uuid.UUID, txHash, reason string) error
+    MarkRejected(ctx, ids []uuid.UUID, txHash string, reason uint8) error
+}
+type ActionResolver interface {   // chain.WarehouseActions / chain.Registry
+    Address() common.Address
+    LogOutcomes(receipt *types.Receipt) (map[uuid.UUID]chain.ActionOutcome, error)
+    StateOutcome(ctx context.Context, id uuid.UUID) (chain.ActionOutcome, bool, error)
 }
 
-type DLQPublisher interface {
-    PublishAll(ctx context.Context, msgs []*Message, reason string) error
-}
-
-// internal/chain/receipt.go
-type ReceiptFetcher interface {
-    TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error)
-}
-```
-
-`*chain.Client` удовлетворяет `ChainCaller`/`ReceiptFetcher`; `*store.Repository` — `Store`; `*dlq.Producer` — `DLQPublisher`.
-
-### Структуры
-
-```go
-// internal/consumer/message.go — внутренний тип пайплайна, не JSON-DTO
+// internal/consumer/message.go — распарсенное сообщение (одно из Action/WarehouseAction задано)
 type Message struct {
-    EventID       uuid.UUID
-    ProductID     uuid.UUID
-    AggregateType string        // "receiving"/"putaway"/"picking"/"shipping"
-    Topic         string
-    KafkaMsg      kafka.Message
+    EventID         uuid.UUID
+    AggregateType   string // всегда "signed_action"
+    Action          *chain.KeyAction
+    WarehouseAction *chain.WarehouseAction
+    Topic           string
+    KafkaMsg        kafka.Message
 }
 
-// internal/store/onchain_events.go
-type ReconcileRow struct {
-    EventID uuid.UUID
-    TxHash  string
-}
+// internal/consumer/flusher.go — отправленная, но не подтверждённая tx
+type InflightTx struct { Aggregate string; TxHash common.Hash; IDs []uuid.UUID; Msgs []*Message }
 
-// internal/config/config.go
-type Config struct {
-    Port               string
-    KafkaBrokers       string
-    KafkaGroupID       string
-    DbURL              string
-    RpcURL             string
-    ContractAddr       string
-    PrivateKey         string
-    BatchSize          int
-    BatchTimeout       time.Duration
-    DLQTopic           string
-    ReceiptPollTimeout time.Duration
-    ReconcileInterval  time.Duration
-    ReconcileMinAge    time.Duration
-    LogLevel           string
-}
+// internal/chain/keyactions.go
+type WebAuthnAuth struct { R, S [32]byte; ChallengeIndex, TypeIndex *big.Int; AuthenticatorData []byte; ClientDataJSON string }
+type KeyAction struct { ActionId [16]byte; ActionType uint8; Qx, Qy, SignerKeyId [32]byte; Auth WebAuthnAuth }
+type ActionOutcome struct { Applied bool; Reason uint8 }
+
+// internal/chain/warehouseactions.go
+type WarehouseAction struct { ActionId [16]byte; ActionType uint8; ItemIds []*big.Int; DetailsHash, KeyId [32]byte; Auth WebAuthnAuth }
 ```
 
-### Sentinel-ошибки (`internal/chain/client.go`)
+Sentinel-ошибки: `chain.ErrChainRevert` (терминально → DLQ + MarkFailed), `chain.ErrChainTransient` (retry → Unshift), `chain.ErrSignerTransient` (KMS недоступен → транзиентно), `consumer.ErrConfirmStalled` (stall в Confirm), `consumer.ErrPipelineStalled` (фатально → рестарт процесса).
 
-```go
-var ErrChainRevert    = errors.New("chain revert")    // терминально → DLQ + MarkFailed
-var ErrChainTransient = errors.New("chain transient") // retry → Batcher.Unshift, offset'ы не коммитятся
-```
-
-### Ключевые конструкторы и методы
+Конструкторы и методы:
 
 ```go
 func config.Load() (*Config, error)
-
-func chain.NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error)
-func chain.NewClientWithSigner(rpcURL, contractAddr string, s TxSigner) (*Client, error)
-type chain.TxSigner interface { Address() common.Address; SignTx(ctx, tx, chainID) (*types.Transaction, error) }
-func chain.NewStaticSigner(privateKeyHex string) (TxSigner, error)
-func kms.NewSigner(baseURL, identifier string, hc *http.Client) (*kms.Signer, error) // Web3Signer
-func (c *Client) BatchCall(ctx context.Context, aggregateType string, eventIDs, itemIDs []*big.Int) (common.Hash, error)
-func chain.WaitReceipt(ctx context.Context, fetcher ReceiptFetcher, txHash common.Hash, timeout time.Duration) (*types.Receipt, error)
-func chain.UUIDToUint256(s string) *big.Int   // keccak256([]byte(s)) → *big.Int
-
-func consumer.Parse(m *kafka.Message) (*Message, error)
-func (f *Flusher) Flush(ctx context.Context, msgs []*Message) error
-func (r *Reconciler) Run(ctx context.Context) error
-
+func chain.NewClientWithSigner(rpcURL string, s TxSigner) (*Client, error)
+func (c *Client) SendCalldata(ctx, to, data) (common.Hash, error)   // единый nonce/gas/sign/send-путь
+func (c *Client) ReseedNonce(ctx) error
+func chain.WaitReceipt(ctx, fetcher, txHash, timeout) (*types.Receipt, error)
+func chain.UUIDToUint256(s string) *big.Int                          // keccak256([]byte(s)) → *big.Int
+func chain.PackApplyActions([]WarehouseAction) ([]byte, error)       // ABI SignedMappingWMS.applyActions
+func chain.PackApplyKeyActions([]KeyAction) ([]byte, error)          // ABI ConsortiumRegistry.applyKeyActions
+func consumer.Parse(m *kafka.Message) (*Message, error)              // только aggregate_type = signed_action
+func (f *Flusher) Send(ctx, msgs) ([]InflightTx, error)              // сегменты + чанки + MarkSent
+func (f *Flusher) Confirm(ctx, tx *InflightTx) error                 // receipt → applyActionOutcomes
+func (r *Reconciler) Run(ctx) error
 func store.NewRepository(p *pgxpool.Pool) *Repository
-func (r *Repository) ListReconcilable(ctx context.Context, minAge time.Duration) ([]ReconcileRow, error)
-
 func dlq.NewProducer(brokers []string, topic string) *Producer
-func (p *Producer) PublishAll(ctx context.Context, msgs []*Message, reason string) error
 ```
 
-> `Client.sendMethod` держит мьютекс `sendMu` на весь nonce-критичный участок (`PendingNonceAt → SuggestGasPrice → EstimateGas → ChainID → NewTransaction → SignTx → SendTransaction`), сериализуя исходящие транзакции одного `Client`. В продакшене (один consumer-goroutine) мьютекс не контендится; защищает от будущей параллелизации. RPC-ошибки оборачиваются в `ErrChainTransient`, revert на `EstimateGas` — в `ErrChainRevert`. Подпись — через `chain.TxSigner`: static (локальный ecdsa) или `internal/kms` (Web3Signer). KMS-режим: EIP-155 sighash считается локально, Web3Signer подписывает готовый digest (`applyHash=false`), parity восстановления выводится `Ecrecover`-перебором против адреса из public key (v из ответа не доверяется), s нормализуется в low-s (EIP-2); недоступность KMS — `ErrSignerTransient` → `ErrChainTransient` (ретрай, nonce не тратится), 4xx — terminal.
+> `Client.send` держит мьютекс `sendMu` на весь nonce-критичный участок и ведёт локальный монотонный nonce: несколько tx могут уходить не дожидаясь майнинга предыдущих (окно pipeline). RPC-ошибки оборачиваются в `ErrChainTransient`, revert на `EstimateGas` — в `ErrChainRevert`. KMS-режим: EIP-155 sighash считается локально, Web3Signer подписывает готовый digest; недоступность KMS — `ErrSignerTransient` → `ErrChainTransient` (nonce не тратится), 4xx — терминально.
 
----
-
-## 13. Гочи и инварианты (сводка)
+## 14. Гочи и инварианты (сводка)
 
 | Инвариант / гоча | Детали |
 |---|---|
-| `RECONCILE_MIN_AGE > RECEIPT_POLL_TIMEOUT` | Проверяется на старте. Нарушение → reconcile-loop гоняется с in-flight `WaitReceipt`. |
-| Один топик `wms.events.v1` | Стадия — в заголовке `aggregate_type`, не в имени топика. |
-| Один consumer-goroutine | Последовательная обработка — условие FSM-упорядочивания. |
-| Guard `<> COMMITTED` | В `MarkSent`/`MarkFailed` — защита от reconcile-гонки. |
+| Signer ровно один | Проверяется на старте; порядок действий = порядок nonce = порядок Kafka. |
+| Одна партиция `wms.events.v1` | Расширять нельзя — иначе порядок в цепи не гарантирован. |
+| Адаптер принимает только `signed_action` | Любой другой `aggregate_type` → DLQ + коммит offset'а. |
+| Чанк ≤ 120 000 байт calldata | Жадная упаковка с сохранением порядка; одиночное действие сверх лимита — терминальный фейл. |
+| Gas limit = оценка × 3/2 | Запас на разрыв «estimate до записи → майнинг после записи» под окном in-flight. |
+| Guard `<> COMMITTED` | В `MarkSent`/`MarkFailed`/`MarkRejected` — защита от reconcile-гонки. |
+| Reconcile не переотправляет tx | Только подтягивает статус; `reject_reason IS NULL` исключает перечитывание отклонённых. |
 | Reconcile-FAILED не в DLQ | Известный gap, TODO #41. |
-| `WaitReceipt` не повторяет на не-`NotFound` ошибках | Кратковременный RPC-сбой → таймаут → `recordFailure`; восстановление через reconcile. |
-| Crash-recovery double-submit | Если `BatchCall` успешен, но `MarkSent` упал и процесс умер: на рестарте событие в `PENDING` без `tx_hash`, `filterAndMarkPending` переотправляет. Первая tx — осиротевшая (БД её не трекает). On-chain `processedEventIds` (#44) предотвращает двойной переход, но осиротевшая tx не отслеживается. См. `ledger_adapter_bugs.md`. |
+| Stall → рестарт процесса | Окно бросается без коммита offsets; redelivery + reconcile восстанавливают. |
 | `/health` — liveness-only | TODO #50. |
 | `LOG_LEVEL` зарезервирован | Читается, но не подключён к slog. |
 | Нет миграций в репо адаптера | `onchain_events` создаётся миграциями WMS. |
+| Crash-recovery double-submit | `SendCalldata` успешен, `MarkSent` упал, процесс умер: на redelivery событие в `PENDING` без `tx_hash` переотправляется; контракт пропустит повтор `actionId`, первая tx осиротеет в БД. |
 
 Конвенции проекта (Git workflow, Go style, SQL naming) — см. [Конвенции](../CONVENTIONS.md); правила оформления MR — [Гайд по MR](../MR_GUIDE.md); общая архитектура MVP — [Архитектура](../architecture/system-overview.md).
