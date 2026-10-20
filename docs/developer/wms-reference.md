@@ -1120,7 +1120,7 @@ Sentinels (`errors.go`): `ErrOperationNotFound` → 404; `ErrOperationSubmitted`
 | Слой | Что внутри |
 |------|-------------|
 | `service.go` | `BeginRegistration`/`FinishRegistration` (attestation → `passkey_credentials`, `status=PENDING`), `MyPasskey`, `Organization`, `AdminKeyExport`, `DraftKeyRegister`/`DraftKeyRevoke`, `SubmitKeyAction`, `RejectKey` |
-| `status.go` | `syncStatus` — статус `PENDING`/`ACTIVE` ключа обновляется из цепи при чтении (`GetRegistryKey`): активен — `ACTIVE`, иначе `REVOKED`. Ошибки RPC только логируются |
+| `status.go` | `syncStatuses` — статусы `PENDING`/`ACTIVE` ключей обновляются из цепи при чтении одним батч-запросом (`GetRegistryKeys`): активен — `ACTIVE`, иначе `REVOKED`. Ошибки RPC только логируются |
 | `actions_repository.go` | `InsertKeyAction`, `KeyAction`, `SubmitKeyAction` (одна транзакция: lock действия и целевого ключа → проверка состояния → INSERT outbox (`aggregate_type=signed_action`) → `submitted_at`), `RejectPendingPasskey`, `LatestConfirmations` |
 | `envelope.go` | Конверт ключевого действия (`subjectKey`, без `itemIds` и `detailsHash` — их контракт считает сам) |
 

@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -142,14 +143,28 @@ func (m *mockRepo) SubmitKeyAction(ctx context.Context, s KeyActionSubmission) e
 }
 
 type fakeChain struct {
-	key   ledger.RegistryKey
-	err   error
-	calls int
+	key     ledger.RegistryKey            // ответ для каждого запрошенного id
+	keys    map[string]ledger.RegistryKey // ответ per-id; nil — использовать key
+	err     error
+	calls   int
+	lastIDs []string
 }
 
-func (f *fakeChain) GetRegistryKey(_ context.Context, _ string) (ledger.RegistryKey, error) {
+func (f *fakeChain) GetRegistryKeys(_ context.Context, keyIDs []string) (map[string]ledger.RegistryKey, error) {
 	f.calls++
-	return f.key, f.err
+	f.lastIDs = append([]string(nil), keyIDs...)
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make(map[string]ledger.RegistryKey, len(keyIDs))
+	for _, id := range keyIDs {
+		if f.keys != nil {
+			out[id] = f.keys[id]
+			continue
+		}
+		out[id] = f.key
+	}
+	return out, nil
 }
 
 var (
@@ -433,7 +448,8 @@ func TestOrganization_OnlyOwnOrganization(t *testing.T) {
 	}
 }
 
-func TestSyncStatus(t *testing.T) {
+func TestSyncStatuses(t *testing.T) {
+	keyIDHex := func(p *domain.Passkey) string { return "0x" + hex.EncodeToString(p.KeyID[:]) }
 	cases := []struct {
 		name       string
 		status     domain.PasskeyStatus
@@ -476,7 +492,139 @@ func TestSyncStatus(t *testing.T) {
 			if tc.chain.calls != tc.wantCalls {
 				t.Fatalf("adapter calls = %d, want %d", tc.chain.calls, tc.wantCalls)
 			}
+			if tc.wantCalls == 1 {
+				wantID := keyIDHex(livePasskey(adminA, orgA, tc.status))
+				if !reflect.DeepEqual(tc.chain.lastIDs, []string{wantID}) {
+					t.Fatalf("queried ids = %v, want [%s]", tc.chain.lastIDs, wantID)
+				}
+			}
 		})
+	}
+}
+
+// orgPasskey — копия livePasskey с уникальным ключом (QX variant) и credential id.
+func orgPasskey(userID, org uuid.UUID, status domain.PasskeyStatus, variant byte) domain.Passkey {
+	p := *livePasskey(userID, org, status)
+	p.QX[0] = variant
+	p.KeyID = keyID(p.QX, p.QY)
+	p.CredentialID = []byte{variant}
+	return p
+}
+
+func keyIDHex(p domain.Passkey) string { return "0x" + hex.EncodeToString(p.KeyID[:]) }
+
+func TestOrganization_StatusSyncOneRequest(t *testing.T) {
+	third := uuid.MustParse("0192aaaa-0000-7000-8000-0000000000a3")
+	fourth := uuid.MustParse("0192aaaa-0000-7000-8000-0000000000a4")
+	members := map[uuid.UUID]Member{
+		adminA:    memberFixture(adminA, orgA, "a-admin", domain.UserRoleAdmin, "Org A"),
+		operatorA: memberFixture(operatorA, orgA, "a-operator", domain.UserRoleOperator, "Org A"),
+		third:     memberFixture(third, orgA, "a-third", domain.UserRoleOperator, "Org A"),
+		fourth:    memberFixture(fourth, orgA, "a-fourth", domain.UserRoleOperator, "Org A"),
+	}
+	pending := orgPasskey(adminA, orgA, domain.PasskeyStatusPending, 1)
+	active := orgPasskey(operatorA, orgA, domain.PasskeyStatusActive, 2)
+	revoked := orgPasskey(third, orgA, domain.PasskeyStatusRevoked, 3)
+
+	repo := membersRepo(members)
+	repo.listOrgMembersFn = func(context.Context, uuid.UUID) ([]Member, error) {
+		return []Member{members[adminA], members[operatorA], members[third], members[fourth]}, nil
+	}
+	repo.latestPasskeysByOrgFn = func(context.Context, uuid.UUID) (map[uuid.UUID]domain.Passkey, error) {
+		return map[uuid.UUID]domain.Passkey{adminA: pending, operatorA: active, third: revoked}, nil
+	}
+	updates := map[string]domain.PasskeyStatus{}
+	repo.updatePasskeyStatusFn = func(_ context.Context, credentialID []byte, status domain.PasskeyStatus) error {
+		updates[string(credentialID)] = status
+		return nil
+	}
+	chain := &fakeChain{keys: map[string]ledger.RegistryKey{
+		keyIDHex(pending): {Found: true, Active: true},
+		keyIDHex(active):  {Found: true, Active: false},
+	}}
+	svc := newTestService(t, repo, chain)
+
+	out, err := svc.Organization(context.Background(), adminA)
+	if err != nil {
+		t.Fatalf("Organization: %v", err)
+	}
+	if chain.calls != 1 {
+		t.Fatalf("adapter calls = %d, want 1", chain.calls)
+	}
+	queried := map[string]bool{}
+	for _, id := range chain.lastIDs {
+		queried[id] = true
+	}
+	wantQueried := map[string]bool{keyIDHex(pending): true, keyIDHex(active): true}
+	if !reflect.DeepEqual(queried, wantQueried) {
+		t.Fatalf("queried ids = %v, want %v", chain.lastIDs, wantQueried)
+	}
+	byUser := map[uuid.UUID]*domain.Passkey{}
+	for _, m := range out.Members {
+		byUser[m.UserID] = m.Passkey
+	}
+	if p := byUser[adminA]; p == nil || p.Status != domain.PasskeyStatusActive {
+		t.Fatalf("admin passkey = %+v, want ACTIVE", p)
+	}
+	if p := byUser[operatorA]; p == nil || p.Status != domain.PasskeyStatusRevoked {
+		t.Fatalf("operator passkey = %+v, want REVOKED", p)
+	}
+	if p := byUser[third]; p == nil || p.Status != domain.PasskeyStatusRevoked {
+		t.Fatalf("third passkey = %+v, want REVOKED (unchanged)", p)
+	}
+	if p := byUser[fourth]; p != nil {
+		t.Fatalf("fourth passkey = %+v, want nil", p)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("updates = %v, want 2", updates)
+	}
+}
+
+func TestOrganization_UpdateFailureDoesNotStopOthers(t *testing.T) {
+	members := map[uuid.UUID]Member{
+		adminA:    memberFixture(adminA, orgA, "a-admin", domain.UserRoleAdmin, "Org A"),
+		operatorA: memberFixture(operatorA, orgA, "a-operator", domain.UserRoleOperator, "Org A"),
+	}
+	pending := orgPasskey(adminA, orgA, domain.PasskeyStatusPending, 1)
+	active := orgPasskey(operatorA, orgA, domain.PasskeyStatusActive, 2)
+
+	repo := membersRepo(members)
+	repo.listOrgMembersFn = func(context.Context, uuid.UUID) ([]Member, error) {
+		return []Member{members[adminA], members[operatorA]}, nil
+	}
+	repo.latestPasskeysByOrgFn = func(context.Context, uuid.UUID) (map[uuid.UUID]domain.Passkey, error) {
+		return map[uuid.UUID]domain.Passkey{adminA: pending, operatorA: active}, nil
+	}
+	updates := 0
+	repo.updatePasskeyStatusFn = func(_ context.Context, credentialID []byte, _ domain.PasskeyStatus) error {
+		updates++
+		if credentialID[0] == 1 { // первый участник — adminA
+			return errors.New("db down")
+		}
+		return nil
+	}
+	chain := &fakeChain{keys: map[string]ledger.RegistryKey{
+		keyIDHex(pending): {Found: true, Active: true},
+		keyIDHex(active):  {Found: true, Active: false},
+	}}
+	svc := newTestService(t, repo, chain)
+
+	out, err := svc.Organization(context.Background(), adminA)
+	if err != nil {
+		t.Fatalf("Organization: %v", err)
+	}
+	if updates != 2 {
+		t.Fatalf("updates attempted = %d, want 2", updates)
+	}
+	byUser := map[uuid.UUID]*domain.Passkey{}
+	for _, m := range out.Members {
+		byUser[m.UserID] = m.Passkey
+	}
+	if p := byUser[adminA]; p == nil || p.Status != domain.PasskeyStatusPending {
+		t.Fatalf("admin passkey = %+v, want PENDING (update failed)", p)
+	}
+	if p := byUser[operatorA]; p == nil || p.Status != domain.PasskeyStatusRevoked {
+		t.Fatalf("operator passkey = %+v, want REVOKED (updated despite first failure)", p)
 	}
 }
 
