@@ -196,7 +196,7 @@ func newKeyActionFixture(t *testing.T, ctx context.Context, env *env) *keyAction
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("newKeyActionFixture cleanup (%s): %v", s.sql, err)
+				t.Errorf("newKeyActionFixture cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})

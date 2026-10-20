@@ -158,7 +158,7 @@ func TestSignedPick_EndToEnd(t *testing.T) {
 		}
 		for _, stmt := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, stmt.sql, stmt.args...); err != nil {
-				t.Logf("signed pick cleanup (%s): %v", stmt.sql, err)
+				t.Errorf("signed pick cleanup (%s): %v", stmt.sql, err)
 			}
 		}
 	})

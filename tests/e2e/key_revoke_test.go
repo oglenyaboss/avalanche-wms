@@ -339,7 +339,9 @@ func TestKeyRevoke_SerializesWithWarehouseAction(t *testing.T) {
 	}
 	require.NoError(t, tx.Commit(ctx))
 	t.Cleanup(func() {
-		_, _ = env.db.Exec(context.Background(), `DELETE FROM public.key_actions WHERE action_id = $1`, fakeRevokeID)
+		if _, err := env.db.Exec(context.Background(), `DELETE FROM public.key_actions WHERE action_id = $1`, fakeRevokeID); err != nil {
+			t.Errorf("fake revoke cleanup (key_actions %s): %v", fakeRevokeID, err)
+		}
 	})
 
 	select {

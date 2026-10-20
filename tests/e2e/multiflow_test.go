@@ -226,6 +226,8 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 			{`DELETE FROM wms_ops.receiving_table WHERE cargoplace_id IN ` + cpSel, []any{shipmentID}},
 			{`DELETE FROM wms_ops.receiving_gate WHERE cargoplace_id IN ` + cpSel, []any{shipmentID}},
 			{`DELETE FROM wms_ops.receiving_gate WHERE shipment_id=$1`, []any{shipmentID}},
+			// The signed close action over these products, after its ops children.
+			{`DELETE FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel, []any{shipmentID}},
 			{`DELETE FROM wms_inventory.products WHERE cargoplace_id IN ` + cpSel, []any{shipmentID}},
 			{`DELETE FROM wms_inventory.boxes WHERE cargoplace_id IN ` + cpSel, []any{shipmentID}},
 			{`DELETE FROM wms_inventory.expected_cargoplace_skus WHERE cargoplace_id IN ` + cpSel, []any{shipmentID}},
@@ -234,7 +236,7 @@ func TestMultiCargoplace_Receiving(t *testing.T) {
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("multiCargoplace cleanup (%s): %v", s.sql, err)
+				t.Errorf("multiCargoplace cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})

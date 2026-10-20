@@ -192,7 +192,7 @@ func newOutboundFixture(t *testing.T, ctx context.Context, env *env) e2eFixture 
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("newOutboundFixture cleanup (%s): %v", s.sql, err)
+				t.Errorf("newOutboundFixture cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})
@@ -373,7 +373,7 @@ func newMultiProductFixture(t *testing.T, ctx context.Context, env *env, destina
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("newMultiProductFixture cleanup (%s): %v", s.sql, err)
+				t.Errorf("newMultiProductFixture cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})

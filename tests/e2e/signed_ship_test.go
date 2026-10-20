@@ -109,10 +109,10 @@ func markPickingConfirmed(t *testing.T, ctx context.Context, env *env, productID
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		if _, err := env.db.Exec(cleanupCtx, `DELETE FROM public.onchain_events WHERE event_id = $1`, actionID); err != nil {
-			t.Logf("markPickingConfirmed cleanup (onchain_events %s): %v", actionID, err)
+			t.Errorf("markPickingConfirmed cleanup (onchain_events %s): %v", actionID, err)
 		}
 		if _, err := env.db.Exec(cleanupCtx, `DELETE FROM public.warehouse_actions WHERE action_id = $1`, actionID); err != nil {
-			t.Logf("markPickingConfirmed cleanup (warehouse_actions %s): %v", actionID, err)
+			t.Errorf("markPickingConfirmed cleanup (warehouse_actions %s): %v", actionID, err)
 		}
 	})
 }
@@ -257,7 +257,7 @@ func TestSignedShip_EndToEnd(t *testing.T) {
 		}
 		for _, stmt := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, stmt.sql, stmt.args...); err != nil {
-				t.Logf("signed ship cleanup (%s): %v", stmt.sql, err)
+				t.Errorf("signed ship cleanup (%s): %v", stmt.sql, err)
 			}
 		}
 	})
