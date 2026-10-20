@@ -25,7 +25,7 @@ import (
 
 type stubChain struct {
 	mu                sync.Mutex
-	calls             []string         // aggregate_type записи (BatchCall) + "signed_action" (SendCalldata)
+	calls             []string         // "signed_action" на каждый SendCalldata
 	calldataLens      []int            // размер data каждого SendCalldata (по порядку)
 	calldatas         [][]byte         // data каждого SendCalldata (копия, по порядку)
 	tos               []common.Address // адрес каждого SendCalldata (по порядку)
@@ -36,21 +36,6 @@ type stubChain struct {
 	receiptErr        error
 	receiptErrForHash map[common.Hash]error // per-tx-hash receipt error
 	receiptWait       int
-}
-
-func (s *stubChain) BatchCall(_ context.Context, aggregateType string, _, _ []*big.Int) (common.Hash, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls = append(s.calls, aggregateType)
-	if s.callErrFor != nil {
-		if err, ok := s.callErrFor[aggregateType]; ok {
-			return common.Hash{}, err
-		}
-	}
-	if s.callErr != nil {
-		return common.Hash{}, s.callErr
-	}
-	return common.HexToHash("0xdeadbeef"), nil
 }
 
 func (s *stubChain) SendCalldata(_ context.Context, to common.Address, data []byte) (common.Hash, error) {
@@ -221,11 +206,14 @@ func (s *stubStore) MarkRejected(_ context.Context, ids []uuid.UUID, _ string, r
 
 // stubResolver — программируемые исходы подписанных действий для Confirm/reconcile:
 // outcomes — исходы из логов receipt'а (LogOutcomes), states — известные исходы
-// по actionState (StateOutcome; отсутствующий id = State.None).
+// по actionState (StateOutcome; отсутствующий id = State.None). addr — адрес
+// контракта (необязательный; zero → дефолт 0x…aa), чтобы тесты различали
+// warehouse- и registry-резолверы.
 type stubResolver struct {
 	outcomes map[uuid.UUID]chain.ActionOutcome
 	states   map[uuid.UUID]chain.ActionOutcome
 	err      error
+	addr     common.Address
 }
 
 func (r *stubResolver) LogOutcomes(_ *types.Receipt) (map[uuid.UUID]chain.ActionOutcome, error) {
@@ -244,6 +232,9 @@ func (r *stubResolver) StateOutcome(_ context.Context, id uuid.UUID) (chain.Acti
 }
 
 func (r *stubResolver) Address() common.Address {
+	if r.addr != (common.Address{}) {
+		return r.addr
+	}
 	return common.HexToAddress("0x00000000000000000000000000000000000000aa")
 }
 
@@ -275,18 +266,23 @@ func newFlusherT() (*Flusher, *stubChain, *stubStore, *stubDLQ) {
 	return f, ch, st, dq
 }
 
-func makeMessages(n int, aggType string) []*Message {
+// makeWarehouseMessages — n складских действий.
+func makeWarehouseMessages(n int) []*Message {
 	msgs := make([]*Message, n)
 	for i := range msgs {
-		msgs[i] = &Message{
-			EventID:       uuid.New(),
-			ProductID:     uuid.New(),
-			AggregateType: aggType,
-			Topic:         "wms.events.v1",
-			KafkaMsg:      kafka.Message{Topic: "wms.events.v1"},
-		}
+		msgs[i] = makeWarehouseMessage(`{}`)
 	}
 	return msgs
+}
+
+// appliedResolver — warehouse-резолвер, у которого все msgs применены (Applied)
+// в логах receipt'а.
+func appliedResolver(msgs ...*Message) *stubResolver {
+	outcomes := make(map[uuid.UUID]chain.ActionOutcome, len(msgs))
+	for _, m := range msgs {
+		outcomes[m.EventID] = chain.ActionOutcome{Applied: true}
+	}
+	return &stubResolver{outcomes: outcomes}
 }
 
 // makeActionMessage — Message подписанного действия. clientDataJSON задаёт размер
@@ -348,16 +344,22 @@ func setMaxActionCalldata(t *testing.T, limit int) {
 
 func TestFlusher_HappyPath(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
-	msgs := makeMessages(3, "receiving")
+	msgs := makeWarehouseMessages(3)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if len(ch.calls) != 1 || ch.calls[0] != "receiving" {
-		t.Errorf("expected 1 BatchCall to receiving, got %v", ch.calls)
+	if len(ch.calls) != 1 || ch.calls[0] != aggregateSignedAction {
+		t.Errorf("expected 1 SendCalldata to warehouse, got %v", ch.calls)
 	}
 	if len(st.committed) != 3 {
 		t.Errorf("expected 3 committed, got %d", len(st.committed))
+	}
+	for _, m := range msgs {
+		if !st.committed[m.EventID] {
+			t.Errorf("event %s must be COMMITTED, got %v", m.EventID, st.committed)
+		}
 	}
 	if len(st.failed) != 0 {
 		t.Errorf("no failures expected, got %d", len(st.failed))
@@ -369,7 +371,8 @@ func TestFlusher_HappyPath(t *testing.T) {
 
 func TestFlusher_Idempotency_SkipsAllExisting(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
-	msgs := makeMessages(2, "receiving")
+	msgs := makeWarehouseMessages(2)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 	for _, m := range msgs {
 		st.exists[m.EventID] = true
 		st.statuses[m.EventID] = "COMMITTED"
@@ -389,7 +392,8 @@ func TestFlusher_Idempotency_SkipsAllExisting(t *testing.T) {
 func TestFlusher_ChainCallFails_GoesToDLQ(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted: Duplicate eventId")
-	msgs := makeMessages(2, "putaway")
+	msgs := makeWarehouseMessages(2)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("chain revert should NOT return error (offsets must commit): %v", err)
@@ -408,7 +412,8 @@ func TestFlusher_ChainCallFails_GoesToDLQ(t *testing.T) {
 func TestFlusher_ReceiptStatusZero_GoesToDLQ(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.receipt = &types.Receipt{Status: 0}
-	msgs := makeMessages(1, "picking")
+	msgs := makeWarehouseMessages(1)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("revert should NOT return error: %v", err)
@@ -424,7 +429,8 @@ func TestFlusher_ReceiptStatusZero_GoesToDLQ(t *testing.T) {
 func TestFlusher_StoreExistsError_ReturnsTransient(t *testing.T) {
 	f, _, st, _ := newFlusherT()
 	st.existsErr = errors.New("connection refused")
-	msgs := makeMessages(1, "receiving")
+	msgs := makeWarehouseMessages(1)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	err := f.Flush(context.Background(), msgs)
 	if err == nil {
@@ -444,7 +450,8 @@ func TestFlusher_EmptyBatch_NoOp(t *testing.T) {
 
 func TestFlusher_PartialDuplicates_ProcessesOnlyNew(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
-	msgs := makeMessages(3, "shipping")
+	msgs := makeWarehouseMessages(3)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 	st.exists[msgs[0].EventID] = true
 	st.statuses[msgs[0].EventID] = "COMMITTED"
 	st.exists[msgs[1].EventID] = true
@@ -465,7 +472,8 @@ func TestFlusher_DLQPublishFails_ReturnsError_NoCommit(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted")
 	dq.publishErr = errors.New("kafka broker down")
-	msgs := makeMessages(2, "putaway")
+	msgs := makeWarehouseMessages(2)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	err := f.Flush(context.Background(), msgs)
 	if err == nil {
@@ -484,7 +492,8 @@ func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) 
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = errors.New("execution reverted")
 	st.failedErr = errors.New("db connection refused")
-	msgs := makeMessages(1, "picking")
+	msgs := makeWarehouseMessages(1)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	err := f.Flush(context.Background(), msgs)
 	if err == nil {
@@ -508,7 +517,8 @@ func TestFlusher_MarkFailedFails_ReturnsError_DLQAlreadyPublished(t *testing.T) 
 // stable instead of re-broadcasting (S2 — scenarios/09-s2-crash-recovery.sh).
 func TestFlusher_StrandedPending_GetsRetried(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
-	msgs := makeMessages(1, "receiving")
+	msgs := makeWarehouseMessages(1)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 	st.exists[msgs[0].EventID] = true
 	st.statuses[msgs[0].EventID] = "PENDING" // no st.sent → tx_hash empty → resubmit-safe
 
@@ -528,10 +538,11 @@ func TestFlusher_StrandedPending_GetsRetried(t *testing.T) {
 
 // TestFlusher_RedeliveredSentRow_ReconcilesNoResubmit covers S2: a SENT row already has
 // a broadcast tx_hash, so a redelivery must reconcile that tx (not resubmit). The mined
-// tx resolves to COMMITTED and tx_hash stays stable — no second BatchCall.
+// tx resolves to COMMITTED and tx_hash stays stable — no second send.
 func TestFlusher_RedeliveredSentRow_ReconcilesNoResubmit(t *testing.T) {
 	f, ch, st, dq := newFlusherT() // ch.receipt = Status 1
-	m := makeMessages(1, "receiving")[0]
+	m := makeWarehouseMessages(1)[0]
+	f.WithWarehouseActions(appliedResolver(m))
 	st.exists[m.EventID] = true
 	st.statuses[m.EventID] = "SENT"
 	st.sent[m.EventID] = "0xabc123" // already broadcast
@@ -540,7 +551,7 @@ func TestFlusher_RedeliveredSentRow_ReconcilesNoResubmit(t *testing.T) {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if len(ch.calls) != 0 {
-		t.Errorf("must NOT resubmit a row with tx_hash, got %d BatchCalls", len(ch.calls))
+		t.Errorf("must NOT resubmit a row with tx_hash, got %d chain calls", len(ch.calls))
 	}
 	if !st.committed[m.EventID] {
 		t.Errorf("reconcile of a mined tx must MarkCommitted")
@@ -558,7 +569,8 @@ func TestFlusher_RedeliveredSentRow_ReconcilesNoResubmit(t *testing.T) {
 // is tx_hash PRESENCE, not the status string, so this must still reconcile (not resubmit).
 func TestFlusher_RedeliveredPendingRowWithTx_ReconcilesNoResubmit(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
-	m := makeMessages(1, "putaway")[0]
+	m := makeWarehouseMessages(1)[0]
+	f.WithWarehouseActions(appliedResolver(m))
 	st.exists[m.EventID] = true
 	st.statuses[m.EventID] = "PENDING"
 	st.sent[m.EventID] = "0xdef456" // tx_hash present despite PENDING status
@@ -580,7 +592,8 @@ func TestFlusher_RedeliveredPendingRowWithTx_ReconcilesNoResubmit(t *testing.T) 
 func TestFlusher_RedeliveredRow_TxNotMined_LeftForLoop(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
 	ch.receiptWait = 5 // TransactionReceipt returns ethereum.NotFound
-	m := makeMessages(1, "receiving")[0]
+	m := makeWarehouseMessages(1)[0]
+	f.WithWarehouseActions(appliedResolver(m))
 	st.exists[m.EventID] = true
 	st.statuses[m.EventID] = "SENT"
 	st.sent[m.EventID] = "0xstillmining"
@@ -601,7 +614,8 @@ func TestFlusher_RedeliveredRow_TxNotMined_LeftForLoop(t *testing.T) {
 func TestFlusher_RedeliveredRow_TxReverted_MarksFailed(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
 	ch.receipt = &types.Receipt{Status: 0} // mined but reverted
-	m := makeMessages(1, "shipping")[0]
+	m := makeWarehouseMessages(1)[0]
+	f.WithWarehouseActions(appliedResolver(m))
 	st.exists[m.EventID] = true
 	st.statuses[m.EventID] = "SENT"
 	st.sent[m.EventID] = "0xreverted"
@@ -621,7 +635,8 @@ func TestFlusher_RedeliveredRow_TxReverted_MarksFailed(t *testing.T) {
 // one flush window is collapsed to a single batch entry (no [id,id] reaching the contract).
 func TestFlusher_IntraBatchDuplicate_Deduped(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
-	m := makeMessages(1, "receiving")[0]
+	m := makeWarehouseMessages(1)[0]
+	f.WithWarehouseActions(appliedResolver(m))
 	dup := *m // identical EventID
 	msgs := []*Message{m, &dup}
 
@@ -645,7 +660,8 @@ func TestFlusher_IntraBatchDuplicate_Deduped(t *testing.T) {
 func TestFlusher_RedeliveredRow_ReceiptRPCError_Propagates(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.receiptErr = errors.New("rpc connection refused") // non-NotFound
-	m := makeMessages(1, "receiving")[0]
+	m := makeWarehouseMessages(1)[0]
+	f.WithWarehouseActions(appliedResolver(m))
 	st.exists[m.EventID] = true
 	st.statuses[m.EventID] = "SENT"
 	st.sent[m.EventID] = "0xinflight"
@@ -667,7 +683,8 @@ func TestFlusher_RedeliveredRow_ReceiptRPCError_Propagates(t *testing.T) {
 
 func TestFlusher_CommittedEventSkipped(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
-	msgs := makeMessages(1, "receiving")
+	msgs := makeWarehouseMessages(1)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 	st.exists[msgs[0].EventID] = true
 	st.statuses[msgs[0].EventID] = "COMMITTED"
 
@@ -687,7 +704,8 @@ func TestFlusher_CommittedEventSkipped(t *testing.T) {
 
 func TestFlusher_FailedEventSkipped(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
-	msgs := makeMessages(1, "receiving")
+	msgs := makeWarehouseMessages(1)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 	st.exists[msgs[0].EventID] = true
 	st.statuses[msgs[0].EventID] = "FAILED"
 
@@ -702,7 +720,8 @@ func TestFlusher_FailedEventSkipped(t *testing.T) {
 func TestFlusher_ChainTransientError_NoDLQ_ReturnsError(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = fmt.Errorf("%w: dial failed", chain.ErrChainTransient)
-	msgs := makeMessages(2, "receiving")
+	msgs := makeWarehouseMessages(2)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	err := f.Flush(context.Background(), msgs)
 	if err == nil {
@@ -722,7 +741,8 @@ func TestFlusher_ChainTransientError_NoDLQ_ReturnsError(t *testing.T) {
 func TestFlusher_ChainRevertError_GoesToDLQ(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = fmt.Errorf("%w: execution reverted: Duplicate eventId", chain.ErrChainRevert)
-	msgs := makeMessages(2, "receiving")
+	msgs := makeWarehouseMessages(2)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	if err := f.Flush(context.Background(), msgs); err != nil {
 		t.Fatalf("revert should return nil (DLQ success), got: %v", err)
@@ -738,7 +758,8 @@ func TestFlusher_ChainRevertError_GoesToDLQ(t *testing.T) {
 func TestFlusher_ChainTransientError_PropagatesAsError_NoDLQ(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
 	ch.callErr = fmt.Errorf("%w: nonce: dial tcp: connection refused", chain.ErrChainTransient)
-	msgs := makeMessages(2, "receiving")
+	msgs := makeWarehouseMessages(2)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	err := f.Flush(context.Background(), msgs)
 	if err == nil {
@@ -759,17 +780,18 @@ func TestFlusher_ChainTransientError_PropagatesAsError_NoDLQ(t *testing.T) {
 
 func TestFlusher_SendDoesNotWaitForReceipt(t *testing.T) {
 	f, ch, st, _ := newFlusherT()
-	msgs := makeMessages(3, "putaway")
+	msgs := makeWarehouseMessages(3)
+	f.WithWarehouseActions(appliedResolver(msgs...))
 
 	inflight, err := f.Send(context.Background(), msgs)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if len(inflight) != 1 {
-		t.Fatalf("expected 1 inflight tx (one putaway sub-batch), got %d", len(inflight))
+		t.Fatalf("expected 1 inflight tx (one warehouse segment), got %d", len(inflight))
 	}
-	if inflight[0].Aggregate != "putaway" {
-		t.Errorf("aggregate: want putaway, got %q", inflight[0].Aggregate)
+	if inflight[0].Aggregate != aggregateSignedAction {
+		t.Errorf("aggregate: want signed_action, got %q", inflight[0].Aggregate)
 	}
 	if len(inflight[0].IDs) != 3 {
 		t.Errorf("expected 3 ids in inflight, got %d", len(inflight[0].IDs))
@@ -787,7 +809,9 @@ func TestFlusher_SendDoesNotWaitForReceipt(t *testing.T) {
 
 func TestFlusher_ConfirmCommits(t *testing.T) {
 	f, ch, st, _ := newFlusherT() // ch.receipt = Status 1
-	inflight, err := f.Send(context.Background(), makeMessages(2, "receiving"))
+	msgs := makeWarehouseMessages(2)
+	f.WithWarehouseActions(appliedResolver(msgs...))
+	inflight, err := f.Send(context.Background(), msgs)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -797,6 +821,11 @@ func TestFlusher_ConfirmCommits(t *testing.T) {
 	if len(st.committed) != 2 {
 		t.Errorf("expected 2 committed, got %d", len(st.committed))
 	}
+	for _, m := range msgs {
+		if !st.committed[m.EventID] {
+			t.Errorf("event %s must be COMMITTED, got %v", m.EventID, st.committed)
+		}
+	}
 	if ch.receiptCalls == 0 {
 		t.Error("Confirm should poll the receipt")
 	}
@@ -804,7 +833,9 @@ func TestFlusher_ConfirmCommits(t *testing.T) {
 
 func TestFlusher_ConfirmRevertToDLQ(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
-	inflight, err := f.Send(context.Background(), makeMessages(1, "shipping"))
+	msgs := makeWarehouseMessages(1)
+	f.WithWarehouseActions(appliedResolver(msgs...))
+	inflight, err := f.Send(context.Background(), msgs)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -829,7 +860,9 @@ func TestFlusher_ConfirmRevertToDLQ(t *testing.T) {
 // recovery; the reconcile loop later catches the tx if it eventually mines.
 func TestFlusher_ConfirmStall_NoDLQ_StaysSent(t *testing.T) {
 	f, ch, st, dq := newFlusherT()
-	inflight, err := f.Send(context.Background(), makeMessages(2, "receiving"))
+	msgs := makeWarehouseMessages(2)
+	f.WithWarehouseActions(appliedResolver(msgs...))
+	inflight, err := f.Send(context.Background(), msgs)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -849,153 +882,68 @@ func TestFlusher_ConfirmStall_NoDLQ_StaysSent(t *testing.T) {
 	}
 }
 
-// --- mixed-batch tests ---------------------------------------------------
+// --- сегменты окна (складские / ключевые действия) -----------------------
 
-func TestFlusher_MixedBatch_OrderedByFSM(t *testing.T) {
-	f, ch, st, _ := newFlusherT()
-	recvA := makeMessages(1, "receiving")
-	recvB := makeMessages(1, "receiving")
-	putA := makeMessages(1, "putaway")
-	// Simulate mixed batch: [recv-A, putaway-A, recv-B] — could arrive in any
-	// order within a single Kafka batch window.
-	msgs := append(recvA, putA...)
-	msgs = append(msgs, recvB...)
+// TestFlusher_SplitSegments_WarehouseKey: окно [w1, w2, k1, w3] режется на
+// 3 сегмента в порядке следования.
+func TestFlusher_SplitSegments_WarehouseKey(t *testing.T) {
+	w1, w2, w3 := makeWarehouseMessage(`{}`), makeWarehouseMessage(`{}`), makeWarehouseMessage(`{}`)
+	k := makeActionMessage(`{}`)
+	msgs := []*Message{w1, w2, k, w3}
 
-	if err := f.Flush(context.Background(), msgs); err != nil {
-		t.Fatalf("unexpected: %v", err)
+	segs := splitSegments(msgs)
+	if len(segs) != 3 {
+		t.Fatalf("expected 3 segments, got %d", len(segs))
 	}
-	// FSM order: receiving first, then putaway.
-	if len(ch.calls) != 2 {
-		t.Fatalf("expected 2 chain calls (receiving + putaway), got %v", ch.calls)
-	}
-	if ch.calls[0] != "receiving" {
-		t.Errorf("first call should be receiving, got %q", ch.calls[0])
-	}
-	if ch.calls[1] != "putaway" {
-		t.Errorf("second call should be putaway, got %q", ch.calls[1])
-	}
-	if len(st.committed) != 3 {
-		t.Errorf("all 3 should be committed, got %d", len(st.committed))
-	}
-}
-
-func TestFlusher_MixedBatch_PartialFailure(t *testing.T) {
-	f, ch, st, dq := newFlusherT()
-	ch.callErrFor = map[string]error{
-		"putaway": fmt.Errorf("%w: Invalid status transition", chain.ErrChainRevert),
-	}
-	recvMsgs := makeMessages(2, "receiving")
-	putMsgs := makeMessages(1, "putaway")
-	msgs := append(recvMsgs, putMsgs...)
-
-	// Receiving succeeds, putaway reverts → putaway goes to DLQ.
-	// Flush returns nil (all sub-batches handled: recv committed, putaway DLQ'd).
-	if err := f.Flush(context.Background(), msgs); err != nil {
-		t.Fatalf("partial failure should not propagate: %v", err)
-	}
-	if len(st.committed) != 2 {
-		t.Errorf("receiving events should be committed, got %d", len(st.committed))
-	}
-	if len(st.failed) != 1 {
-		t.Errorf("putaway event should be failed, got %d", len(st.failed))
-	}
-	if len(dq.messages) != 1 {
-		t.Errorf("expected 1 DLQ publish for putaway, got %d", len(dq.messages))
-	}
-}
-
-func TestFlusher_SingleTypeBatch(t *testing.T) {
-	f, ch, st, _ := newFlusherT()
-	msgs := makeMessages(5, "shipping")
-
-	if err := f.Flush(context.Background(), msgs); err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	if len(ch.calls) != 1 || ch.calls[0] != "shipping" {
-		t.Errorf("expected single shipping call, got %v", ch.calls)
-	}
-	if len(st.committed) != 5 {
-		t.Errorf("expected 5 committed, got %d", len(st.committed))
-	}
-}
-
-func TestFlusher_MixedBatch_TransientMidFSM_StopsAndReturnsError(t *testing.T) {
-	f, ch, st, dq := newFlusherT()
-	ch.callErrFor = map[string]error{
-		"putaway": fmt.Errorf("%w: dial failed", chain.ErrChainTransient),
-	}
-	recvMsgs := makeMessages(2, "receiving")
-	putMsgs := makeMessages(1, "putaway")
-	shipMsgs := makeMessages(1, "shipping")
-	msgs := append(recvMsgs, putMsgs...)
-	msgs = append(msgs, shipMsgs...)
-
-	err := f.Flush(context.Background(), msgs)
-	if err == nil {
-		t.Fatal("transient mid-FSM should propagate error to block offset commit")
-	}
-	if len(ch.calls) != 2 {
-		t.Errorf("expected 2 calls (receiving ok + putaway transient), got %v", ch.calls)
-	}
-	if len(st.committed) != 2 {
-		t.Errorf("receiving should be committed, got %d", len(st.committed))
-	}
-	if len(st.failed) != 0 {
-		t.Errorf("transient should NOT mark failed, got %d", len(st.failed))
-	}
-	if len(dq.messages) != 0 {
-		t.Errorf("transient should NOT publish DLQ, got %d", len(dq.messages))
-	}
-}
-
-func TestFlusher_AggregateTypes_ConsistentWithChain(t *testing.T) {
-	chainTypes := make(map[string]bool)
-	for _, a := range chain.AggregateTypes() {
-		chainTypes[a] = true
-	}
-	for _, a := range fsmOrder {
-		if !chainTypes[a] {
-			t.Errorf("fsmOrder contains %q but chain.AggregateTypes() does not", a)
-		}
-	}
-	for a := range chainTypes {
-		if !validAggregates[a] {
-			t.Errorf("chain.AggregateTypes() contains %q but validAggregates does not", a)
-		}
-	}
-}
-
-// --- signed actions -------------------------------------------------------
-
-// TestFlusher_MixedWindow_LegacyAndActionsOrdered: окно [legacy receiving A,
-// action X, legacy receiving B] уходит тремя tx строго в порядке окна —
-// действия не перепрыгивают legacy-стадии между ними.
-func TestFlusher_MixedWindow_LegacyAndActionsOrdered(t *testing.T) {
-	f, ch, st, dq := newFlusherT()
-	legacy := makeMessages(2, "receiving")
-	x := makeActionMessage(`{"type":"webauthn.get"}`)
-	f.WithRegistry(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
-		x.EventID: {Applied: true},
-	}})
-	msgs := []*Message{legacy[0], x, legacy[1]}
-
-	if err := f.Flush(context.Background(), msgs); err != nil {
-		t.Fatalf("unexpected: %v", err)
-	}
-	want := []string{"receiving", aggregateSignedAction, "receiving"}
-	if len(ch.calls) != 3 {
-		t.Fatalf("expected 3 chain calls, got %v", ch.calls)
-	}
+	want := []segmentKind{segmentWarehouse, segmentKey, segmentWarehouse}
 	for i, w := range want {
-		if ch.calls[i] != w {
-			t.Errorf("call %d: got %q, want %q (full: %v)", i, ch.calls[i], w, ch.calls)
+		for _, m := range segs[i] {
+			if got := segmentOf(m); got != w {
+				t.Errorf("segment %d: kind = %d, want %d", i, got, w)
+			}
 		}
 	}
-	if len(st.committed) != 3 {
-		t.Errorf("all 3 events committed, got %d", len(st.committed))
+	if len(segs[0]) != 2 || len(segs[1]) != 1 || len(segs[2]) != 1 {
+		t.Fatalf("segment sizes: got %v", []int{len(segs[0]), len(segs[1]), len(segs[2])})
 	}
-	if len(dq.messages) != 0 {
-		t.Errorf("no DLQ expected, got %d", len(dq.messages))
+	if segs[0][0] != w1 || segs[0][1] != w2 || segs[1][0] != k || segs[2][0] != w3 {
+		t.Errorf("segment contents out of order")
+	}
+}
+
+// TestFlusher_MixedWindow_WarehouseKeyOrdered: окно [w1, k1, w2] уходит тремя tx
+// строго в порядке окна — складские и ключевые действия не сливаются в одну tx,
+// каждая уходит на адрес своего контракта.
+func TestFlusher_MixedWindow_WarehouseKeyOrdered(t *testing.T) {
+	f, ch, _, _ := newFlusherT()
+	w1, w2 := makeWarehouseMessage(`{}`), makeWarehouseMessage(`{}`)
+	k1 := makeActionMessage(`{}`)
+	wh := appliedResolver(w1, w2)
+	reg := &stubResolver{
+		outcomes: map[uuid.UUID]chain.ActionOutcome{k1.EventID: {Applied: true}},
+		addr:     common.HexToAddress("0x00000000000000000000000000000000000000bb"),
+	}
+	f.WithWarehouseActions(wh)
+	f.WithRegistry(reg)
+
+	inflight, err := f.Send(context.Background(), []*Message{w1, k1, w2})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(inflight) != 3 {
+		t.Fatalf("expected 3 inflight tx in window order, got %d", len(inflight))
+	}
+	wantIDs := [][]uuid.UUID{{w1.EventID}, {k1.EventID}, {w2.EventID}}
+	for i, want := range wantIDs {
+		if len(inflight[i].IDs) != 1 || inflight[i].IDs[0] != want[0] {
+			t.Errorf("inflight %d ids: got %v, want %v", i, inflight[i].IDs, want)
+		}
+	}
+	wantTos := []common.Address{wh.Address(), reg.Address(), wh.Address()}
+	for i, want := range wantTos {
+		if ch.tos[i] != want {
+			t.Errorf("tx %d to: got %s, want %s (full: %v)", i, ch.tos[i], want, ch.tos)
+		}
 	}
 }
 
@@ -1100,34 +1048,6 @@ func TestFlusher_ActionsWithoutRegistry_FailedAndDLQ(t *testing.T) {
 	}
 	if len(dq.messages) != 1 || len(dq.messages[0]) != 2 {
 		t.Errorf("expected 1 DLQ batch of 2, got %v", dq.messages)
-	}
-}
-
-// TestFlusher_SplitSegments_LegacyWarehouseKey: окно [legacy, warehouse, warehouse,
-// key, warehouse] режется на 4 сегмента в порядке следования.
-func TestFlusher_SplitSegments_LegacyWarehouseKey(t *testing.T) {
-	legacy := makeMessages(1, "receiving")
-	w1, w2, w3 := makeWarehouseMessage(`{}`), makeWarehouseMessage(`{}`), makeWarehouseMessage(`{}`)
-	k := makeActionMessage(`{}`)
-	msgs := []*Message{legacy[0], w1, w2, k, w3}
-
-	segs := splitSegments(msgs)
-	if len(segs) != 4 {
-		t.Fatalf("expected 4 segments, got %d", len(segs))
-	}
-	want := []segmentKind{segmentLegacy, segmentWarehouse, segmentKey, segmentWarehouse}
-	for i, w := range want {
-		for _, m := range segs[i] {
-			if got := segmentOf(m); got != w {
-				t.Errorf("segment %d: kind = %d, want %d", i, got, w)
-			}
-		}
-	}
-	if len(segs[0]) != 1 || len(segs[1]) != 2 || len(segs[2]) != 1 || len(segs[3]) != 1 {
-		t.Fatalf("segment sizes: got %v", []int{len(segs[0]), len(segs[1]), len(segs[2]), len(segs[3])})
-	}
-	if segs[1][0] != w1 || segs[1][1] != w2 || segs[2][0] != k || segs[3][0] != w3 {
-		t.Errorf("segment contents out of order")
 	}
 }
 

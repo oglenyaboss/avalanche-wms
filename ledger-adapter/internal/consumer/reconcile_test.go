@@ -21,21 +21,45 @@ func newReconcilerT(ch *stubChain, st *stubStore) *Reconciler {
 }
 
 // TestReconciler_MinedTx_MarksCommitted is the core N1 fix: a stuck row whose tx has
-// actually mined successfully reconciles forward to COMMITTED.
+// actually mined successfully reconciles forward to COMMITTED (исход подписанного
+// действия разбирается резолвером).
 func TestReconciler_MinedTx_MarksCommitted(t *testing.T) {
 	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
 	st := newStubStore()
 	id := uuid.New()
 	st.reconcilable = []store.ReconcileRow{{EventID: id, TxHash: "0xmined"}}
+	r := newReconcilerT(ch, st).WithWarehouseActions(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		id: {Applied: true},
+	}})
 
-	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+	if err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if !st.committed[id] {
 		t.Errorf("a mined stuck row must reconcile to COMMITTED")
 	}
 	if len(ch.calls) != 0 {
-		t.Errorf("reconcile must NEVER resubmit (BatchCall), got %d", len(ch.calls))
+		t.Errorf("reconcile must NEVER resubmit, got %d chain calls", len(ch.calls))
+	}
+}
+
+// TestReconciler_MinedTx_NoResolvers_LeavesRows: успешная tx без подключённых
+// резолверов не может быть разобрана — applyActionOutcomes возвращает ошибку,
+// она изолируется внутри reconcileOnce, строки остаются SENT для следующего
+// tick'а (после рестарта с адресами контрактов).
+func TestReconciler_MinedTx_NoResolvers_LeavesRows(t *testing.T) {
+	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
+	st := newStubStore()
+	id := uuid.New()
+	st.reconcilable = []store.ReconcileRow{{EventID: id, TxHash: "0xmined"}}
+
+	// Текущий контракт изоляции ошибок: per-tx ошибка логируется, reconcileOnce
+	// возвращает nil (sweep не останавливается).
+	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+		t.Fatalf("resolver-missing error must be isolated, not propagated: %v", err)
+	}
+	if len(st.committed) != 0 || len(st.failed) != 0 {
+		t.Errorf("rows must stay SENT, got committed=%v failed=%v", st.committed, st.failed)
 	}
 }
 
@@ -82,8 +106,12 @@ func TestReconciler_GroupsByTxHash_OneCheckPerTx(t *testing.T) {
 		{EventID: a, TxHash: "0xbatch"},
 		{EventID: b, TxHash: "0xbatch"},
 	}
+	r := newReconcilerT(ch, st).WithWarehouseActions(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		a: {Applied: true},
+		b: {Applied: true},
+	}})
 
-	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+	if err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if ch.receiptCalls != 1 {
@@ -110,8 +138,11 @@ func TestReconciler_PerTxErrorIsolation(t *testing.T) {
 		{EventID: good, TxHash: "0xgood"},
 		{EventID: bad, TxHash: "0xbad"},
 	}
+	r := newReconcilerT(ch, st).WithWarehouseActions(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		good: {Applied: true},
+	}})
 
-	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+	if err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("per-tx error must be isolated, not propagated from reconcileOnce: %v", err)
 	}
 	if !st.committed[good] {

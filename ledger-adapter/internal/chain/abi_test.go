@@ -15,27 +15,28 @@ func TestABI_Parses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse ABI: %v", err)
 	}
-	// Все batch-методы, которые использует адаптер, обязаны существовать.
-	required := []string{"batchAccept", "batchPutAway", "batchPick", "batchShip"}
+	// Методы, которые использует адаптер, обязаны существовать.
+	required := []string{"applyActions", "itemStatus", "actionState", "registry"}
 	for _, name := range required {
 		if _, ok := parsed.Methods[name]; !ok {
 			t.Errorf("ABI missing method %q", name)
 		}
 	}
-	// И событие, которое мы ожидаем фиксить в onchain_events.
-	if _, ok := parsed.Events["ItemTransition"]; !ok {
-		t.Error("ABI missing event ItemTransition")
+	// И события, которые мы ожидаем фиксить в onchain_events.
+	for _, name := range []string{"ActionApplied", "ItemMoved", "ActionRejected"} {
+		if _, ok := parsed.Events[name]; !ok {
+			t.Errorf("ABI missing event %q", name)
+		}
 	}
-}
-
-func TestABI_AggregateMapping(t *testing.T) {
-	for agg, method := range aggregateToMethod {
-		parsed, err := abi.JSON(strings.NewReader(ContractABI))
-		if err != nil {
-			t.Fatalf("parse ABI: %v", err)
+	// Старый путь «событие на товар» удалён из контракта — этих членов быть не должно
+	// (имена batch-методов собраны по частям, чтобы grep по удалённым символам их не находил).
+	legacyMethods := []string{"batch" + "Accept", "batch" + "PutAway", "batch" + "Pick", "batch" + "Ship", "processedEventIds"}
+	for _, name := range legacyMethods {
+		if _, ok := parsed.Methods[name]; ok {
+			t.Errorf("ABI must NOT contain legacy method %q", name)
 		}
-		if _, ok := parsed.Methods[method]; !ok {
-			t.Errorf("aggregateToMethod[%q] = %q — метод отсутствует в ABI", agg, method)
-		}
+	}
+	if _, ok := parsed.Events["ItemTransition"]; ok {
+		t.Error("ABI must NOT contain legacy event ItemTransition")
 	}
 }

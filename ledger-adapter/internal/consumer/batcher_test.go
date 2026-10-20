@@ -9,7 +9,7 @@ import (
 )
 
 func makeMsg() *Message {
-	return &Message{EventID: uuid.New(), ProductID: uuid.New(), AggregateType: "receiving", Topic: "wms.receiving.v1"}
+	return &Message{EventID: uuid.New(), AggregateType: aggregateSignedAction, Topic: "wms.events.v1"}
 }
 
 func TestBatcher_EmptyInitialState(t *testing.T) {

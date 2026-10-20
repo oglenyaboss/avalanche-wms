@@ -16,7 +16,7 @@ import (
 	"ledger-adapter/internal/chain"
 )
 
-func makeKafkaMsg(topic, eventID, productID, aggregateType string) kafka.Message {
+func makeKafkaMsg(topic, eventID, key, aggregateType string) kafka.Message {
 	headers := []kafka.Header{
 		{Key: "id", Value: []byte(eventID)},
 	}
@@ -25,41 +25,23 @@ func makeKafkaMsg(topic, eventID, productID, aggregateType string) kafka.Message
 	}
 	return kafka.Message{
 		Topic:   topic,
-		Key:     []byte(productID),
+		Key:     []byte(key),
 		Headers: headers,
 	}
 }
 
-func TestParse_ValidReceiving(t *testing.T) {
-	eventID := uuid.New()
-	productID := uuid.New()
-	m := makeKafkaMsg("wms.events.v1", eventID.String(), productID.String(), "receiving")
-
-	got, err := Parse(&m)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got.EventID != eventID {
-		t.Errorf("EventID: got %s, want %s", got.EventID, eventID)
-	}
-	if got.ProductID != productID {
-		t.Errorf("ProductID: got %s, want %s", got.ProductID, productID)
-	}
-	if got.AggregateType != "receiving" {
-		t.Errorf("AggregateType: got %q, want %q", got.AggregateType, "receiving")
-	}
-}
-
-func TestParse_AllAggregateTypes(t *testing.T) {
+// TestParse_LegacyAggregateRejected: старые FSM-агрегаты больше не поддержаны —
+// любое сообщение с таким aggregate_type отклоняется.
+func TestParse_LegacyAggregateRejected(t *testing.T) {
 	for _, agg := range []string{"receiving", "putaway", "picking", "shipping"} {
 		t.Run(agg, func(t *testing.T) {
 			m := makeKafkaMsg("wms.events.v1", uuid.New().String(), uuid.New().String(), agg)
-			got, err := Parse(&m)
-			if err != nil {
-				t.Fatalf("Parse %q: %v", agg, err)
+			_, err := Parse(&m)
+			if err == nil {
+				t.Fatalf("expected error for legacy aggregate_type %q", agg)
 			}
-			if got.AggregateType != agg {
-				t.Errorf("want %q, got %q", agg, got.AggregateType)
+			if !strings.Contains(err.Error(), "unknown aggregate_type") {
+				t.Errorf("err = %v, want substring %q", err, "unknown aggregate_type")
 			}
 		})
 	}
@@ -70,7 +52,7 @@ func TestParse_MissingIDHeader(t *testing.T) {
 		Topic: "wms.events.v1",
 		Key:   []byte(uuid.New().String()),
 		Headers: []kafka.Header{
-			{Key: "aggregate_type", Value: []byte("receiving")},
+			{Key: "aggregate_type", Value: []byte(aggregateSignedAction)},
 		},
 	}
 	if _, err := Parse(&m); err == nil {
@@ -92,22 +74,9 @@ func TestParse_MissingAggregateTypeHeader(t *testing.T) {
 }
 
 func TestParse_InvalidEventIDUUID(t *testing.T) {
-	m := makeKafkaMsg("wms.events.v1", "not-a-uuid", uuid.New().String(), "receiving")
+	m := makeKafkaMsg("wms.events.v1", "not-a-uuid", uuid.New().String(), aggregateSignedAction)
 	if _, err := Parse(&m); err == nil {
 		t.Fatal("expected error for invalid event id UUID")
-	}
-}
-
-func TestParse_MissingKey(t *testing.T) {
-	m := kafka.Message{
-		Topic: "wms.events.v1",
-		Headers: []kafka.Header{
-			{Key: "id", Value: []byte(uuid.New().String())},
-			{Key: "aggregate_type", Value: []byte("receiving")},
-		},
-	}
-	if _, err := Parse(&m); err == nil {
-		t.Fatal("expected error for missing key")
 	}
 }
 
@@ -273,9 +242,6 @@ func TestParse_SignedAction_KeyRegisterVector(t *testing.T) {
 	}
 	if got.EventID != actionID {
 		t.Errorf("EventID: got %s, want %s", got.EventID, actionID)
-	}
-	if got.ProductID != uuid.Nil {
-		t.Errorf("ProductID for action: want uuid.Nil, got %s", got.ProductID)
 	}
 	if got.AggregateType != "signed_action" {
 		t.Errorf("AggregateType: got %q", got.AggregateType)

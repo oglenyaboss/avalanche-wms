@@ -36,11 +36,10 @@ func (f *Flusher) Flush(ctx context.Context, msgs []*Message) error {
 }
 
 // Confirm дожидается receipt'а одной in-flight tx и применяет терминальный
-// результат: success → MarkCommitted (для подписанных действий — разбор исходов
-// реестра: Applied → COMMITTED, отклонённые → MarkRejected с reject_reason);
-// revert (status 0) → recordFailure (DLQ+MarkFailed); timeout/RPC-fail →
-// ErrConfirmStalled (строки остаются SENT, без DLQ — pipeline запустит recovery,
-// reconcile-loop подтянет).
+// результат: success → разбор исходов подписанных действий (Applied → COMMITTED,
+// отклонённые → MarkRejected с reject_reason); revert (status 0) → recordFailure
+// (DLQ+MarkFailed); timeout/RPC-fail → ErrConfirmStalled (строки остаются SENT,
+// без DLQ — pipeline запустит recovery, reconcile-loop подтянет).
 func (f *Flusher) Confirm(ctx context.Context, tx *InflightTx) error {
 	receipt, err := chain.WaitReceipt(ctx, f.caller, tx.TxHash, f.receiptTimeout)
 	if err != nil {
@@ -51,16 +50,9 @@ func (f *Flusher) Confirm(ctx context.Context, tx *InflightTx) error {
 		f.log.Error("execution reverted", "aggregate", tx.Aggregate, "tx", tx.TxHash.Hex())
 		return f.recordFailure(ctx, tx.Msgs, tx.IDs, tx.TxHash.Hex(), "execution reverted")
 	}
-	if tx.Aggregate == aggregateSignedAction {
-		if err := applyActionOutcomes(ctx, f.actionResolvers(), f.store, receipt, tx.IDs, tx.TxHash.Hex()); err != nil {
-			return fmt.Errorf("apply action outcomes: %w", err)
-		}
-		f.log.Info("signed actions resolved from receipt", "tx", tx.TxHash.Hex(), "size", len(tx.IDs))
-		return nil
+	if err := applyActionOutcomes(ctx, f.actionResolvers(), f.store, receipt, tx.IDs, tx.TxHash.Hex()); err != nil {
+		return fmt.Errorf("apply action outcomes: %w", err)
 	}
-	if err := f.store.MarkCommitted(ctx, tx.IDs); err != nil {
-		return fmt.Errorf("mark committed: %w", err)
-	}
-	f.log.Info("sub-batch committed", "aggregate", tx.Aggregate, "tx", tx.TxHash.Hex(), "size", len(tx.IDs))
+	f.log.Info("signed actions resolved from receipt", "tx", tx.TxHash.Hex(), "size", len(tx.IDs))
 	return nil
 }
