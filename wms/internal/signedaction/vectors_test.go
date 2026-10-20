@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"wms/internal/domain"
 	"wms/internal/signedaction"
 	"wms/internal/signedaction/signedactiontest"
 )
@@ -105,7 +106,7 @@ func TestVectors_Header(t *testing.T) {
 	if signedaction.NoItems != [32]byte(v.NoItemsHash) {
 		t.Errorf("NoItems = %x, want %x", signedaction.NoItems, v.NoItemsHash)
 	}
-	if got := signedaction.KeyID([32]byte(v.Signer.QX), [32]byte(v.Signer.QY)); got != [32]byte(v.Signer.KeyID) {
+	if got := signedaction.KeyID(domain.P256Point{X: [32]byte(v.Signer.QX), Y: [32]byte(v.Signer.QY)}); got != [32]byte(v.Signer.KeyID) {
 		t.Errorf("KeyID(signer) = %x, want %x", got, v.Signer.KeyID)
 	}
 }
@@ -122,7 +123,7 @@ func TestVectors_Challenge(t *testing.T) {
 			t.Errorf("%s: challenge = %x, want %x", a.Name, got, a.Challenge)
 		}
 		if a.ActionType == int(signedaction.TypeKeyRegister) || a.ActionType == int(signedaction.TypeKeyRevoke) {
-			gotDetails := signedaction.KeyDetailsHash([32]byte(a.Details.QX), [32]byte(a.Details.QY))
+			gotDetails := signedaction.KeyDetailsHash(domain.P256Point{X: [32]byte(a.Details.QX), Y: [32]byte(a.Details.QY)})
 			if gotDetails != [32]byte(a.DetailsHash) {
 				t.Errorf("%s: detailsHash = %x, want %x", a.Name, gotDetails, a.DetailsHash)
 			}
@@ -301,6 +302,7 @@ func TestVectors_ShipDetailsHash(t *testing.T) {
 
 func TestVectors_VerifyVectorSignature(t *testing.T) {
 	v := loadVectors(t)
+	signer := domain.P256Point{X: [32]byte(v.Signer.QX), Y: [32]byte(v.Signer.QY)}
 	for _, a := range v.Actions {
 		der, err := asn1.Marshal(struct{ R, S *big.Int }{
 			new(big.Int).SetBytes(a.WebAuthn.R),
@@ -313,7 +315,7 @@ func TestVectors_VerifyVectorSignature(t *testing.T) {
 			AuthenticatorData: a.WebAuthn.AuthenticatorData,
 			ClientDataJSON:    a.WebAuthn.ClientDataJSONHex,
 			Signature:         der,
-		}, [32]byte(a.Challenge), [32]byte(v.Signer.QX), [32]byte(v.Signer.QY), signedactiontest.RPID, []string{signedactiontest.Origin})
+		}, [32]byte(a.Challenge), signer, signedactiontest.RPID, []string{signedactiontest.Origin})
 		if err != nil {
 			t.Fatalf("%s: Verify: %v", a.Name, err)
 		}
@@ -339,9 +341,9 @@ func onchainTuple(a vectorAction) signedaction.WebAuthn {
 
 func TestVerifyOnChain_Vectors(t *testing.T) {
 	v := loadVectors(t)
-	qx, qy := [32]byte(v.Signer.QX), [32]byte(v.Signer.QY)
+	signer := domain.P256Point{X: [32]byte(v.Signer.QX), Y: [32]byte(v.Signer.QY)}
 	for _, a := range v.Actions {
-		if err := signedaction.VerifyOnChain(onchainTuple(a), [32]byte(a.Challenge), qx, qy); err != nil {
+		if err := signedaction.VerifyOnChain(onchainTuple(a), [32]byte(a.Challenge), signer); err != nil {
 			t.Errorf("%s: VerifyOnChain: %v", a.Name, err)
 		}
 	}
@@ -372,7 +374,7 @@ func TestVerifyOnChain_Vectors(t *testing.T) {
 			wa := onchainTuple(a)
 			challenge := [32]byte(a.Challenge)
 			tc.mutate(&wa, &challenge)
-			err := signedaction.VerifyOnChain(wa, challenge, qx, qy)
+			err := signedaction.VerifyOnChain(wa, challenge, signer)
 			if !errors.Is(err, signedaction.ErrInvalidAssertion) {
 				t.Fatalf("VerifyOnChain = %v, want ErrInvalidAssertion", err)
 			}
@@ -383,9 +385,9 @@ func TestVerifyOnChain_Vectors(t *testing.T) {
 func TestVectors_SoftwareSignerMatchesBrowserFormat(t *testing.T) {
 	v := loadVectors(t)
 	key := signedactiontest.KeyFromScalar(v.Signer.PrivateKey)
-	qx, qy := signedactiontest.Coordinates(key)
-	if qx != [32]byte(v.Signer.QX) || qy != [32]byte(v.Signer.QY) {
-		t.Fatalf("software signer key = %x/%x, want %x/%x", qx, qy, v.Signer.QX, v.Signer.QY)
+	pt := signedactiontest.Coordinates(key)
+	if pt.X != [32]byte(v.Signer.QX) || pt.Y != [32]byte(v.Signer.QY) {
+		t.Fatalf("software signer key = %x/%x, want %x/%x", pt.X, pt.Y, v.Signer.QX, v.Signer.QY)
 	}
 	for _, a := range v.Actions {
 		assertion := signedactiontest.Sign(key, [32]byte(a.Challenge))
@@ -395,7 +397,7 @@ func TestVectors_SoftwareSignerMatchesBrowserFormat(t *testing.T) {
 		if !bytes.Equal(assertion.AuthenticatorData, a.WebAuthn.AuthenticatorData) {
 			t.Errorf("%s: authenticatorData = %x, want %x", a.Name, assertion.AuthenticatorData, a.WebAuthn.AuthenticatorData)
 		}
-		if _, err := signedaction.Verify(assertion, [32]byte(a.Challenge), qx, qy, signedactiontest.RPID, []string{signedactiontest.Origin}); err != nil {
+		if _, err := signedaction.Verify(assertion, [32]byte(a.Challenge), pt, signedactiontest.RPID, []string{signedactiontest.Origin}); err != nil {
 			t.Errorf("%s: Verify: %v", a.Name, err)
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"math/big"
 
+	"wms/internal/domain"
 	"wms/internal/signedaction"
 )
 
@@ -36,11 +37,12 @@ func NewKey() *ecdsa.PrivateKey {
 	return k
 }
 
-// Coordinates returns the public key as the two ABI words qx and qy.
-func Coordinates(k *ecdsa.PrivateKey) (qx, qy [32]byte) {
-	k.X.FillBytes(qx[:])
-	k.Y.FillBytes(qy[:])
-	return qx, qy
+// Coordinates returns the public key as a domain.P256Point.
+func Coordinates(k *ecdsa.PrivateKey) domain.P256Point {
+	var p domain.P256Point
+	k.X.FillBytes(p.X[:])
+	k.Y.FillBytes(p.Y[:])
+	return p
 }
 
 // Sign produces a browser-shaped assertion over the challenge.

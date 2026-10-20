@@ -126,8 +126,8 @@ func toDraftView(d *KeyActionDraft) keyActionDraftView {
 		ActionType: int(d.Action.ActionType),
 		ItemIDs:    []string{},
 		SubjectKey: coordinateView{
-			QX: "0x" + hex.EncodeToString(d.SubjectQX[:]),
-			QY: "0x" + hex.EncodeToString(d.SubjectQY[:]),
+			QX: "0x" + hex.EncodeToString(d.Subject.X[:]),
+			QY: "0x" + hex.EncodeToString(d.Subject.Y[:]),
 		},
 		DetailsHash:      "0x" + hex.EncodeToString(d.DetailsHash[:]),
 		SignerKeyID:      "0x" + hex.EncodeToString(d.SignerKeyID[:]),

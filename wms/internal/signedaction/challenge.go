@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/sha3"
+
+	"wms/internal/domain"
 )
 
 // TypeHash is keccak256("avalanche-wms/SignedAction/v1"), the first word of the challenge.
@@ -171,14 +173,14 @@ func entityDetailsHash(salt, entity [32]byte, operatorID uuid.UUID, occurredAtMs
 	return keccak256(salt[:], entity[:], operator[:], ms[:])
 }
 
-// KeyDetailsHash is keccak256(qx || qy), the details hash of key actions.
-func KeyDetailsHash(qx, qy [32]byte) [32]byte {
-	return keccak256(qx[:], qy[:])
+// KeyDetailsHash is keccak256(key.X || key.Y), the details hash of key actions.
+func KeyDetailsHash(key domain.P256Point) [32]byte {
+	return keccak256(key.X[:], key.Y[:])
 }
 
-// KeyID is keccak256(qx || qy), the identifier of a key in the on-chain registry.
-func KeyID(qx, qy [32]byte) [32]byte {
-	return KeyDetailsHash(qx, qy)
+// KeyID is keccak256(key.X || key.Y), the identifier of a key in the on-chain registry.
+func KeyID(key domain.P256Point) [32]byte {
+	return KeyDetailsHash(key)
 }
 
 func keccak256(parts ...[]byte) [32]byte {

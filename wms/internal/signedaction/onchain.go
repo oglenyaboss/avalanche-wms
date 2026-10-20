@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+
+	"wms/internal/domain"
 )
 
 // VerifyOnChain checks a WebAuthn tuple as SignedMappingWMS does (ADR §5): no origin and no rpIdHash check.
-func VerifyOnChain(wa WebAuthn, challenge [32]byte, qx, qy [32]byte) error {
+func VerifyOnChain(wa WebAuthn, challenge [32]byte, key domain.P256Point) error {
 	if wa.TypeIndex < 0 || wa.TypeIndex > len(wa.ClientDataJSON) ||
 		!strings.HasPrefix(wa.ClientDataJSON[wa.TypeIndex:], `"type":"webauthn.get"`) {
 		return fmt.Errorf(`%w: clientDataJSON lacks "type":"webauthn.get" at typeIndex %d`, ErrInvalidAssertion, wa.TypeIndex)
@@ -33,8 +35,8 @@ func VerifyOnChain(wa WebAuthn, challenge [32]byte, qx, qy [32]byte) error {
 	}
 	pub := &ecdsa.PublicKey{
 		Curve: elliptic.P256(),
-		X:     new(big.Int).SetBytes(qx[:]),
-		Y:     new(big.Int).SetBytes(qy[:]),
+		X:     new(big.Int).SetBytes(key.X[:]),
+		Y:     new(big.Int).SetBytes(key.Y[:]),
 	}
 	if !pub.Curve.IsOnCurve(pub.X, pub.Y) {
 		return fmt.Errorf("%w: public key not on curve", ErrInvalidAssertion)

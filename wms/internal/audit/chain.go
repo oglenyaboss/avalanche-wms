@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/google/uuid"
 
+	"wms/internal/domain"
 	"wms/internal/signedaction"
 )
 
@@ -40,7 +41,7 @@ type ChainRejection struct {
 
 // Key is a registered signer key as ConsortiumRegistry stores it.
 type Key struct {
-	QX, QY [32]byte
+	Point  domain.P256Point
 	OrgID  uuid.UUID
 	Role   uint8
 	Active bool
@@ -200,7 +201,7 @@ func (c *Chain) Key(ctx context.Context, keyID [32]byte) (Key, error) {
 		return Key{}, fmt.Errorf("audit.Chain.Key unpack: %w", err)
 	}
 	t := abi.ConvertType(res[0], new(keyTuple)).(*keyTuple)
-	return Key{QX: t.Qx, QY: t.Qy, OrgID: uuid.UUID(t.OrgId), Role: t.Role, Active: t.Active}, nil
+	return Key{Point: domain.P256Point{X: t.Qx, Y: t.Qy}, OrgID: uuid.UUID(t.OrgId), Role: t.Role, Active: t.Active}, nil
 }
 
 // keyTuple mirrors ConsortiumRegistry.Key: go-ethereum maps tuple components to fields by name.

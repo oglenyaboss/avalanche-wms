@@ -41,12 +41,11 @@ func atGateDispatch(dispatchID, destinationID uuid.UUID) *DispatchRecord {
 // shipSigner returns an operator passkey whose key pair signs real assertions.
 func shipSigner() (*domain.Passkey, *ecdsa.PrivateKey) {
 	key := signedactiontest.NewKey()
-	qx, qy := signedactiontest.Coordinates(key)
+	point := signedactiontest.Coordinates(key)
 	return &domain.Passkey{
 		CredentialID: []byte("cred-operator"),
-		QX:           qx,
-		QY:           qy,
-		KeyID:        signedaction.KeyID(qx, qy),
+		Key:          point,
+		KeyID:        signedaction.KeyID(point),
 		Status:       domain.PasskeyStatusActive,
 	}, key
 }

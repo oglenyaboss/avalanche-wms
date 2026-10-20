@@ -43,9 +43,9 @@ func fill32(v *big.Int) [32]byte {
 func TestVerify_AcceptsValidAssertion(t *testing.T) {
 	key := signedactiontest.NewKey()
 	challenge := [32]byte{1, 2, 3}
-	qx, qy := signedactiontest.Coordinates(key)
+	pub := signedactiontest.Coordinates(key)
 
-	got, err := signedaction.Verify(signedactiontest.Sign(key, challenge), challenge, qx, qy, signedactiontest.RPID, []string{signedactiontest.Origin})
+	got, err := signedaction.Verify(signedactiontest.Sign(key, challenge), challenge, pub, signedactiontest.RPID, []string{signedactiontest.Origin})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestVerify_Rejects(t *testing.T) {
 	other := signedactiontest.NewKey()
 	challenge := [32]byte{9, 9, 9}
 	valid := signedactiontest.Sign(key, challenge)
-	qx, qy := signedactiontest.Coordinates(key)
+	pub := signedactiontest.Coordinates(key)
 
 	wrongType := signedaction.Assertion{
 		AuthenticatorData: valid.AuthenticatorData,
@@ -112,7 +112,7 @@ func TestVerify_Rejects(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := signedaction.Verify(tc.assertion, challenge, qx, qy, signedactiontest.RPID, tc.origins)
+			_, err := signedaction.Verify(tc.assertion, challenge, pub, signedactiontest.RPID, tc.origins)
 			if err == nil {
 				t.Fatalf("Verify succeeded, want rejection")
 			}
@@ -127,7 +127,7 @@ func TestVerify_NormalizesHighS(t *testing.T) {
 	key := signedactiontest.NewKey()
 	challenge := [32]byte{7}
 	valid := signedactiontest.Sign(key, challenge)
-	qx, qy := signedactiontest.Coordinates(key)
+	pub := signedactiontest.Coordinates(key)
 
 	var sig struct {
 		R, S *big.Int
@@ -146,7 +146,7 @@ func TestVerify_NormalizesHighS(t *testing.T) {
 		AuthenticatorData: valid.AuthenticatorData,
 		ClientDataJSON:    valid.ClientDataJSON,
 		Signature:         der,
-	}, challenge, qx, qy, signedactiontest.RPID, []string{signedactiontest.Origin})
+	}, challenge, pub, signedactiontest.RPID, []string{signedactiontest.Origin})
 	if err != nil {
 		t.Fatalf("Verify high-s: %v", err)
 	}

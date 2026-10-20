@@ -16,6 +16,7 @@ import (
 
 	"wms/internal/domain"
 	"wms/internal/ledger"
+	"wms/internal/signedaction"
 )
 
 const registrationSessionTTL = 5 * time.Minute
@@ -141,7 +142,7 @@ func (s *Service) FinishRegistration(ctx context.Context, userID uuid.UUID, body
 	if !cred.Flags.UserVerified {
 		return domain.Passkey{}, fmt.Errorf("%w: user verification required", ErrInvalidRegistration)
 	}
-	qx, qy, err := p256Coordinates(cred.PublicKey)
+	key, err := p256Coordinates(cred.PublicKey)
 	if err != nil {
 		return domain.Passkey{}, fmt.Errorf("%w: %v", ErrInvalidRegistration, err)
 	}
@@ -150,9 +151,8 @@ func (s *Service) FinishRegistration(ctx context.Context, userID uuid.UUID, body
 		CredentialID: cred.ID,
 		UserID:       member.UserID,
 		OrgID:        *member.OrgID,
-		QX:           qx,
-		QY:           qy,
-		KeyID:        keyID(qx, qy),
+		Key:          key,
+		KeyID:        signedaction.KeyID(key),
 		Role:         member.Role,
 		Status:       domain.PasskeyStatusPending,
 		CreatedAt:    s.now(),
@@ -232,8 +232,8 @@ func (s *Service) AdminKeyExport(ctx context.Context, userID uuid.UUID) (AdminKe
 	return AdminKeyExport{
 		OrgID: member.OrgID.String(),
 		Name:  member.OrgName,
-		QX:    "0x" + hex.EncodeToString(p.QX[:]),
-		QY:    "0x" + hex.EncodeToString(p.QY[:]),
+		QX:    "0x" + hex.EncodeToString(p.Key.X[:]),
+		QY:    "0x" + hex.EncodeToString(p.Key.Y[:]),
 	}, nil
 }
 

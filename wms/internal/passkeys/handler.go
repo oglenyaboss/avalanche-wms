@@ -122,8 +122,8 @@ func toPasskeyView(p *domain.Passkey) *passkeyView {
 	return &passkeyView{
 		CredentialID: base64.RawURLEncoding.EncodeToString(p.CredentialID),
 		KeyID:        "0x" + hex.EncodeToString(p.KeyID[:]),
-		QX:           "0x" + hex.EncodeToString(p.QX[:]),
-		QY:           "0x" + hex.EncodeToString(p.QY[:]),
+		QX:           "0x" + hex.EncodeToString(p.Key.X[:]),
+		QY:           "0x" + hex.EncodeToString(p.Key.Y[:]),
 		Role:         string(p.Role),
 		Status:       string(p.Status),
 		CreatedAt:    p.CreatedAt.Format(time.RFC3339),

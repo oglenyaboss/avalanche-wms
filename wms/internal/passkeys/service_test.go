@@ -22,6 +22,7 @@ import (
 
 	"wms/internal/domain"
 	"wms/internal/ledger"
+	"wms/internal/signedaction"
 )
 
 type mockRepo struct {
@@ -196,15 +197,13 @@ func membersRepo(members map[uuid.UUID]Member) *mockRepo {
 }
 
 func livePasskey(userID, org uuid.UUID, status domain.PasskeyStatus) *domain.Passkey {
-	qx := mustHex32ForTest(vectorQX)
-	qy := mustHex32ForTest(vectorQY)
+	key := domain.P256Point{X: mustHex32ForTest(vectorX), Y: mustHex32ForTest(vectorY)}
 	return &domain.Passkey{
 		CredentialID: []byte("cred-1"),
 		UserID:       userID,
 		OrgID:        org,
-		QX:           qx,
-		QY:           qy,
-		KeyID:        keyID(qx, qy),
+		Key:          key,
+		KeyID:        signedaction.KeyID(key),
 		Role:         domain.UserRoleAdmin,
 		Status:       status,
 		CreatedAt:    time.Now(),
@@ -338,10 +337,10 @@ func TestFinishRegistration_ValidNoneAttestation(t *testing.T) {
 
 	wantX := priv.PublicKey.X.FillBytes(make([]byte, 32))
 	wantY := priv.PublicKey.Y.FillBytes(make([]byte, 32))
-	if !bytes.Equal(p.QX[:], wantX) || !bytes.Equal(p.QY[:], wantY) {
+	if !bytes.Equal(p.Key.X[:], wantX) || !bytes.Equal(p.Key.Y[:], wantY) {
 		t.Fatalf("coordinates mismatch")
 	}
-	if p.KeyID != keyID(p.QX, p.QY) {
+	if p.KeyID != signedaction.KeyID(p.Key) {
 		t.Fatalf("keyID is not keccak256(qx||qy)")
 	}
 	if p.Status != domain.PasskeyStatusPending || p.Role != domain.UserRoleAdmin || p.UserID != adminA || p.OrgID != orgA {
@@ -499,7 +498,7 @@ func TestAdminKeyExport(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
-		want := `{"orgId":"` + orgA.String() + `","name":"Org A","qx":"0x` + vectorQX + `","qy":"0x` + vectorQY + `"}`
+		want := `{"orgId":"` + orgA.String() + `","name":"Org A","qx":"0x` + vectorX + `","qy":"0x` + vectorY + `"}`
 		if string(raw) != want {
 			t.Fatalf("export JSON = %s\nwant %s", raw, want)
 		}

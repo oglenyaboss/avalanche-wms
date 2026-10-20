@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+
+	"wms/internal/domain"
 )
 
 // ErrInvalidAssertion is wrapped by every error returned from Verify.
@@ -46,7 +48,7 @@ type ecdsaSignature struct {
 
 // Verify checks an assertion against the challenge and the signer's P-256 key,
 // enforcing type, challenge, origin, rpIdHash, UP/UV flags and low-s.
-func Verify(a Assertion, challenge [32]byte, qx, qy [32]byte, rpID string, origins []string) (WebAuthn, error) {
+func Verify(a Assertion, challenge [32]byte, key domain.P256Point, rpID string, origins []string) (WebAuthn, error) {
 	var cdj clientData
 	if err := json.Unmarshal(a.ClientDataJSON, &cdj); err != nil {
 		return WebAuthn{}, fmt.Errorf("%w: clientDataJSON: %s", ErrInvalidAssertion, err)
@@ -88,8 +90,8 @@ func Verify(a Assertion, challenge [32]byte, qx, qy [32]byte, rpID string, origi
 
 	pub := &ecdsa.PublicKey{
 		Curve: elliptic.P256(),
-		X:     new(big.Int).SetBytes(qx[:]),
-		Y:     new(big.Int).SetBytes(qy[:]),
+		X:     new(big.Int).SetBytes(key.X[:]),
+		Y:     new(big.Int).SetBytes(key.Y[:]),
 	}
 	if !pub.Curve.IsOnCurve(pub.X, pub.Y) {
 		return WebAuthn{}, fmt.Errorf("%w: public key not on curve", ErrInvalidAssertion)

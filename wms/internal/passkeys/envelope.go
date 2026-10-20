@@ -28,7 +28,7 @@ func keyActionEnvelope(action *KeyAction, target *domain.Passkey, signerKeyID [3
 		ActionID:   action.ActionID.String(),
 		ActionType: action.ActionType,
 		ItemIDs:    []string{},
-		SubjectKey: subjectKeyJSON{QX: hexCoordinate(target.QX), QY: hexCoordinate(target.QY)},
+		SubjectKey: subjectKeyJSON{QX: hexCoordinate(target.Key.X), QY: hexCoordinate(target.Key.Y)},
 		KeyID:      hexCoordinate(signerKeyID),
 		WebAuthn:   signedaction.NewEnvelopeWebAuthn(wa),
 	}
