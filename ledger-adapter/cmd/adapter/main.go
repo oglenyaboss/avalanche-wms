@@ -144,7 +144,7 @@ func run(log *slog.Logger) error {
 		return reconciler.Run(gCtx)
 	})
 
-	srv := startHTTPServer(log, cfg.Port, client, registry)
+	srv := startHTTPServer(log, cfg.Port, registry)
 
 	runErr := g.Wait()
 	log.Info("consumer stopped, shutting down http")
@@ -196,9 +196,9 @@ func assertSignersFunded(ctx context.Context, rpcURL string, clients []*chain.Cl
 	return nil
 }
 
-func startHTTPServer(log *slog.Logger, port string, chainReader handler.ChainReader, registry handler.RegistryReader) *http.Server {
+func startHTTPServer(log *slog.Logger, port string, registry handler.RegistryReader) *http.Server {
 	mux := http.NewServeMux()
-	handler.New(chainReader, registry).RegisterRoutes(mux)
+	handler.New(registry).RegisterRoutes(mux)
 
 	srv := &http.Server{
 		Addr:              ":" + port,

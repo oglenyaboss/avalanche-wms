@@ -20,7 +20,6 @@ import (
 	"wms/internal/destinations"
 	"wms/internal/dispatches"
 	"wms/internal/ledger"
-	"wms/internal/onchain"
 	"wms/internal/passkeys"
 	"wms/internal/platform/kafka"
 	"wms/internal/platform/postgres"
@@ -130,16 +129,6 @@ func main() {
 
 	auditHandler := audit.NewHandler(audit.NewRepository(dbPool))
 
-	// ledgerClient is a concrete *ledger.Client and is nil when LEDGER_ADAPTER_URL is
-	// unset. Assign THROUGH the interface var so a typed-nil pointer doesn't defeat
-	// the handler's `h.ledger == nil` check (a nil *ledger.Client stored directly in
-	// the interface is NOT == nil and would panic on call).
-	var receiptGetter onchain.ReceiptGetter
-	if ledgerClient != nil {
-		receiptGetter = ledgerClient
-	}
-	onchainHandler := onchain.NewHandler(receiptGetter)
-
 	// Router
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler(dbPool, kafkaConn, ledgerClient)).Methods("GET")
@@ -176,10 +165,6 @@ func main() {
 	auditRouter := r.PathPrefix("/audit").Subrouter()
 	auditRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
 	auditHandler.RegisterRoutes(auditRouter)
-
-	onchainRouter := r.PathPrefix("/onchain").Subrouter()
-	onchainRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))
-	onchainHandler.RegisterRoutes(onchainRouter)
 
 	shippingRouter := r.PathPrefix("/shipping").Subrouter()
 	shippingRouter.Use(auth.Middleware([]byte(cfg.JWTSecret)))

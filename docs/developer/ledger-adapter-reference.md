@@ -14,7 +14,7 @@
 
 Полный путь действия: WMS пишет строку в `public.outbox_events` (`aggregate_type = 'signed_action'`, `payload` — подписанный конверт, ADR-0001 §9) → Debezium (CDC) публикует её в единственный Kafka-топик `wms.events.v1` → `ledger-adapter` потребляет топик, накапливает окно (по времени/размеру), режет его на сегменты складских и ключевых действий, пакует в чанки по calldata и отправляет **одну транзакцию на чанк** в Kafka-порядке. Исход каждого действия (применено / отклонено с причиной) разбирается из логов receipt'а и пишется в `public.onchain_events`; фоновый reconcile-loop подтягивает застрявшие строки.
 
-> **У адаптера нет бизнес-REST-интерфейса на запись.** HTTP-эндпоинты только читают: `GET /health` (liveness), `GET /onchain/tx/{hash}` (receipt транзакции для доказательства on-chain) и `GET /registry/keys/{keyId}` (статус ключа в `ConsortiumRegistry`), см. §9. Chain-status gate (`ledger.CheckChainStatus` на стороне WMS) читает `public.onchain_events` напрямую через общий PostgreSQL, а не через адаптер.
+> **У адаптера нет бизнес-REST-интерфейса на запись.** HTTP-эндпоинты только читают: `GET /health` (liveness) и `GET /registry/keys/{keyId}` (статус ключа в `ConsortiumRegistry`), см. §9. Chain-status gate (`ledger.CheckChainStatus` на стороне WMS) читает `public.onchain_events` напрямую через общий PostgreSQL, а не через адаптер.
 
 ```
 WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter → SignedMappingWMS / ConsortiumRegistry
@@ -52,7 +52,7 @@ WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter 
 | `internal/store/pool.go` | `NewPool` — `pgxpool` (`MaxConns=10`, `MinConns=1`, `MaxConnIdleTime=30s`, startup-ping 10s) |
 | `internal/store/onchain_events.go` | `Repository` — весь SQL по `public.onchain_events` (включая `reject_reason`); тип `ReconcileRow` |
 | `internal/dlq/producer.go` | `Producer` — `kafka.Writer` (acks `RequireAll`) в DLQ-топик; `PublishAll` сохраняет исходный payload и добавляет метаданные |
-| `internal/handler/handler.go` | `Handler`: `/health`, `/onchain/tx/{hash}`, `/registry/keys/{keyId}` (§9) |
+| `internal/handler/handler.go` | `Handler`: `/health`, `/registry/keys/{keyId}` (§9) |
 | `cmd/registry-cli/` | CLI владельца консорциума: `register-org` / `add-admin-key` / `list` ([ledger-adapter/README.md](../../ledger-adapter/README.md)) |
 | `cmd/kms-init/` | bootstrap kms-профиля: ключи в Web3Signer, фондирование, allow-list, публикация identifier'ов |
 
@@ -220,24 +220,11 @@ PENDING ──MarkSent──► SENT ──receipt + логи──► COMMITTED
 
 ## 10. REST-эндпоинты адаптера
 
-Три эндпоинта, все только на чтение и без аутентификации: они отдают данные, которые и так публичны в цепи. Бизнес-REST-поверхности на запись нет. Порт публикуется только на loopback (`127.0.0.1:8085`); публичный вход — аутентифицированный прокси WMS.
+Два эндпоинта, оба только на чтение и без аутентификации: они отдают данные, которые и так публичны в цепи. Бизнес-REST-поверхности на запись нет. Порт публикуется только на loopback (`127.0.0.1:8085`).
 
 ### `GET /health`
 
 Liveness-проба: всегда `200 OK`, `{"status":"ok","time":"<RFC3339 UTC>"}`. Не проверяет Kafka/БД/RPC (TODO #50). Вызывающая сторона: `wms/internal/ledger/client.go` — `Client.HealthCheck()`.
-
-### `GET /onchain/tx/{hash}`
-
-Один живой запрос receipt к RPC (без поллинга), таймаут 4 с. `hash` — `0x` и 64 hex-символа.
-
-| Ситуация | Ответ |
-|---|---|
-| `hash` не по формату | `400` `{"error":"INVALID_TX_HASH"}` |
-| нет клиента или ошибка RPC | `502` `{"error":"CHAIN_UNREACHABLE"}` |
-| receipt ещё нет | `200` `{"found":false,"status":"pending"}` |
-| receipt есть | `200` `{"found":true,"status":"success"|"failed","block_number":…,"confirmations":…,"gas_used":…}` |
-
-Нулевые `block_number`/`confirmations`/`gas_used` в ответ не попадают; `confirmations` = голова цепи минус блок receipt, при отстающей голове зажимается до 0. Вызывающая сторона: `Client.GetTxReceipt()`; наружу его отдаёт аутентифицированный `GET /onchain/tx/{hash}` WMS.
 
 ### `GET /registry/keys/{keyId}`
 
