@@ -501,11 +501,11 @@ func TestSyncStatuses(t *testing.T) {
 	}
 }
 
-// orgPasskey — копия livePasskey с уникальным ключом (QX variant) и credential id.
+// orgPasskey — копия livePasskey с уникальным ключом (Key.X variant) и credential id.
 func orgPasskey(userID, org uuid.UUID, status domain.PasskeyStatus, variant byte) domain.Passkey {
 	p := *livePasskey(userID, org, status)
-	p.QX[0] = variant
-	p.KeyID = keyID(p.QX, p.QY)
+	p.Key.X[0] = variant
+	p.KeyID = signedaction.KeyID(p.Key)
 	p.CredentialID = []byte{variant}
 	return p
 }
