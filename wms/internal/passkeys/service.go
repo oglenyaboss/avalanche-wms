@@ -37,10 +37,10 @@ type repository interface {
 	SubmitKeyAction(ctx context.Context, s KeyActionSubmission) error
 }
 
-// KeyStatusGetter is the slice of *ledger.Client used to read a key's registry
+// KeyStatusGetter is the slice of *ledger.Client used to read keys' registry
 // status (test seam; nil disables status sync).
 type KeyStatusGetter interface {
-	GetRegistryKey(ctx context.Context, keyID string) (ledger.RegistryKey, error)
+	GetRegistryKeys(ctx context.Context, keyIDs []string) (map[string]ledger.RegistryKey, error)
 }
 
 type pending struct {
@@ -169,7 +169,7 @@ func (s *Service) MyPasskey(ctx context.Context, userID uuid.UUID) (*domain.Pass
 		return nil, fmt.Errorf("passkeys.Service.MyPasskey: %w", err)
 	}
 	if p != nil {
-		s.syncStatus(ctx, p)
+		s.syncStatuses(ctx, []*domain.Passkey{p})
 	}
 	return p, nil
 }
@@ -198,17 +198,19 @@ func (s *Service) Organization(ctx context.Context, userID uuid.UUID) (Organizat
 		Organization: domain.Organization{ID: orgID, Name: member.OrgName},
 		Members:      make([]OrgMember, 0, len(users)),
 	}
+	var live []*domain.Passkey
 	for _, u := range users {
 		m := OrgMember{UserID: u.UserID, Username: u.Username, Role: u.Role}
 		if p, ok := keys[u.UserID]; ok {
-			s.syncStatus(ctx, &p)
 			m.Passkey = &p
+			live = append(live, &p)
 			if c, ok := confirmations[string(p.CredentialID)]; ok {
 				m.Confirmation = &c
 			}
 		}
 		out.Members = append(out.Members, m)
 	}
+	s.syncStatuses(ctx, live)
 	return out, nil
 }
 
@@ -224,7 +226,7 @@ func (s *Service) AdminKeyExport(ctx context.Context, userID uuid.UUID) (AdminKe
 	if p == nil {
 		return AdminKeyExport{}, ErrPasskeyNotFound
 	}
-	s.syncStatus(ctx, p)
+	s.syncStatuses(ctx, []*domain.Passkey{p})
 	if p.Status != domain.PasskeyStatusPending && p.Status != domain.PasskeyStatusActive {
 		return AdminKeyExport{}, ErrPasskeyNotFound
 	}

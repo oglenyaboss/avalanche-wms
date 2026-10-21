@@ -110,7 +110,7 @@ curl -s localhost:8085/health  # health ledger-adapter
 | Host-порт | Сервис | Назначение |
 |-----------|--------|-----------|
 | `8081` | `wms_app` (`wms-service`) | WMS HTTP REST API (внутри контейнера `8080`) |
-| `8085` | `ledger-adapter` | HTTP (только loopback): `/health`, `/registry/keys/{keyId}` |
+| `8085` | `ledger-adapter` | HTTP (только loopback): `/health`, `/registry/keys/{keyId}`, `POST /registry/keys` |
 | `8080` | `kafka-ui` | Kafbat UI |
 | `8083` | `debezium` | Kafka Connect REST API |
 | `9090` | `prometheus` | Prometheus UI |
@@ -261,7 +261,7 @@ EventRouter имеет статичную замену `route.topic.replacement 
 | `REGISTRY_ADDR` | нет | — | string | hex-адрес `ConsortiumRegistry` (`/shared/registry_addr.txt` через `REGISTRY_ADDR_FILE`); без него ключевые действия не отправляются, `/registry/keys/{keyId}` отвечает 502 |
 | `SIGNER_MODE` | нет | `static` | string | `static` (приватник в env — только локальная разработка) или `kms` (подпись в Web3Signer: `KMS_URL` + `KMS_PUBLIC_KEYS` — identifier единственного ключа) |
 | `PRIVATE_KEY` | **да** (static) | — | string | hex ECDSA-ключ (`0x` срезается). Есть `PRIVATE_KEY_FILE` (`/shared/deployer_key.txt`); в kms-режиме не читается |
-| `PORT` | нет | `8085` | string | HTTP-порт `/health`, `/registry/keys` |
+| `PORT` | нет | `8085` | string | HTTP-порт `/health`, `/registry/keys/{keyId}`, `POST /registry/keys` |
 | `KAFKA_GROUP_ID` | нет | `ledger-adapter` | string | consumer group |
 | `DLQ_TOPIC` | нет | `wms.dlq.v1` | string | топик для failed/непарсящихся |
 | `LOG_LEVEL` | нет | `info` | string | зарезервирован, пока не подключён к slog |

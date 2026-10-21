@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -44,27 +45,37 @@ type RegistryKey struct {
 	Active bool   `json:"active"`
 }
 
-// GetRegistryKey proxies the adapter's GET /registry/keys/{keyID}. A transport
-// error or non-200 is returned as an error.
-func (c *Client) GetRegistryKey(ctx context.Context, keyID string) (RegistryKey, error) {
+// GetRegistryKeys proxies the adapter's POST /registry/keys (batched key
+// status lookup). A transport error or non-200 is returned as an error.
+func (c *Client) GetRegistryKeys(ctx context.Context, keyIDs []string) (map[string]RegistryKey, error) {
+	if len(keyIDs) == 0 {
+		return map[string]RegistryKey{}, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/registry/keys/"+keyID, http.NoBody)
+	payload, err := json.Marshal(map[string][]string{"key_ids": keyIDs})
 	if err != nil {
-		return RegistryKey{}, fmt.Errorf("ledger GetRegistryKey build: %w", err)
+		return nil, fmt.Errorf("ledger GetRegistryKeys marshal: %w", err)
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/registry/keys", bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("ledger GetRegistryKeys build: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return RegistryKey{}, fmt.Errorf("ledger GetRegistryKey: %w", err)
+		return nil, fmt.Errorf("ledger GetRegistryKeys: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return RegistryKey{}, fmt.Errorf("ledger GetRegistryKey: adapter status %d", resp.StatusCode)
+		return nil, fmt.Errorf("ledger GetRegistryKeys: adapter status %d", resp.StatusCode)
 	}
-	var out RegistryKey
+	var out struct {
+		Keys map[string]RegistryKey `json:"keys"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return RegistryKey{}, fmt.Errorf("ledger GetRegistryKey decode: %w", err)
+		return nil, fmt.Errorf("ledger GetRegistryKeys decode: %w", err)
 	}
-	return out, nil
+	return out.Keys, nil
 }

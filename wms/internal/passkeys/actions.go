@@ -154,7 +154,7 @@ func (s *Service) operatorTarget(ctx context.Context, orgID uuid.UUID, targetKey
 	if target == nil || target.OrgID != orgID || target.Role != domain.UserRoleOperator {
 		return nil, ErrPasskeyNotFound
 	}
-	s.syncStatus(ctx, target)
+	s.syncStatuses(ctx, []*domain.Passkey{target})
 	return target, nil
 }
 
@@ -271,7 +271,7 @@ func (s *Service) ActiveSigner(ctx context.Context, userID uuid.UUID) (*domain.P
 	if signer == nil {
 		return nil, ErrPasskeyNotFound
 	}
-	s.syncStatus(ctx, signer)
+	s.syncStatuses(ctx, []*domain.Passkey{signer})
 	if signer.Status != domain.PasskeyStatusActive {
 		return nil, ErrSignerKeyNotActive
 	}

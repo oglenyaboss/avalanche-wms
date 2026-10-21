@@ -14,7 +14,7 @@
 
 Полный путь действия: WMS пишет строку в `public.outbox_events` (`aggregate_type = 'signed_action'`, `payload` — подписанный конверт, ADR-0001 §9) → Debezium (CDC) публикует её в единственный Kafka-топик `wms.events.v1` → `ledger-adapter` потребляет топик, накапливает окно (по времени/размеру), режет его на сегменты складских и ключевых действий, пакует в чанки по calldata и отправляет **одну транзакцию на чанк** в Kafka-порядке. Исход каждого действия (применено / отклонено с причиной) разбирается из логов receipt'а и пишется в `public.onchain_events`; фоновый reconcile-loop подтягивает застрявшие строки.
 
-> **У адаптера нет бизнес-REST-интерфейса на запись.** HTTP-эндпоинты только читают: `GET /health` (liveness) и `GET /registry/keys/{keyId}` (статус ключа в `ConsortiumRegistry`), см. §9. Chain-status gate (`ledger.CheckChainStatus` на стороне WMS) читает `public.onchain_events` напрямую через общий PostgreSQL, а не через адаптер.
+> **У адаптера нет бизнес-REST-интерфейса на запись.** HTTP-эндпоинты только читают: `GET /health` (liveness), `GET /registry/keys/{keyId}` и `POST /registry/keys` (статусы ключей в `ConsortiumRegistry`), см. §9. Chain-status gate (`ledger.CheckChainStatus` на стороне WMS) читает `public.onchain_events` напрямую через общий PostgreSQL, а не через адаптер.
 
 ```
 WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter → SignedMappingWMS / ConsortiumRegistry
@@ -52,7 +52,7 @@ WMS → outbox_events → Debezium → Kafka (wms.events.v1) → ledger-adapter 
 | `internal/store/pool.go` | `NewPool` — `pgxpool` (`MaxConns=10`, `MinConns=1`, `MaxConnIdleTime=30s`, startup-ping 10s) |
 | `internal/store/onchain_events.go` | `Repository` — весь SQL по `public.onchain_events` (включая `reject_reason`); тип `ReconcileRow` |
 | `internal/dlq/producer.go` | `Producer` — `kafka.Writer` (acks `RequireAll`) в DLQ-топик; `PublishAll` сохраняет исходный payload и добавляет метаданные |
-| `internal/handler/handler.go` | `Handler`: `/health`, `/registry/keys/{keyId}` (§9) |
+| `internal/handler/handler.go` | `Handler`: `/health`, `/registry/keys/{keyId}`, `POST /registry/keys` (§9) |
 | `cmd/registry-cli/` | CLI владельца консорциума: `register-org` / `add-admin-key` / `list` ([ledger-adapter/README.md](../../ledger-adapter/README.md)) |
 | `cmd/kms-init/` | bootstrap kms-профиля: ключи в Web3Signer, фондирование, allow-list, публикация identifier'ов |
 
@@ -220,7 +220,7 @@ PENDING ──MarkSent──► SENT ──receipt + логи──► COMMITTED
 
 ## 10. REST-эндпоинты адаптера
 
-Два эндпоинта, оба только на чтение и без аутентификации: они отдают данные, которые и так публичны в цепи. Бизнес-REST-поверхности на запись нет. Порт публикуется только на loopback (`127.0.0.1:8085`).
+Три эндпоинта, все только на чтение и без аутентификации: они отдают данные, которые и так публичны в цепи. Бизнес-REST-поверхности на запись нет. Порт публикуется только на loopback (`127.0.0.1:8085`).
 
 ### `GET /health`
 
@@ -238,6 +238,20 @@ Liveness-проба: всегда `200 OK`, `{"status":"ok","time":"<RFC3339 UTC
 | ключ есть | `200` `{"found":true,"org_id":"<uuid>","role":"admin"|"operator","active":true|false}` |
 
 Вызывающая сторона: сервис passkey WMS — при чтении синхронизирует статус ключа (`PENDING` → `ACTIVE` или `REVOKED`).
+
+### `POST /registry/keys`
+
+Пакетный вариант GET: статусы нескольких ключей одним запросом — страница организации не делает по запросу на каждого участника. Тело: `{"key_ids":["0x…","0x…"]}`, 1–200 id, каждый — `0x` и 64 hex-символа (`keccak256(qx ‖ qy)`); дубликаты допустимы. Вызовы `getKey` идут последовательно под одним таймаутом 10 с; ошибка любого — весь ответ `502`.
+
+| Ситуация | Ответ |
+|---|---|
+| тело не декодируется | `400` `{"error":"INVALID_BODY"}` |
+| 0 или более 200 id | `400` `{"error":"INVALID_KEY_IDS"}` |
+| id не по формату | `400` `{"error":"INVALID_KEY_ID"}` |
+| `REGISTRY_ADDR` не задан или ошибка RPC | `502` `{"error":"CHAIN_UNREACHABLE"}` |
+| успех | `200` `{"keys":{"<keyId как в запросе>": <тот же объект, что в GET>}}`; для ключа, которого нет в реестре, — `{"found":false}` |
+
+Вызывающая сторона: сервис passkey WMS — синхронизация статусов всех ключей организации (`syncStatuses`) за один запрос.
 
 ## 11. Конфигурация (env-переменные)
 

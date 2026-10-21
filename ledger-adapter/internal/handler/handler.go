@@ -35,6 +35,7 @@ func New(registry RegistryReader) *Handler {
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", h.Health)
 	mux.HandleFunc("GET /registry/keys/{keyId}", h.RegistryKey)
+	mux.HandleFunc("POST /registry/keys", h.RegistryKeys)
 }
 
 // Health отвечает 200 если процесс жив.
@@ -79,20 +80,64 @@ func (h *Handler) RegistryKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
 		return
 	}
+	writeJSON(w, http.StatusOK, registryKeyView(key))
+}
+
+// registryKeyView отдаёт JSON-вид ключа реестра; для ключа без роли — тот же
+// {"found":false}, что и в GET.
+func registryKeyView(key chain.RegistryKey) any {
 	if key.Role == chain.RoleNone {
-		writeJSON(w, http.StatusOK, map[string]bool{"found": false})
-		return
+		return map[string]bool{"found": false}
 	}
 	role := "operator"
 	if key.Role == chain.RoleAdmin {
 		role = "admin"
 	}
-	writeJSON(w, http.StatusOK, registryKeyResponse{
+	return registryKeyResponse{
 		Found:  true,
 		OrgID:  uuid.UUID(key.OrgID).String(),
 		Role:   role,
 		Active: key.Active,
-	})
+	}
+}
+
+// RegistryKeys — статусы нескольких ключей одним запросом (пакетный вариант GET).
+func (h *Handler) RegistryKeys(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		KeyIDs []string `json:"key_ids"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_BODY"})
+		return
+	}
+	if len(body.KeyIDs) == 0 || len(body.KeyIDs) > 200 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_KEY_IDS"})
+		return
+	}
+	for _, id := range body.KeyIDs {
+		if !keyIDRe.MatchString(id) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_KEY_ID"})
+			return
+		}
+	}
+	if h.registry == nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	keys := make(map[string]any, len(body.KeyIDs))
+	for _, id := range body.KeyIDs {
+		key, err := h.registry.GetKey(ctx, [32]byte(common.HexToHash(id)))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "CHAIN_UNREACHABLE"})
+			return
+		}
+		keys[id] = registryKeyView(key)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
