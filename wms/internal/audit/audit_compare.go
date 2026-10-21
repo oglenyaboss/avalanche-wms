@@ -107,40 +107,41 @@ func (a *Auditor) appliedStage(ctx context.Context, db *Action, applied *ChainAc
 		s.Findings = append(s.Findings, Finding{ActionID: db.ActionID, Kind: KindType, Detail: fmt.Sprintf("db %d chain %d", db.ActionType, applied.ActionType)})
 		return s, nil
 	}
-	if err := a.checkDetailsHash(ctx, db, applied, &s); err != nil {
+	d, err := a.checkDetailsHash(ctx, db, applied, &s)
+	if err != nil {
 		return Stage{}, fmt.Errorf("audit.Auditor.stage: %w", err)
 	}
 	if err := a.checkItems(ctx, db, &s); err != nil {
 		return Stage{}, fmt.Errorf("audit.Auditor.stage: %w", err)
 	}
-	checkSigner(db, applied, &s)
+	checkSigner(db, applied, d, &s)
 	if err := a.checkSignature(ctx, db, applied, &s); err != nil {
 		return Stage{}, fmt.Errorf("audit.Auditor.stage: %w", err)
 	}
 	return s, nil
 }
 
-func (a *Auditor) checkDetailsHash(ctx context.Context, db *Action, applied *ChainAction, s *Stage) error {
+func (a *Auditor) checkDetailsHash(ctx context.Context, db *Action, applied *ChainAction, s *Stage) (*Details, error) {
 	d, err := a.store.Details(ctx, *db)
 	if err != nil {
 		if errors.Is(err, ErrDomainRowMissing) || errors.Is(err, ErrDomainInconsistent) {
 			s.DetailsHash = CheckMismatch
 			s.Findings = append(s.Findings, Finding{ActionID: db.ActionID, Kind: KindDetailsHash, Detail: err.Error()})
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	h, err := d.Hash()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if h != applied.DetailsHash {
 		s.DetailsHash = CheckMismatch
 		s.Findings = append(s.Findings, Finding{ActionID: db.ActionID, Kind: KindDetailsHash, Detail: fmt.Sprintf("db %s chain %s", hexKey(h), hexKey(applied.DetailsHash))})
-		return nil
+		return &d, nil
 	}
 	s.DetailsHash = CheckOK
-	return nil
+	return &d, nil
 }
 
 func (a *Auditor) checkItems(ctx context.Context, db *Action, s *Stage) error {
@@ -180,14 +181,21 @@ func (a *Auditor) checkItems(ctx context.Context, db *Action, s *Stage) error {
 	return nil
 }
 
-func checkSigner(db *Action, applied *ChainAction, s *Stage) {
-	if applied.KeyID == db.KeyID && applied.OrgID == db.OrgID {
+// checkSigner requires the chain signer to be the DB key and org, the executor
+// (created_by) to own that key and the signed details to name the executor.
+func checkSigner(db *Action, applied *ChainAction, d *Details, s *Stage) {
+	detailsOperator := "-"
+	if d != nil {
+		detailsOperator = d.OperatorID.String()
+	}
+	if applied.KeyID == db.KeyID && applied.OrgID == db.OrgID && db.KeyOwnerID == db.OperatorID && (d == nil || d.OperatorID == db.OperatorID) {
 		s.Signer = CheckOK
 		return
 	}
 	s.Signer = CheckMismatch
 	s.Findings = append(s.Findings, Finding{ActionID: db.ActionID, Kind: KindSigner,
-		Detail: fmt.Sprintf("db key %s org %s chain key %s org %s", hexKey(db.KeyID), db.OrgID, hexKey(applied.KeyID), applied.OrgID)})
+		Detail: fmt.Sprintf("db key %s org %s chain key %s org %s executor %s key owner %s details operator %s",
+			hexKey(db.KeyID), db.OrgID, hexKey(applied.KeyID), applied.OrgID, db.OperatorID, db.KeyOwnerID, detailsOperator)})
 }
 
 func (a *Auditor) checkSignature(ctx context.Context, db *Action, applied *ChainAction, s *Stage) error {

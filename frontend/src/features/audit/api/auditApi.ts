@@ -30,6 +30,7 @@ interface ActionResponse {
   submittedAt: string
   operatorId: string
   operator: string
+  keyOwnerId: string
   orgId: string
   orgName: string
   keyId: string

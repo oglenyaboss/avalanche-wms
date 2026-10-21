@@ -54,6 +54,7 @@ function dbAction(overrides: Partial<DbAction> = {}): DbAction {
     submittedAt: '2025-10-18T10:01:00Z',
     operatorId: details.operatorId!,
     operator: 'Оператор',
+    keyOwnerId: details.operatorId!,
     orgId: vectors.orgId,
     orgName: 'Склад №1',
     keyId: vectors.signer.keyId,
@@ -224,6 +225,22 @@ describe('auditProduct', () => {
     const stages = await auditProduct(dbAudit(action), chain)
     expect(stages[0].items).toBe('mismatch')
     expect(stages[0].problems).toContain('Список товаров в БД не совпадает с цепью')
+  })
+
+  it('flags an executor differing from the key owner as signer mismatch', async () => {
+    const action = dbAction({ keyOwnerId: '01929c5e-6f00-7000-8000-000000000eee' })
+    const stages = await auditProduct(dbAudit(action), mockChain())
+    expect(stages[0].signer).toBe('mismatch')
+    expect(stages[0].problems).toContain('Исполнитель действия не совпадает с подписантом')
+  })
+
+  it('flags a details operator differing from the executor as signer mismatch', async () => {
+    const action = dbAction({
+      details: { ...dbAction().details!, operatorId: '01929c5e-6f00-7000-8000-000000000eee' },
+    })
+    const stages = await auditProduct(dbAudit(action), mockChain())
+    expect(stages[0].signer).toBe('mismatch')
+    expect(stages[0].problems).toContain('Исполнитель действия не совпадает с подписантом')
   })
 
   it('flags a flipped signature r as signature mismatch', async () => {

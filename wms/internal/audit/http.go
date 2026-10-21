@@ -99,6 +99,7 @@ func (h *Handler) actionView(ctx context.Context, a Action) (actionView, error) 
 		SubmittedAt:  a.SubmittedAt.UTC().Format(time.RFC3339Nano),
 		OperatorID:   a.OperatorID.String(),
 		Operator:     a.Operator,
+		KeyOwnerID:   a.KeyOwnerID.String(),
 		OrgID:        a.OrgID.String(),
 		OrgName:      a.OrgName,
 		KeyID:        signedaction.Hex32(a.KeyID),

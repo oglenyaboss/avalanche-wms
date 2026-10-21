@@ -329,6 +329,40 @@ func TestAudit_PutawayProductSwapped_ItemsMismatch(t *testing.T) {
 		"all findings must contain the tampered putaway")
 }
 
+// TestAudit_ExecutorSwapped_SignerMismatch replaces the action executor with
+// another existing user: the CLI catches the signer mismatch.
+func TestAudit_ExecutorSwapped_SignerMismatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	env := testEnv
+	require.NotNil(t, env)
+
+	fx := signedPutawayFixture(t, ctx, env)
+	var other uuid.UUID
+	err := env.db.QueryRow(ctx, `
+		SELECT user_id FROM public.users
+		WHERE user_id <> (SELECT created_by FROM public.warehouse_actions WHERE action_id = $1)
+		LIMIT 1`, fx.putawayActionID).Scan(&other)
+	require.NoError(t, err)
+	mustExec(t, ctx, env, `UPDATE public.warehouse_actions SET created_by = $1 WHERE action_id = $2`, other, fx.putawayActionID)
+
+	stdout, code := runAudit(t, ctx, env, "product", fx.productIDs[0].String())
+	require.Equal(t, 1, code, "swapped executor must exit 1")
+	stages := auditStagesByID(t, stdout)
+	pa, ok := stages[fx.putawayActionID.String()]
+	require.True(t, ok, "no putaway stage in %s", stdout)
+	require.Equal(t, "MISMATCH", pa.Signer, "putaway signer check")
+	require.True(t, containsFinding(pa.Findings, fx.putawayActionID, "SIGNER_MISMATCH"), "putaway findings %v", pa.Findings)
+	rec, ok := stages[fx.receiveActionID.String()]
+	require.True(t, ok, "no receive stage in %s", stdout)
+	require.Equal(t, "OK", rec.Signer, "receive stage must stay OK")
+
+	stdout, code = runAudit(t, ctx, env, "all")
+	require.Equal(t, 1, code, "all must exit 1 with findings")
+	require.True(t, containsFinding(parseAuditFindings(t, stdout), fx.putawayActionID, "SIGNER_MISMATCH"),
+		"all findings must contain the tampered putaway")
+}
+
 // TestAudit_ActionRowDeleted_MissingInDB deletes the putaway action row (and
 // unlinks the domain row): the chain-only action is reported MISSING_IN_DB.
 func TestAudit_ActionRowDeleted_MissingInDB(t *testing.T) {

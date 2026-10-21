@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"os"
 	"slices"
@@ -142,6 +143,7 @@ func newFixture(t *testing.T) fixture {
 			SubmittedAt: time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC),
 			OperatorID:  operatorID,
 			Operator:    "alice",
+			KeyOwnerID:  operatorID,
 			OrgID:       orgID,
 			OrgName:     "Демо-склад",
 			KeyID:       [32]byte(a.KeyID),
@@ -588,6 +590,90 @@ func TestPartItems(t *testing.T) {
 	if got := partItems(sorted, 2); len(got) != 0 {
 		t.Errorf("part 2 len = %d, want 0", len(got))
 	}
+}
+
+// TestAudit_Product_SignerExecutorMismatch requires the executor (created_by),
+// the key owner and the signed details operator to be the same user.
+func TestAudit_Product_SignerExecutorMismatch(t *testing.T) {
+	f := newFixture(t)
+	product := f.productOf(t)
+	other := uuid.New()
+
+	t.Run("clean action is signed by its executor", func(t *testing.T) {
+		s, l := consistentFakes(f, product)
+		report, err := NewAuditor(s, l).Product(context.Background(), product)
+		if err != nil {
+			t.Fatalf("Product: %v", err)
+		}
+		if report.Stages[0].Signer != CheckOK {
+			t.Errorf("signer = %s, want OK", report.Stages[0].Signer)
+		}
+		if findFinding(report.Findings(), KindSigner) != nil {
+			t.Errorf("unexpected %s finding in %v", KindSigner, report.Findings())
+		}
+	})
+
+	t.Run("key owner differs from the executor", func(t *testing.T) {
+		f.dbAction.KeyOwnerID = other
+		s, l := consistentFakes(f, product)
+		report, err := NewAuditor(s, l).Product(context.Background(), product)
+		if err != nil {
+			t.Fatalf("Product: %v", err)
+		}
+		if report.Stages[0].Signer != CheckMismatch {
+			t.Errorf("signer = %s, want MISMATCH", report.Stages[0].Signer)
+		}
+		finding := findFinding(report.Findings(), KindSigner)
+		if finding == nil {
+			t.Fatalf("no %s finding in %v", KindSigner, report.Findings())
+		}
+		if !strings.Contains(finding.Detail, fmt.Sprintf("key owner %s", other)) {
+			t.Errorf("detail = %q, want the key owner %s", finding.Detail, other)
+		}
+	})
+
+	t.Run("details operator differs from the executor", func(t *testing.T) {
+		s, l := consistentFakes(f, product)
+		s.details = func(a Action) (Details, error) {
+			d := f.details()
+			d.OperatorID = other
+			return d, nil
+		}
+		report, err := NewAuditor(s, l).Product(context.Background(), product)
+		if err != nil {
+			t.Fatalf("Product: %v", err)
+		}
+		if report.Stages[0].Signer != CheckMismatch {
+			t.Errorf("signer = %s, want MISMATCH", report.Stages[0].Signer)
+		}
+		finding := findFinding(report.Findings(), KindSigner)
+		if finding == nil {
+			t.Fatalf("no %s finding in %v", KindSigner, report.Findings())
+		}
+		if !strings.Contains(finding.Detail, fmt.Sprintf("details operator %s", other)) {
+			t.Errorf("detail = %q, want the details operator %s", finding.Detail, other)
+		}
+	})
+
+	t.Run("broken domain rows still catch the key owner mismatch", func(t *testing.T) {
+		f.dbAction.KeyOwnerID = other
+		s, l := consistentFakes(f, product)
+		s.details = func(a Action) (Details, error) { return Details{}, ErrDomainRowMissing }
+		report, err := NewAuditor(s, l).Product(context.Background(), product)
+		if err != nil {
+			t.Fatalf("Product: %v", err)
+		}
+		if report.Stages[0].Signer != CheckMismatch {
+			t.Errorf("signer = %s, want MISMATCH", report.Stages[0].Signer)
+		}
+		finding := findFinding(report.Findings(), KindSigner)
+		if finding == nil {
+			t.Fatalf("no %s finding in %v", KindSigner, report.Findings())
+		}
+		if !strings.Contains(finding.Detail, fmt.Sprintf("key owner %s", other)) || !strings.Contains(finding.Detail, "details operator -") {
+			t.Errorf("detail = %q, want the key owner %s and no details operator", finding.Detail, other)
+		}
+	})
 }
 
 func mustParseUUID(t *testing.T, s string) uuid.UUID {
