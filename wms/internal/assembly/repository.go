@@ -96,28 +96,31 @@ func (r *Repository) GetOrdersByDestinationForUpdate(ctx context.Context, destin
 	return orders, nil
 }
 
-// GetOrderLinesByOrderID возвращает строки заказа
-// (по id заказа возвращает все товары (идентификаторы sku_id) и их количество (quantity))
-func (r *Repository) GetOrderLinesByOrderID(ctx context.Context, orderID uuid.UUID) ([]domain.OrderLine, error) {
+// GetOrderLinesByOrderIDs возвращает строки нескольких заказов одним запросом
+// (по id заказов возвращает все товары (идентификаторы sku_id) и их количество (quantity))
+func (r *Repository) GetOrderLinesByOrderIDs(ctx context.Context, orderIDs []uuid.UUID) (map[uuid.UUID][]domain.OrderLine, error) {
 	const query = `
-		SELECT id, sku_id, qty
+		SELECT id, order_id, sku_id, qty
 		FROM wms_inventory.order_lines
-		WHERE order_id = $1`
+		WHERE order_id = ANY($1)
+		ORDER BY order_id, id`
 
-	rows, err := r.q.Query(ctx, query, orderID)
+	rows, err := r.q.Query(ctx, query, orderIDs)
 	if err != nil {
-		return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderID query: %w", err)
+		return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderIDs query: %w", err)
 	}
 	defer rows.Close()
 
-	lines := make([]domain.OrderLine, 0)
+	lines := make(map[uuid.UUID][]domain.OrderLine, len(orderIDs))
 	for rows.Next() {
 		var l domain.OrderLine
-		if err := rows.Scan(&l.ID, &l.SKUID, &l.Qty); err != nil {
-			return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderID scan: %w", err)
+		if err := rows.Scan(&l.ID, &l.OrderID, &l.SKUID, &l.Qty); err != nil {
+			return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderIDs scan: %w", err)
 		}
-		l.OrderID = orderID
-		lines = append(lines, l)
+		lines[l.OrderID] = append(lines[l.OrderID], l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderIDs rows: %w", err)
 	}
 	return lines, nil
 }

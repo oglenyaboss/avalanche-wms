@@ -21,13 +21,14 @@ type mockAssemblyRepo struct {
 	orders    []domain.Order
 	ordersErr error
 
-	// GetOrderLinesByOrderID
+	// GetOrderLinesByOrderIDs
 	orderLines    map[uuid.UUID][]domain.OrderLine
 	orderLinesErr error
 
 	// GetAllocateProductsForSKU
-	productsMap map[uuid.UUID][]domain.Product
-	productsErr error
+	productsMap   map[uuid.UUID][]domain.Product
+	productsErr   error
+	productsCalls map[uuid.UUID]int
 
 	// GetSKUByID
 	skusMap map[uuid.UUID]*domain.SKU
@@ -41,6 +42,7 @@ type mockAssemblyRepo struct {
 	// GetBinSectionByID
 	binSections    map[uuid.UUID]string
 	binSectionsErr error
+	sectionCalls   int
 
 	// BatchInsertAssemblyTasks
 	batchInsertErr error
@@ -107,6 +109,10 @@ type mockAssemblyRepo struct {
 	// CheckChainStatus (#45 chain-status gate)
 	checkChainErr error
 	checkChainAgg string // captures the aggregateType the service passed to the gate
+
+	// call counters for Allocate memoization tests
+	skuCalls   int
+	linesCalls int
 }
 
 func (m *mockAssemblyRepo) WithTx(_ context.Context, fn func(assemblyRepository) error) error {
@@ -152,17 +158,25 @@ func (m *mockAssemblyRepo) GetOrdersByDestinationForUpdate(_ context.Context, _ 
 	return m.orders, nil
 }
 
-func (m *mockAssemblyRepo) GetOrderLinesByOrderID(_ context.Context, orderID uuid.UUID) ([]domain.OrderLine, error) {
+func (m *mockAssemblyRepo) GetOrderLinesByOrderIDs(_ context.Context, orderIDs []uuid.UUID) (map[uuid.UUID][]domain.OrderLine, error) {
+	m.linesCalls++
 	if m.orderLinesErr != nil {
 		return nil, m.orderLinesErr
 	}
-	if lines, ok := m.orderLines[orderID]; ok {
-		return lines, nil
+	result := make(map[uuid.UUID][]domain.OrderLine, len(orderIDs))
+	for _, id := range orderIDs {
+		if lines, ok := m.orderLines[id]; ok {
+			result[id] = lines
+		}
 	}
-	return []domain.OrderLine{}, nil
+	return result, nil
 }
 
 func (m *mockAssemblyRepo) GetAllocateProductsForSKU(_ context.Context, skuID uuid.UUID, limit int) ([]domain.Product, error) {
+	if m.productsCalls == nil {
+		m.productsCalls = make(map[uuid.UUID]int)
+	}
+	m.productsCalls[skuID]++
 	if m.productsErr != nil {
 		return nil, m.productsErr
 	}
@@ -176,6 +190,7 @@ func (m *mockAssemblyRepo) GetAllocateProductsForSKU(_ context.Context, skuID uu
 }
 
 func (m *mockAssemblyRepo) GetSKUByID(_ context.Context, skuID uuid.UUID) (*domain.SKU, error) {
+	m.skuCalls++
 	if m.skusErr != nil {
 		return nil, m.skusErr
 	}
@@ -196,6 +211,7 @@ func (m *mockAssemblyRepo) UpdateProductAllocated(_ context.Context, productID, 
 }
 
 func (m *mockAssemblyRepo) GetBinSectionByID(_ context.Context, binID uuid.UUID) (string, error) {
+	m.sectionCalls++
 	if m.binSectionsErr != nil {
 		return "", m.binSectionsErr
 	}
@@ -486,6 +502,190 @@ func TestAllocateMultipleOrders(t *testing.T) {
 	}
 	if len(result.InsufficientOrders) != 1 {
 		t.Fatalf("expected 1 insufficient order, got %d", len(result.InsufficientOrders))
+	}
+}
+
+// TestAllocateShortSKUOneProductsQueryPerCall - нехватка по SKU запоминается в пределах
+// вызова: повторные строки с тем же SKU не перезапрашивают сток (A1).
+func TestAllocateShortSKUOneProductsQueryPerCall(t *testing.T) {
+	destinationID := uuid.New()
+	orderID1 := uuid.New()
+	orderID2 := uuid.New()
+	skuID := uuid.New()
+
+	mockRepo := &mockAssemblyRepo{
+		orders: []domain.Order{
+			{OrderID: orderID1, ExternalOrderNo: "ORD-001", Status: "NEW"},
+			{OrderID: orderID2, ExternalOrderNo: "ORD-002", Status: "NEW"},
+		},
+		orderLines: map[uuid.UUID][]domain.OrderLine{
+			orderID1: {{ID: 1, OrderID: orderID1, SKUID: skuID, Qty: 1}},
+			orderID2: {{ID: 2, OrderID: orderID2, SKUID: skuID, Qty: 1}},
+		},
+		productsMap: map[uuid.UUID][]domain.Product{
+			skuID: {},
+		},
+		skusMap: map[uuid.UUID]*domain.SKU{
+			skuID: {SKUID: skuID, Name: "Test SKU"},
+		},
+	}
+
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
+	result, err := svc.Allocate(context.Background(), destinationID)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.AllocatedOrders != 0 {
+		t.Fatalf("expected AllocatedOrders 0, got %d", result.AllocatedOrders)
+	}
+	if len(result.InsufficientOrders) != 2 {
+		t.Fatalf("expected 2 insufficient orders, got %d", len(result.InsufficientOrders))
+	}
+	for i, ins := range result.InsufficientOrders {
+		if len(ins.MissingSKUs) != 1 || ins.MissingSKUs[0].MissingQty != 1 {
+			t.Fatalf("insufficient order %d: expected 1 missing SKU with MissingQty 1, got %+v", i, ins.MissingSKUs)
+		}
+	}
+	if mockRepo.productsCalls[skuID] != 1 {
+		t.Fatalf("expected 1 GetAllocateProductsForSKU call for SKU, got %d", mockRepo.productsCalls[skuID])
+	}
+	if mockRepo.skuCalls != 1 {
+		t.Fatalf("expected 1 GetSKUByID call, got %d", mockRepo.skuCalls)
+	}
+	if mockRepo.linesCalls != 1 {
+		t.Fatalf("expected 1 GetOrderLinesByOrderIDs call, got %d", mockRepo.linesCalls)
+	}
+}
+
+// TestAllocateShortSKUDecrementedAfterAllocation - заказ, выделенный после чужой нехватки,
+// расходует запомненный сток: следующему заказу нехватка видна без нового запроса (A2).
+func TestAllocateShortSKUDecrementedAfterAllocation(t *testing.T) {
+	destinationID := uuid.New()
+	orderID1 := uuid.New()
+	orderID2 := uuid.New()
+	orderID3 := uuid.New()
+	skuID := uuid.New()
+	productID1 := uuid.New()
+	productID2 := uuid.New()
+	binID := uuid.New()
+
+	mockRepo := &mockAssemblyRepo{
+		orders: []domain.Order{
+			{OrderID: orderID1, ExternalOrderNo: "ORD-001", Status: "NEW"},
+			{OrderID: orderID2, ExternalOrderNo: "ORD-002", Status: "NEW"},
+			{OrderID: orderID3, ExternalOrderNo: "ORD-003", Status: "NEW"},
+		},
+		orderLines: map[uuid.UUID][]domain.OrderLine{
+			orderID1: {{ID: 1, OrderID: orderID1, SKUID: skuID, Qty: 3}},
+			orderID2: {{ID: 2, OrderID: orderID2, SKUID: skuID, Qty: 2}},
+			orderID3: {{ID: 3, OrderID: orderID3, SKUID: skuID, Qty: 1}},
+		},
+		productsMap: map[uuid.UUID][]domain.Product{
+			skuID: {
+				{ProductID: productID1, BinID: &binID},
+				{ProductID: productID2, BinID: &binID},
+			},
+		},
+		binSections: map[uuid.UUID]string{
+			binID: "A",
+		},
+		skusMap: map[uuid.UUID]*domain.SKU{
+			skuID: {SKUID: skuID, Name: "Test SKU"},
+		},
+	}
+
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
+	result, err := svc.Allocate(context.Background(), destinationID)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.AllocatedOrders != 1 {
+		t.Fatalf("expected AllocatedOrders 1, got %d", result.AllocatedOrders)
+	}
+	if result.AllocatedProducts != 2 {
+		t.Fatalf("expected AllocatedProducts 2, got %d", result.AllocatedProducts)
+	}
+	if len(result.InsufficientOrders) != 2 {
+		t.Fatalf("expected 2 insufficient orders, got %d", len(result.InsufficientOrders))
+	}
+	for i, ins := range result.InsufficientOrders {
+		if len(ins.MissingSKUs) != 1 || ins.MissingSKUs[0].MissingQty != 1 {
+			t.Fatalf("insufficient order %d: expected 1 missing SKU with MissingQty 1, got %+v", i, ins.MissingSKUs)
+		}
+	}
+	if mockRepo.productsCalls[skuID] != 2 {
+		t.Fatalf("expected 2 GetAllocateProductsForSKU calls for SKU, got %d", mockRepo.productsCalls[skuID])
+	}
+	if status, ok := mockRepo.updatedOrderStatus[orderID2]; !ok || status != "ALLOCATED" {
+		t.Fatalf("expected order2 status ALLOCATED, got %s", status)
+	}
+	if len(mockRepo.updatedProducts) != 2 {
+		t.Fatalf("expected 2 products updated, got %d", len(mockRepo.updatedProducts))
+	}
+}
+
+// TestAllocateBinSectionCachedPerCall - секция ячейки запрашивается один раз на вызов
+// независимо от числа аллоцированных товаров (A3).
+func TestAllocateBinSectionCachedPerCall(t *testing.T) {
+	destinationID := uuid.New()
+	orderID := uuid.New()
+	skuID := uuid.New()
+	productID1 := uuid.New()
+	productID2 := uuid.New()
+	binID := uuid.New()
+
+	mockRepo := &mockAssemblyRepo{
+		orders: []domain.Order{
+			{OrderID: orderID, ExternalOrderNo: "ORD-001", Status: "NEW"},
+		},
+		orderLines: map[uuid.UUID][]domain.OrderLine{
+			orderID: {{ID: 1, OrderID: orderID, SKUID: skuID, Qty: 2}},
+		},
+		productsMap: map[uuid.UUID][]domain.Product{
+			skuID: {
+				{ProductID: productID1, BinID: &binID},
+				{ProductID: productID2, BinID: &binID},
+			},
+		},
+		binSections: map[uuid.UUID]string{
+			binID: "A",
+		},
+	}
+
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
+	result, err := svc.Allocate(context.Background(), destinationID)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.AllocatedProducts != 2 {
+		t.Fatalf("expected AllocatedProducts 2, got %d", result.AllocatedProducts)
+	}
+	if mockRepo.sectionCalls != 1 {
+		t.Fatalf("expected 1 GetBinSectionByID call, got %d", mockRepo.sectionCalls)
+	}
+	if len(mockRepo.insertedTasks) != 2 {
+		t.Fatalf("expected 2 tasks inserted, got %d", len(mockRepo.insertedTasks))
+	}
+}
+
+// TestAllocateZeroOrdersNoLinesQuery - без заказов строки не запрашиваются (A4).
+func TestAllocateZeroOrdersNoLinesQuery(t *testing.T) {
+	mockRepo := &mockAssemblyRepo{}
+
+	svc := NewService(mockRepo, &mockOperationStore{}, &mockSignerSource{})
+	result, err := svc.Allocate(context.Background(), uuid.New())
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.AllocatedOrders != 0 || result.AllocatedProducts != 0 || len(result.InsufficientOrders) != 0 {
+		t.Fatalf("expected empty response, got %+v", result)
+	}
+	if mockRepo.linesCalls != 0 {
+		t.Fatalf("expected 0 GetOrderLinesByOrderIDs calls, got %d", mockRepo.linesCalls)
 	}
 }
 
