@@ -123,10 +123,14 @@ func (m *shipMockOps) Operation(_ context.Context, id uuid.UUID) (*signedops.Ope
 
 // shipMockSigner — источник активного ключа в тестах подписанной отгрузки.
 type shipMockSigner struct {
-	signer *domain.Passkey
+	signer    *domain.Passkey
+	signerErr error
 }
 
 func (m *shipMockSigner) ActiveSigner(_ context.Context, _ uuid.UUID) (*domain.Passkey, error) {
+	if m.signerErr != nil {
+		return nil, m.signerErr
+	}
 	return m.signer, nil
 }
 

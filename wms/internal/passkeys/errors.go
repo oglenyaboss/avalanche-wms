@@ -10,6 +10,7 @@ var (
 	ErrPasskeyNotFound     = errors.New("PASSKEY_NOT_FOUND")
 
 	ErrSignerKeyNotActive     = errors.New("SIGNER_KEY_NOT_ACTIVE")
+	ErrRegistryUnavailable    = errors.New("REGISTRY_UNAVAILABLE")
 	ErrTargetNotPending       = errors.New("TARGET_NOT_PENDING")
 	ErrTargetNotActive        = errors.New("TARGET_NOT_ACTIVE")
 	ErrActionInProgress       = errors.New("ACTION_IN_PROGRESS")

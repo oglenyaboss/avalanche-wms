@@ -111,6 +111,8 @@ func (h *Handler) writeShipError(w http.ResponseWriter, err error) {
 		return
 	}
 	switch {
+	case errors.Is(err, passkeys.ErrRegistryUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "REGISTRY_UNAVAILABLE", "Реестр недоступен, повторите позже")
 	case errors.Is(err, passkeys.ErrPasskeyNotFound), errors.Is(err, passkeys.ErrSignerKeyNotActive):
 		writeError(w, http.StatusConflict, "SIGNER_KEY_NOT_ACTIVE", "Ключ оператора не активен в реестре")
 	default:

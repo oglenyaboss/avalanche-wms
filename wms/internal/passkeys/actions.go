@@ -261,8 +261,10 @@ func (s *Service) SubmitKeyAction(ctx context.Context, userID, actionID uuid.UUI
 	return &KeyConfirmation{ActionID: actionID, ActionType: action.ActionType, State: signedaction.ConfirmationSent}, nil
 }
 
-// ActiveSigner returns the caller's latest passkey when it is ACTIVE in the
-// on-chain registry; it signs every draft this user creates.
+// ActiveSigner returns the caller's latest passkey when the on-chain registry
+// confirms right now that it is active; it signs every draft this user creates.
+// A registry error is returned as ErrRegistryUnavailable: without a live answer
+// nothing is signed and no status is written.
 func (s *Service) ActiveSigner(ctx context.Context, userID uuid.UUID) (*domain.Passkey, error) {
 	signer, err := s.repo.LatestPasskey(ctx, userID)
 	if err != nil {
@@ -271,9 +273,17 @@ func (s *Service) ActiveSigner(ctx context.Context, userID uuid.UUID) (*domain.P
 	if signer == nil {
 		return nil, ErrPasskeyNotFound
 	}
-	s.syncStatuses(ctx, []*domain.Passkey{signer})
-	if signer.Status != domain.PasskeyStatusActive {
+	if signer.Status != domain.PasskeyStatusPending && signer.Status != domain.PasskeyStatusActive {
 		return nil, ErrSignerKeyNotActive
+	}
+	if s.chain == nil {
+		if signer.Status != domain.PasskeyStatusActive {
+			return nil, ErrSignerKeyNotActive
+		}
+		return signer, nil
+	}
+	if err := s.confirmActive(ctx, signer); err != nil {
+		return nil, err
 	}
 	return signer, nil
 }

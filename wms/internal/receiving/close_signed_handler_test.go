@@ -1,6 +1,7 @@
 package receiving
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/passkeys"
 	"wms/internal/signedaction/signedactiontest"
 	"wms/internal/signedops"
 )
@@ -57,6 +59,18 @@ func TestCloseCargoplaceHandler(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), `"CARGOPLACE_EMPTY"`) {
 			t.Errorf("body lacks CARGOPLACE_EMPTY: %s", rec.Body.String())
+		}
+	})
+	t.Run("draft maps REGISTRY_UNAVAILABLE", func(t *testing.T) {
+		failingSigner := &mockSignerSource{signerErr: fmt.Errorf("x: %w", passkeys.ErrRegistryUnavailable)}
+		failingSvc := closeService(repo, ops, failingSigner)
+		rec := serveClose(t, failingSvc, http.MethodPost, "/receiving/table/close-cargoplace/draft",
+			`{"cargoplace_id":"`+cargoplaceID.String()+`"}`, operatorID, domain.UserRoleOperator)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"REGISTRY_UNAVAILABLE"`) {
+			t.Errorf("body lacks REGISTRY_UNAVAILABLE: %s", rec.Body.String())
 		}
 	})
 	t.Run("draft returns parts", func(t *testing.T) {

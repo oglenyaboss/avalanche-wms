@@ -2,6 +2,7 @@ package assembly
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/passkeys"
 	"wms/internal/signedaction/signedactiontest"
 	"wms/internal/signedops"
 )
@@ -74,6 +76,17 @@ func TestUnloadSignedHandler(t *testing.T) {
 		rec = serveAssembly(t, svc, http.MethodPost, "/assembly/scan-shipping-buffer/draft", draftBody, operatorID, domain.UserRoleOperator)
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "DESTINATION_MISMATCH") {
 			t.Fatalf("status = %d, want 409 DESTINATION_MISMATCH (body=%s)", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("draft maps REGISTRY_UNAVAILABLE", func(t *testing.T) {
+		repo, ops, _ := newEnv()
+		failingSvc := NewService(repo, ops, &mockSignerSource{signerErr: fmt.Errorf("x: %w", passkeys.ErrRegistryUnavailable)})
+		rec := serveAssembly(t, failingSvc, http.MethodPost, "/assembly/scan-shipping-buffer/draft", draftBody, operatorID, domain.UserRoleOperator)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"REGISTRY_UNAVAILABLE"`) {
+			t.Errorf("body lacks REGISTRY_UNAVAILABLE: %s", rec.Body.String())
 		}
 	})
 	t.Run("draft returns parts", func(t *testing.T) {

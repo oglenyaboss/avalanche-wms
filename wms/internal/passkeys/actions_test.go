@@ -845,6 +845,14 @@ func TestHandler_NewErrorMapping(t *testing.T) {
 			wantCode: "SIGNER_KEY_NOT_ACTIVE", wantStatus: http.StatusConflict,
 		},
 		{
+			name: "REGISTRY_UNAVAILABLE",
+			setup: func(f *actionFixture) { f.svc.chain = &fakeChain{err: errors.New("502")} },
+			run: func(f *actionFixture) *httptest.ResponseRecorder {
+				return serveAsBody(t, f.svc, http.MethodPost, draftPath, strings.NewReader(draftBody(f)), adminA, domain.UserRoleAdmin)
+			},
+			wantCode: "REGISTRY_UNAVAILABLE", wantStatus: http.StatusServiceUnavailable,
+		},
+		{
 			name:  "TARGET_NOT_PENDING",
 			setup: func(f *actionFixture) { f.target.Status = domain.PasskeyStatusActive },
 			run: func(f *actionFixture) *httptest.ResponseRecorder {

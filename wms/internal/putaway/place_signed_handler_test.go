@@ -3,6 +3,7 @@ package putaway
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
+	"wms/internal/passkeys"
 	"wms/internal/signedaction/signedactiontest"
 	"wms/internal/signedops"
 )
@@ -55,6 +57,17 @@ func TestScanStorageBinHandler(t *testing.T) {
 			`{"product_ids":["not-a-uuid"],"storage_bin_id":"`+storageBinID.String()+`"}`, operatorID, domain.UserRoleOperator)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400 for bad product uuid (body=%s)", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("draft maps REGISTRY_UNAVAILABLE", func(t *testing.T) {
+		failingSigner := &mockSignerSource{signerErr: fmt.Errorf("x: %w", passkeys.ErrRegistryUnavailable)}
+		failingSvc := putawayService(repo, ops, failingSigner)
+		rec := servePutaway(t, failingSvc, http.MethodPost, "/putaway/scan-storage-bin/draft", draftBody, operatorID, domain.UserRoleOperator)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"REGISTRY_UNAVAILABLE"`) {
+			t.Errorf("body lacks REGISTRY_UNAVAILABLE: %s", rec.Body.String())
 		}
 	})
 	t.Run("draft returns parts", func(t *testing.T) {
