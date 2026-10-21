@@ -104,8 +104,7 @@ docker run --rm --network host --entrypoint cast ghcr.io/foundry-rs/foundry:stab
 deployer-списка проходит mempool (если отправитель разрешён в tx-списке), но падает
 в EVM: `tx.origin <адрес> is not authorized to deploy a contract`. Поэтому
 адрес адаптера (`PRIVATE_KEY`) обязан присутствовать в списке — на
-гео-стенде его разрешает `fund-signers.sh` (после фондирования выдаёт signer-у роль
-`Enabled` от админа).
+гео-стенде адаптер подписывает ewoq-ключом — админом списка, поэтому он разрешён сразу.
 
 Проверка стенда целиком (сам находит RPC):
 

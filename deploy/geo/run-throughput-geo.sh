@@ -8,7 +8,8 @@
 #   1. adapter/wms recreate goes through deploy/geo/run-app-on-geo.sh so the ledger-adapter KEEPS its
 #      geo override (RPC=geo-node-home, CONTRACT=geo) instead of reverting to the local chain;
 #   2. compose project is auto-detected from the running adapter (not hardcoded `stresstest`);
-#   3. the on-chain TRACE reads the GEO RPC (node-home :9750), not stresstest_shared_state.
+#   3. the on-chain TRACE reads the GEO RPC (node-home :9750) and decodes the signed-action events
+#      (ActionApplied/ItemMoved/ActionRejected) of one shipped product;
 #
 # Because the k6 driver creates REAL products (qr_code LIKE 'STRESS-QR-TPUT-%') via the WMS flow, a
 # run also POPULATES traceability (those products appear in wms_inventory.products with on-chain
@@ -37,6 +38,17 @@ WMS_DB_MAX_CONNS="${WMS_DB_MAX_CONNS:-40}"
 ADAPTER_BATCH_SIZE="${ADAPTER_BATCH_SIZE:-300}"
 ADAPTER_BATCH_TIMEOUT="${ADAPTER_BATCH_TIMEOUT:-2s}"
 ADAPTER_PIPELINE_WINDOW="${ADAPTER_PIPELINE_WINDOW:-4}"
+
+# Операторы с активными ключами — prerequisite подписанного прогона (#20).
+OPS_FILE="tests/stress/.signed/operators.json"
+if [ ! -s "$OPS_FILE" ]; then
+  echo "нет $OPS_FILE — provision against geo: COMPOSE=$PWD/deploy/geo/run-app-on-geo.sh sh -c 'cd tests/e2e && go run ./cmd/stress-provision -operators $VUS'" >&2
+  exit 1
+fi
+if [ "$(grep -o '"username"' "$OPS_FILE" | wc -l)" -lt "$VUS" ]; then
+  echo "в $OPS_FILE меньше $VUS операторов — provision against geo: COMPOSE=$PWD/deploy/geo/run-app-on-geo.sh sh -c 'cd tests/e2e && go run ./cmd/stress-provision -operators $VUS'" >&2
+  exit 1
+fi
 
 PSQL(){ docker exec postgres_db psql -U root -d wms_blockchain_db -tAc "$1" 2>/dev/null | tr -d '[:space:]'; }
 RAW(){ docker exec postgres_db psql -U root -d wms_blockchain_db -tAc "$1" 2>/dev/null; }
@@ -85,6 +97,8 @@ RAW "SELECT COALESCE(json_agg(j ORDER BY code),'[]') FROM (
   JOIN wms_inventory.bins b ON b.destination_id=d.destination_id AND b.section='SHIPPING_BUFFER'
   WHERE d.code LIKE 'SHOP-T%') sub" > /tmp/stress-tput-dests.json
 echo "  RECV=$RECV STOR=$STOR | dests: $(grep -o destinationId /tmp/stress-tput-dests.json | wc -l | tr -d ' ')"
+COMMITTED_ITEMS_BASE=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED'")
+echo "  committed_items baseline: $COMMITTED_ITEMS_BASE"
 
 echo "=== 4. run 09-throughput (live DB-throughput sampler) ==="
 : > /tmp/tput-slope.log
@@ -113,10 +127,10 @@ grep -iE "tput_items_stored|tput_items_picked|iterations\.\.|iteration_duration|
 echo "=== 5. drain back-half (poll backlog → 0) ==="
 for i in $(seq 1 120); do
   B=$(PSQL "SELECT count(*) FROM public.outbox_events oe WHERE NOT EXISTS (SELECT 1 FROM public.onchain_events oc WHERE oc.event_id=oe.event_id)")
-  C=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='COMMITTED'")
+  C=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED'")
   F=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='FAILED'")
   S=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='SENT'")
-  echo "  t=+$((i*2))s committed=$C failed=$F sent=$S backlog=$B"
+  echo "  t=+$((i*2))s committed_items=$((C-COMMITTED_ITEMS_BASE)) failed=$F sent=$S backlog=$B"
   [ "${B:-1}" -le 2 ] && [ "${S:-1}" -le 0 ] && { echo "  fully committed"; break; }
   sleep 2
 done
@@ -140,12 +154,17 @@ RAW "SELECT status, count(*) FROM public.onchain_events GROUP BY status ORDER BY
 
 echo "=== 9. WMS↔chain consistency (scoped to TPUT) ==="
 SHIPPED_WMS=$(PSQL "SELECT count(*) FROM wms_inventory.products WHERE qr_code LIKE '$QR' AND status='SHIPPED'")
-SHIP_CHAIN=$(PSQL "SELECT count(*) FROM public.onchain_events oe JOIN public.outbox_events ob USING(event_id) JOIN wms_inventory.products p ON p.product_id=ob.aggregate_id WHERE oe.aggregate_type='shipping' AND oe.status='COMMITTED' AND p.qr_code LIKE '$QR'")
-echo "  SHIPPED(wms)=$SHIPPED_WMS == shipping COMMITTED(chain)=$SHIP_CHAIN -> $([ "$SHIPPED_WMS" = "$SHIP_CHAIN" ] && echo OK || echo MISMATCH)"
+SHIP_CHAIN=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED' AND wa.action_type=4 AND EXISTS (SELECT 1 FROM wms_inventory.products p WHERE p.product_id = ANY(wa.item_ids) AND p.qr_code LIKE '$QR')")
+echo "  SHIPPED товаров(wms)=$SHIPPED_WMS == items COMMITTED action_type=4 (chain)=$SHIP_CHAIN -> $([ "$SHIPPED_WMS" = "$SHIP_CHAIN" ] && echo OK || echo MISMATCH)"
 
-echo "=== 10. on-chain TRACE via GEO node-home (real ItemTransition, not Failed/skip) ==="
-STX=$(RAW "SELECT tx_hash FROM public.onchain_events WHERE status='COMMITTED' AND aggregate_type='shipping' AND tx_hash<>'' ORDER BY created_at DESC LIMIT 1" | tr -d '[:space:]')
-KTX=$(RAW "SELECT tx_hash FROM public.onchain_events WHERE status='COMMITTED' AND aggregate_type='picking' AND tx_hash<>'' ORDER BY created_at DESC LIMIT 1" | tr -d '[:space:]')
-[ -n "$KTX" ] && { echo "  picking tx=$KTX"; cast run "$KTX" --rpc-url "$GEO_RPC" 2>&1 | grep -oE "ItemTransition(Failed)?\(" | sort | uniq -c; } || echo "  no picking tx"
-[ -n "$STX" ] && { echo "  shipping tx=$STX"; cast run "$STX" --rpc-url "$GEO_RPC" 2>&1 | grep -oE "ItemTransition(Failed)?\(" | sort | uniq -c; } || echo "  no shipping tx"
+echo "=== 10. on-chain TRACE via GEO node-home (действия одного отгруженного STRESS-товара) ==="
+PRODUCT_ID=$(PSQL "SELECT product_id FROM wms_inventory.products WHERE qr_code LIKE '$QR' AND status='SHIPPED' LIMIT 1")
+if [ -z "$PRODUCT_ID" ]; then
+  echo "  нет отгруженных STRESS-товаров — секция пропущена"
+else
+  echo "  product=$PRODUCT_ID"
+  RAW "SELECT wa.action_type, oe.tx_hash, oe.status FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE wa.item_ids @> ARRAY['$PRODUCT_ID']::uuid[] ORDER BY wa.created_at" | sed 's/^/    /'
+  STX=$(RAW "SELECT oe.tx_hash FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE wa.action_type=4 AND oe.status='COMMITTED' AND wa.item_ids @> ARRAY['$PRODUCT_ID']::uuid[] AND oe.tx_hash<>'' LIMIT 1" | tr -d '[:space:]')
+  [ -n "$STX" ] && { echo "  ship tx=$STX"; cast run "$STX" --rpc-url "$GEO_RPC" 2>&1 | grep -oE "(ActionApplied|ItemMoved|ActionRejected)\(" | sort | uniq -c; } || echo "  no committed ship tx"
+fi
 echo "######## DONE ########"

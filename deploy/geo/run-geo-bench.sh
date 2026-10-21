@@ -34,6 +34,17 @@ GEO=deploy/geo
 PACE_RPS="${PACE_RPS:-10}"
 PACE_DURATION="${PACE_DURATION:-7m}"
 VUS="${VUS:-50}"
+
+# Операторы с активными ключами — prerequisite подписанного прогона (#20).
+OPS_FILE="tests/stress/.signed/operators.json"
+if [ ! -s "$OPS_FILE" ]; then
+  echo "нет $OPS_FILE — provision against geo: COMPOSE=$PWD/deploy/geo/run-app-on-geo.sh sh -c 'cd tests/e2e && go run ./cmd/stress-provision -operators $VUS'" >&2
+  exit 1
+fi
+if [ "$(grep -o '"username"' "$OPS_FILE" | wc -l)" -lt "$VUS" ]; then
+  echo "в $OPS_FILE меньше $VUS операторов — provision against geo: COMPOSE=$PWD/deploy/geo/run-app-on-geo.sh sh -c 'cd tests/e2e && go run ./cmd/stress-provision -operators $VUS'" >&2
+  exit 1
+fi
 FAULT="${FAULT:-1}"
 FAULT_AT="${FAULT_AT:-120}"
 FAULT_DOWN="${FAULT_DOWN:-120}"
@@ -146,7 +157,7 @@ for idx in "${!NODES_NAME[@]}"; do
 done
 # local sampler: node-home node metrics + run-scoped DB throughput/latency/backlog
 DBCSV="$OUT/db.csv"; NHCSV="$OUT/nodehome.csv"
-echo "ts,committed,sent,failed,backlog,lat_p50,lat_p95,lat_p99" > "$DBCSV"
+echo "ts,committed,sent,failed,backlog,lat_p50,lat_p95,lat_p99,committed_items" > "$DBCSV"
 echo "ts,height,peers,rss_bytes,cpu_sec" > "$NHCSV"
 ( for i in $(seq 1 "$NSAMP"); do
     t=$(date +%s)
@@ -155,7 +166,8 @@ echo "ts,height,peers,rss_bytes,cpu_sec" > "$NHCSV"
     F=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='FAILED' AND created_at>='$RUN_START'")
     B=$(PSQL "SELECT count(*) FROM public.outbox_events oe WHERE oe.created_at>='$RUN_START' AND NOT EXISTS (SELECT 1 FROM public.onchain_events oc WHERE oc.event_id=oe.event_id)")
     L=$(RAW "SELECT string_agg(x::text,',') FROM (SELECT percentile_disc(ARRAY[0.5,0.95,0.99]) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (updated_at-created_at))) x FROM public.onchain_events WHERE status='COMMITTED' AND created_at>='$RUN_START') q, unnest(q.x) x" | tr -d '[:space:]')
-    echo "$t,${C:-0},${S:-0},${F:-0},${B:-0},${L:-,,}" | sed 's/,,/,NA,NA,NA/' >> "$DBCSV"
+    CI=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED' AND oe.created_at>='$RUN_START'")
+    echo "$(echo "$t,${C:-0},${S:-0},${F:-0},${B:-0},${L:-,,}" | sed 's/,,/,NA,NA,NA/'),${CI:-0}" >> "$DBCSV"
     m=$(curl -s -m 5 http://localhost:9750/ext/metrics 2>/dev/null)
     nh=$(printf '%s\n' "$m" | grep -F "avalanche_snowman_last_accepted_height{chain=\"$BLOCKCHAIN_ID\"}" | awk '{print $2}')
     np=$(printf '%s\n' "$m" | grep '^avalanche_network_peers ' | awk '{print $2}')
@@ -198,7 +210,8 @@ for i in $(seq 1 150); do
   S=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='SENT' AND created_at>='$RUN_START'")
   C=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='COMMITTED' AND created_at>='$RUN_START'")
   F=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='FAILED' AND created_at>='$RUN_START'")
-  [ $((i % 5)) -eq 1 ] && echo "  t=+$((i*3))s committed=$C sent=$S failed=$F backlog=$B"
+  CI=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED' AND oe.created_at>='$RUN_START'")
+  [ $((i % 5)) -eq 1 ] && echo "  t=+$((i*3))s committed=$C committed_items=${CI:-0} sent=$S failed=$F backlog=$B"
   [ "${B:-1}" -le 2 ] && [ "${S:-1}" -le 0 ] && { echo "  drained (committed=$C failed=$F)"; break; }
   sleep 3
 done
