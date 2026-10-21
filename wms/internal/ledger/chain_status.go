@@ -99,16 +99,20 @@ func UnconfirmedProducts(ctx context.Context, q RowsQuerier, productIDs []uuid.U
 	}
 
 	const query = `
-		SELECT p.product_id
-		FROM unnest($1::uuid[]) AS p(product_id)
-		WHERE NOT EXISTS (
-			SELECT 1
+		WITH confirmed AS MATERIALIZED (
+			SELECT DISTINCT x.product_id
 			FROM public.warehouse_actions wa
 			JOIN public.onchain_events oe ON oe.event_id = wa.action_id
-			WHERE wa.item_ids @> ARRAY[p.product_id]::uuid[]
+			CROSS JOIN LATERAL unnest(wa.item_ids) AS x(product_id)
+			WHERE wa.item_ids && $1::uuid[]
 			  AND wa.action_type = $2
 			  AND wa.submitted_at IS NOT NULL
 			  AND oe.status = 'COMMITTED'
+		)
+		SELECT p.product_id
+		FROM unnest($1::uuid[]) AS p(product_id)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM confirmed c WHERE c.product_id = p.product_id
 		)`
 
 	rows, err := q.Query(ctx, query, productIDs, actionTypeByAggregate[aggregate])

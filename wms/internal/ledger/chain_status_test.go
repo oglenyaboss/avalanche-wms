@@ -116,13 +116,16 @@ func TestUnconfirmedProductsArgBuilding(t *testing.T) {
 	if got, ok := q.args[1].(int16); !ok || got != 3 {
 		t.Errorf("action_type arg = %v (%T), want int16(3)", q.args[1], q.args[1])
 	}
-	for _, part := range []string{"unnest($1::uuid[])", "oe.status = 'COMMITTED'", "wa.submitted_at IS NOT NULL", "wa.action_type = $2"} {
+	for _, part := range []string{"unnest($1::uuid[])", "oe.status = 'COMMITTED'", "wa.submitted_at IS NOT NULL", "wa.action_type = $2", "wa.item_ids && $1::uuid[]", "AS MATERIALIZED"} {
 		if !strings.Contains(q.sql, part) {
 			t.Errorf("query lacks %q:\n%s", part, q.sql)
 		}
 	}
 	if strings.Contains(q.sql, "outbox_events") {
 		t.Errorf("query still references outbox_events:\n%s", q.sql)
+	}
+	if strings.Contains(q.sql, "@> ARRAY[p.product_id]") {
+		t.Errorf("query still checks each product against the whole history (@>):\n%s", q.sql)
 	}
 }
 
