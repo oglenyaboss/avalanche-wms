@@ -113,3 +113,54 @@ func (tx orgTx) run(ctx context.Context, args []string) error {
 	fmt.Print(tx.successMsg(org, hash))
 	return nil
 }
+
+// revokeKey отзывает ключ в реестре по key id: precheck существования ключа →
+// pack revokeKey(bytes32) → sendOwnerTx от владельца консорциума.
+func revokeKey(ctx context.Context, args []string) error {
+	const command = "revoke-key"
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	keyIDFlag := fs.String("key-id", "", "0x и 64 hex-символа ключа")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%s: %w", command, err)
+	}
+	if *keyIDFlag == "" {
+		return fmt.Errorf("%s: нужен --key-id", command)
+	}
+	keyID, err := parseCoord("key-id", *keyIDFlag)
+	if err != nil {
+		return fmt.Errorf("%s: %w", command, err)
+	}
+
+	ec, addr, err := dialRegistry()
+	if err != nil {
+		return fmt.Errorf("dial registry: %w", err)
+	}
+	defer ec.Close()
+	reg, err := chain.NewRegistry(ec, addr)
+	if err != nil {
+		return fmt.Errorf("load registry: %w", err)
+	}
+
+	key, err := reg.GetKey(ctx, keyID)
+	if err != nil {
+		return fmt.Errorf("get key: %w", err)
+	}
+	if key.Role == chain.RoleNone {
+		return fmt.Errorf("ключ %s не найден в реестре", common.Hash(keyID).Hex())
+	}
+
+	owner, err := ownerKey()
+	if err != nil {
+		return fmt.Errorf("load owner key: %w", err)
+	}
+	calldata, err := reg.ABI().Pack("revokeKey", keyID)
+	if err != nil {
+		return fmt.Errorf("pack revokeKey: %w", err)
+	}
+	hash, err := sendOwnerTx(ctx, ec, owner, addr, calldata)
+	if err != nil {
+		return fmt.Errorf("send tx: %w", err)
+	}
+	fmt.Printf("ключ %s отозван, tx %s\n", common.Hash(keyID).Hex(), hash.Hex())
+	return nil
+}

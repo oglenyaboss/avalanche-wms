@@ -135,6 +135,7 @@ CLI владельца консорциума (бинарь `/registry-cli` в �
 ```bash
 make registry-cli ARGS="register-org --file org.json"   # регистрация организации + ключ админа
 make registry-cli ARGS="add-admin-key --file org.json"  # дополнительный ключ админа
+make registry-cli ARGS="revoke-key --key-id 0x…"        # отзыв ключа (аварийное действие владельца)
 make registry-cli ARGS="list"                           # организации и ключи (роль, активен/отозван)
 ```
 
