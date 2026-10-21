@@ -20,11 +20,12 @@ import (
 
 // fakeRepo stubs productActions the way products handler tests stub service.
 type fakeRepo struct {
-	productID    uuid.UUID
-	productIDErr error
-	actions      []Action
-	details      Details
-	detailsErr   error
+	productID     uuid.UUID
+	productIDErr  error
+	actions       []Action
+	details       Details
+	detailsErr    error
+	domainItemsFn func(a Action) ([]uuid.UUID, error)
 }
 
 func (f *fakeRepo) ProductID(_ context.Context, _ string) (uuid.UUID, error) {
@@ -35,6 +36,14 @@ func (f *fakeRepo) ActionsForProduct(_ context.Context, _ uuid.UUID) ([]Action, 
 }
 func (f *fakeRepo) Details(_ context.Context, _ Action) (Details, error) {
 	return f.details, f.detailsErr
+}
+
+// DomainItems falls back to the action's item_ids copy when no override is set.
+func (f *fakeRepo) DomainItems(_ context.Context, a Action) ([]uuid.UUID, error) {
+	if f.domainItemsFn != nil {
+		return f.domainItemsFn(a)
+	}
+	return a.ItemIDs, nil
 }
 
 // asRole injects an authenticated identity — RequireAuditorOrAdmin (top of the
@@ -58,6 +67,7 @@ func serveAudit(repo productActions, role domain.UserRole, path string) *httptes
 
 // putAwayAction is one submitted signed putaway part.
 func putAwayAction(productID uuid.UUID) Action {
+	operatorID := uuid.New()
 	return Action{
 		ActionID:    uuid.New(),
 		OperationID: uuid.New(),
@@ -66,8 +76,9 @@ func putAwayAction(productID uuid.UUID) Action {
 		ItemIDs:     []uuid.UUID{productID},
 		Salt:        [32]byte{1, 2, 3},
 		SubmittedAt: time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC),
-		OperatorID:  uuid.New(),
+		OperatorID:  operatorID,
 		Operator:    "operator",
+		KeyOwnerID:  operatorID,
 		OrgID:       uuid.New(),
 		OrgName:     "ООО Ромашка",
 		KeyID:       [32]byte{4, 5, 6},
@@ -92,6 +103,7 @@ type actionDTO struct {
 	ActionID     string   `json:"actionId"`
 	ActionType   int      `json:"actionType"`
 	ItemIDs      []string `json:"itemIds"`
+	KeyOwnerID   string   `json:"keyOwnerId"`
 	Salt         string   `json:"salt"`
 	SubmittedAt  string   `json:"submittedAt"`
 	ChainStatus  string   `json:"chainStatus"`
@@ -107,9 +119,10 @@ type actionDTO struct {
 func TestGetProduct_AuditorSeesPutAwayDetails(t *testing.T) {
 	productID := uuid.New()
 	binID := uuid.New()
+	action := putAwayAction(productID)
 	repo := &fakeRepo{
 		productID: productID,
-		actions:   []Action{putAwayAction(productID)},
+		actions:   []Action{action},
 		details: Details{
 			ActionType:   signedaction.TypePutAway,
 			StorageBinID: binID,
@@ -144,6 +157,9 @@ func TestGetProduct_AuditorSeesPutAwayDetails(t *testing.T) {
 	}
 	if want := signedaction.Hex32([32]byte{1, 2, 3}); a.Salt != want {
 		t.Fatalf("salt = %q, want %q", a.Salt, want)
+	}
+	if a.KeyOwnerID != action.KeyOwnerID.String() {
+		t.Fatalf("keyOwnerId = %q, want %q", a.KeyOwnerID, action.KeyOwnerID)
 	}
 	if a.SubmittedAt != "2025-01-02T03:04:05Z" {
 		t.Fatalf("submittedAt = %q", a.SubmittedAt)

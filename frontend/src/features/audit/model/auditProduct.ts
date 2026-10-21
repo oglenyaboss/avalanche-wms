@@ -173,14 +173,16 @@ async function appliedStage(
     problems.push('Хеш деталей из БД не совпадает с цепью')
   }
 
-  if (
-    chainAction.keyId.toLowerCase() === dbAction.keyId.toLowerCase() &&
-    chainAction.orgId.toLowerCase() === dbAction.orgId.toLowerCase()
-  ) {
+  const keyMatches = chainAction.keyId.toLowerCase() === dbAction.keyId.toLowerCase()
+  const orgMatches = chainAction.orgId.toLowerCase() === dbAction.orgId.toLowerCase()
+  const executorIsKeyOwner = dbAction.keyOwnerId.toLowerCase() === dbAction.operatorId.toLowerCase()
+  const detailsNameExecutor = dbAction.details === null || dbAction.details.operatorId.toLowerCase() === dbAction.operatorId.toLowerCase()
+  if (keyMatches && orgMatches && executorIsKeyOwner && detailsNameExecutor) {
     stage.signer = 'ok'
   } else {
     stage.signer = 'mismatch'
-    problems.push('Подписант в БД не совпадает с цепью')
+    if (!keyMatches || !orgMatches) problems.push('Подписант в БД не совпадает с цепью')
+    if (!executorIsKeyOwner || !detailsNameExecutor) problems.push('Исполнитель действия не совпадает с подписантом')
   }
 
   const auth = await chain.actionAuth(chainAction.txHash, id)
@@ -202,6 +204,7 @@ async function appliedStage(
 
 function sameItems(chainItems: readonly bigint[], dbItemIds: readonly string[]): boolean {
   if (chainItems.length !== dbItemIds.length) return false
+  if (new Set(dbItemIds).size !== dbItemIds.length) return false
   const onChain = new Set(chainItems.map(String))
   return dbItemIds.every((uuid) => onChain.has(itemId(uuid).toString()))
 }

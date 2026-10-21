@@ -24,6 +24,7 @@ type actionView struct {
 	SubmittedAt  string       `json:"submittedAt"`
 	OperatorID   string       `json:"operatorId"`
 	Operator     string       `json:"operator"`
+	KeyOwnerID   string       `json:"keyOwnerId"`
 	OrgID        string       `json:"orgId"`
 	OrgName      string       `json:"orgName"`
 	KeyID        string       `json:"keyId"`

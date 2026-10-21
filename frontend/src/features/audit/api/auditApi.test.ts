@@ -22,6 +22,7 @@ const response = {
       submittedAt: '2025-10-18T10:01:00Z',
       operatorId: '01929c5e-6f00-7000-8000-0000000000b1',
       operator: 'Оператор',
+      keyOwnerId: '01929c5e-6f00-7000-8000-0000000000b1',
       orgId: '01929c5e-6f00-7000-8000-0000000000a1',
       orgName: 'Склад №1',
       keyId: '0x' + '59'.repeat(32),
@@ -52,6 +53,7 @@ describe('mapProductAudit', () => {
     expect(audit.itemId).toBe(response.itemId)
     expect(audit.actions[0].salt).toBe(response.actions[0].salt)
     expect(audit.actions[0].details?.storageBinId).toBe('01929c5e-6f00-7000-8000-0000000000d1')
+    expect(audit.actions[0].keyOwnerId).toBe('01929c5e-6f00-7000-8000-0000000000b1')
     expect(audit.actions[0].detailsError).toBeNull()
   })
 })

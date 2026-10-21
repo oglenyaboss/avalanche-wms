@@ -34,6 +34,7 @@ type Action struct {
 	OrgID        uuid.UUID // passkey_credentials.org_id of the signer credential
 	OrgName      string
 	KeyID        [32]byte // passkey_credentials.key_id of the signer credential
+	KeyOwnerID   uuid.UUID // passkey_credentials.user_id of the signer credential
 	ChainStatus  string   // onchain_events.status, "" when there is no row
 	RejectReason *int16
 }
@@ -51,7 +52,7 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 const actionSelect = `
 	SELECT wa.action_id, wa.operation_id, wa.part_index, wa.action_type, wa.item_ids, wa.salt,
 	       wa.submitted_at, wa.created_by, u.username, pc.org_id, o.name, pc.key_id,
-	       oe.status::text, oe.reject_reason
+	       oe.status::text, oe.reject_reason, pc.user_id
 	FROM public.warehouse_actions wa
 	JOIN public.passkey_credentials pc ON pc.credential_id = wa.signer_credential_id
 	JOIN public.organizations o ON o.org_id = pc.org_id
@@ -126,7 +127,7 @@ func scanActions(rows pgx.Rows) ([]Action, error) {
 		var submittedAt *time.Time
 		var status *string
 		if err := rows.Scan(&a.ActionID, &a.OperationID, &a.PartIndex, &actionType, &a.ItemIDs, &salt,
-			&submittedAt, &a.OperatorID, &a.Operator, &a.OrgID, &a.OrgName, &keyID, &status, &a.RejectReason); err != nil {
+			&submittedAt, &a.OperatorID, &a.Operator, &a.OrgID, &a.OrgName, &keyID, &status, &a.RejectReason, &a.KeyOwnerID); err != nil {
 			return nil, fmt.Errorf("audit.scanActions: %w", err)
 		}
 		a.ActionType = uint8(actionType)
