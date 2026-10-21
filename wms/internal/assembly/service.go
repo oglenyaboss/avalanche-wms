@@ -28,7 +28,7 @@ type Service struct {
 type assemblyRepository interface {
 	WithTx(ctx context.Context, fn func(assemblyRepository) error) error
 	GetOrdersByDestinationForUpdate(ctx context.Context, destinationID uuid.UUID, limit int) ([]domain.Order, error)
-	GetOrderLinesByOrderID(ctx context.Context, orderID uuid.UUID) ([]domain.OrderLine, error)
+	GetOrderLinesByOrderIDs(ctx context.Context, orderIDs []uuid.UUID) (map[uuid.UUID][]domain.OrderLine, error)
 	GetAllocateProductsForSKU(ctx context.Context, skuID uuid.UUID, limit int) ([]domain.Product, error)
 	GetSKUByID(ctx context.Context, skuID uuid.UUID) (*domain.SKU, error)
 	UpdateProductAllocated(ctx context.Context, productID, orderID uuid.UUID) error
@@ -57,6 +57,26 @@ func NewService(repo assemblyRepository, ops operationStore, signer signerSource
 	return &Service{repo: repo, ops: ops, signer: signer}
 }
 
+type allocateCache struct {
+	// short — сток по SKU, увиденный при нехватке: GetAllocateProductsForSKU вернул
+	// меньше, чем нужно строке. Живёт только внутри одного вызова Allocate (одной
+	// транзакции): сток, закоммиченный чужими транзакциями в середине вызова,
+	// подберёт следующий вызов Allocate.
+	short map[uuid.UUID]int
+	// skuNames — имена SKU из GetSKUByID (кэшируются только при успешном ответе).
+	skuNames map[uuid.UUID]string
+	// sections — секции ячеек из GetBinSectionByID (кэшируются только при nil-ошибке).
+	sections map[uuid.UUID]string
+}
+
+func newAllocateCache() *allocateCache {
+	return &allocateCache{
+		short:    make(map[uuid.UUID]int),
+		skuNames: make(map[uuid.UUID]string),
+		sections: make(map[uuid.UUID]string),
+	}
+}
+
 // Allocate - выполняет аллокацию для магазина
 func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*AllocateResponse, error) {
 	if destinationID == uuid.Nil {
@@ -71,6 +91,20 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 			return fmt.Errorf("assembly.Service.Allocate get orders: %w", err)
 		}
 
+		var orderLines map[uuid.UUID][]domain.OrderLine
+		if len(orders) > 0 {
+			orderIDs := make([]uuid.UUID, 0, len(orders))
+			for i := range orders {
+				orderIDs = append(orderIDs, orders[i].OrderID)
+			}
+			orderLines, err = txRepo.GetOrderLinesByOrderIDs(ctx, orderIDs)
+			if err != nil {
+				return fmt.Errorf("assembly.Service.Allocate get order lines: %w", err)
+			}
+		}
+
+		cache := newAllocateCache()
+
 		allocatedOrders := 0
 		allocatedProducts := 0
 		insufficientOrders := make([]InsufficientOrder, 0)
@@ -78,7 +112,7 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 		for i := range orders {
 			order := &orders[i]
 
-			allocated, insufficientSKUs, err := s.allocateOrderTx(ctx, txRepo, order.OrderID, destinationID)
+			allocated, insufficientSKUs, err := s.allocateOrderTx(ctx, txRepo, cache, order.OrderID, destinationID, orderLines[order.OrderID])
 			if err != nil {
 				if errors.Is(err, ErrInsufficientStock) {
 					missingSKUs := make([]InsufficientSKU, 0, len(insufficientSKUs))
@@ -93,13 +127,16 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 							})
 							continue
 						}
-						sku, getErr := txRepo.GetSKUByID(ctx, skuID)
-						if getErr != nil {
-							log.Printf("assembly.Service.Allocate: failed to get SKU name for %s: %v", skuID, getErr)
-						}
-						skuName := ""
-						if sku != nil {
-							skuName = sku.Name
+						skuName, ok := cache.skuNames[skuID]
+						if !ok {
+							sku, getErr := txRepo.GetSKUByID(ctx, skuID)
+							if getErr != nil {
+								log.Printf("assembly.Service.Allocate: failed to get SKU name for %s: %v", skuID, getErr)
+							}
+							if getErr == nil && sku != nil {
+								skuName = sku.Name
+								cache.skuNames[skuID] = skuName
+							}
 						}
 						missingSKUs = append(missingSKUs, InsufficientSKU{
 							SKUID:      isku.SKUID,
@@ -133,23 +170,29 @@ func (s *Service) Allocate(ctx context.Context, destinationID uuid.UUID) (*Alloc
 	return &resp, nil
 }
 
-// allocateOrderTx аллоцирует один заказ в существующей транзакции
-func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository, orderID, destinationID uuid.UUID) (int, []InsufficientSKU, error) {
-	lines, err := txRepo.GetOrderLinesByOrderID(ctx, orderID)
-	if err != nil {
-		return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get lines: %w", err)
-	}
-
+// allocateOrderTx аллоцирует один заказ в существующей транзакции.
+// lines — строки заказа, выбранные одним запросом в Allocate; заказ без записи
+// в этом наборе ведёт себя как заказ без строк.
+func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository, cache *allocateCache, orderID, destinationID uuid.UUID, lines []domain.OrderLine) (int, []InsufficientSKU, error) {
 	allocatedProducts := make([]AllocatedProduct, 0)
 	insufficientSKUs := make([]InsufficientSKU, 0)
 
 	for _, line := range lines {
+		if avail, ok := cache.short[line.SKUID]; ok && line.Qty > avail {
+			insufficientSKUs = append(insufficientSKUs, InsufficientSKU{
+				SKUID:      line.SKUID.String(),
+				MissingQty: line.Qty - avail,
+			})
+			continue
+		}
+
 		products, err := txRepo.GetAllocateProductsForSKU(ctx, line.SKUID, line.Qty)
 		if err != nil {
 			return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get products for SKU %s: %w", line.SKUID, err)
 		}
 
 		if len(products) < line.Qty {
+			cache.short[line.SKUID] = len(products)
 			insufficientSKUs = append(insufficientSKUs, InsufficientSKU{
 				SKUID:      line.SKUID.String(),
 				MissingQty: line.Qty - len(products),
@@ -184,9 +227,14 @@ func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository
 			return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx update product: %w", err)
 		}
 
-		section, err := txRepo.GetBinSectionByID(ctx, a.BinID)
-		if err != nil {
-			return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get bin section: %w", err)
+		section, ok := cache.sections[a.BinID]
+		if !ok {
+			var err error
+			section, err = txRepo.GetBinSectionByID(ctx, a.BinID)
+			if err != nil {
+				return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get bin section: %w", err)
+			}
+			cache.sections[a.BinID] = section
 		}
 
 		tasks = append(tasks, Task{
@@ -207,6 +255,18 @@ func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository
 
 	if err := txRepo.UpdateOrderStatus(ctx, orderID, string(domain.OrderStatusAllocated)); err != nil {
 		return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx update order status: %w", err)
+	}
+
+	// Заказ аллоцирован — его строки реально израсходовали сток, который предыдущие
+	// заказы этого вызова видели как нехватку.
+	for _, line := range lines {
+		if avail, ok := cache.short[line.SKUID]; ok {
+			avail -= line.Qty
+			if avail < 0 {
+				avail = 0
+			}
+			cache.short[line.SKUID] = avail
+		}
 	}
 
 	return len(allocatedProducts), nil, nil

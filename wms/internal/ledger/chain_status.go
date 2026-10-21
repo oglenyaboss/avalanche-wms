@@ -101,17 +101,18 @@ func UnconfirmedProducts(ctx context.Context, q RowsQuerier, productIDs []uuid.U
 	const query = `
 		SELECT p.product_id
 		FROM unnest($1::uuid[]) AS p(product_id)
-		WHERE NOT EXISTS (
-			SELECT 1
+		LEFT JOIN LATERAL (
+			SELECT true AS confirmed
 			FROM public.warehouse_actions wa
-			JOIN public.onchain_events oe ON oe.event_id = wa.action_id
-			WHERE wa.item_ids @> ARRAY[p.product_id]::uuid[]
+			WHERE wa.item_ids @> ARRAY[p.product_id]
 			  AND wa.action_type = $2
 			  AND wa.submitted_at IS NOT NULL
-			  AND oe.status = 'COMMITTED'
-		)`
+			  AND (SELECT oe.status FROM public.onchain_events oe WHERE oe.event_id = wa.action_id) = 'COMMITTED'
+			LIMIT 1
+		) c ON true
+		WHERE c.confirmed IS NULL`
 
-	rows, err := q.Query(ctx, query, productIDs, actionTypeByAggregate[aggregate])
+	rows, err := q.Query(ctx, query, pgx.QueryExecModeDescribeExec, productIDs, actionTypeByAggregate[aggregate])
 	if err != nil {
 		return nil, fmt.Errorf("ledger.UnconfirmedProducts: %w", err)
 	}
