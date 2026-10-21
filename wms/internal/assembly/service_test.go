@@ -669,6 +669,11 @@ func TestAllocateBinSectionCachedPerCall(t *testing.T) {
 	if len(mockRepo.insertedTasks) != 2 {
 		t.Fatalf("expected 2 tasks inserted, got %d", len(mockRepo.insertedTasks))
 	}
+	for _, task := range mockRepo.insertedTasks {
+		if task.Section != "A" {
+			t.Fatalf("expected task section A, got %q", task.Section)
+		}
+	}
 }
 
 // TestAllocateZeroOrdersNoLinesQuery - без заказов строки не запрашиваются (A4).

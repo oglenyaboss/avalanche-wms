@@ -229,7 +229,8 @@ func (s *Service) allocateOrderTx(ctx context.Context, txRepo assemblyRepository
 
 		section, ok := cache.sections[a.BinID]
 		if !ok {
-			section, err := txRepo.GetBinSectionByID(ctx, a.BinID)
+			var err error
+			section, err = txRepo.GetBinSectionByID(ctx, a.BinID)
 			if err != nil {
 				return 0, nil, fmt.Errorf("assembly.Service.allocateOrderTx get bin section: %w", err)
 			}
