@@ -344,7 +344,8 @@ func newMultiProductFixture(t *testing.T, ctx context.Context, env *env, destina
 
 	// Best-effort teardown in FK order: the signed actions containing the products
 	// (their onchain_events and outbox rows), then the ops children keyed by
-	// product id, then products, then order/line/dispatch/cargoplace/shipment, then
+	// product id or by those actions (one Pick action may span several fixtures'
+	// products, e.g. TestMultiOrder_AllocateAndShip), then products, then order/line/dispatch/cargoplace/shipment, then
 	// the SKU. Unlike newOutboundFixture, this also deletes the signed Pick/Ship
 	// actions containing the products, their outbox rows and their onchain_events
 	// rows, so neither accumulates across runs. Because these products are inserted
@@ -359,9 +360,9 @@ func newMultiProductFixture(t *testing.T, ctx context.Context, env *env, destina
 		}{
 			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
 			{`DELETE FROM public.outbox_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
-			{`DELETE FROM wms_ops.shippings WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
-			{`DELETE FROM wms_ops.assembly_tasks WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
-			{`DELETE FROM wms_ops.putaways WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM wms_ops.shippings WHERE product_id = ANY($1::uuid[]) OR action_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM wms_ops.assembly_tasks WHERE product_id = ANY($1::uuid[]) OR action_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM wms_ops.putaways WHERE product_id = ANY($1::uuid[]) OR action_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
 			{`DELETE FROM public.warehouse_actions WHERE item_ids && $1::uuid[]`, []any{productIDs}},
 			{`DELETE FROM wms_inventory.products WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
 			{`DELETE FROM wms_inventory.order_lines WHERE order_id IN (SELECT order_id FROM wms_inventory.orders WHERE external_order_no=$1)`, []any{orderNo}},
