@@ -97,6 +97,7 @@
 | [Архитектура системы](architecture/system-overview.md) | Компоненты, роли, Kafka, Debezium, безопасность |
 | [Конвенции проекта](CONVENTIONS.md) | Git workflow, Go style, SQL naming, Docker |
 | [Гайд по MR](MR_GUIDE.md) | Правила оформления merge requests |
+| [Идеи для статьи](article-ideas.md) | Ограничения архитектуры: рост общей цепи и объём данных за годы |
 
 ---
 

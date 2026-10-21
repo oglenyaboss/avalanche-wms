@@ -1,0 +1,34 @@
+time="2026-10-21T21:20:59+05:00" level=info msg="teardown: дошипнул хвост 16176 товаров по 70 магазинам" source=console
+
+
+  █ THRESHOLDS 
+
+    http_req_failed
+    ✓ 'rate<0.05' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    CUSTOM
+    tput_items_picked..............: 147326 866.172686/s
+    tput_items_shipped.............: 131150 771.069246/s
+    tput_items_stored..............: 150000 881.893915/s
+
+    HTTP
+    http_req_duration..............: avg=15.3ms   min=145.49µs med=12.16ms  max=369.71ms p(90)=24.38ms  p(95)=37.17ms
+      { expected_response:true }...: avg=15.3ms   min=145.49µs med=12.16ms  max=369.71ms p(90)=24.38ms  p(95)=37.17ms
+    http_req_failed................: 0.00%  0 out of 664181
+    http_reqs......................: 664181 3904.914549/s
+
+    EXECUTION
+    iteration_duration.............: avg=682.37ms min=261.17ms med=654.96ms max=1.35s    p(90)=938.32ms p(95)=1s     
+    iterations.....................: 15000  88.189392/s
+    vus............................: 0      min=0           max=70
+    vus_max........................: 70     min=70          max=70
+
+    NETWORK
+    data_received..................: 1.3 GB 7.9 MB/s
+    data_sent......................: 404 MB 2.4 MB/s
+
+
+
