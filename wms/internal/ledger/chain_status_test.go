@@ -105,16 +105,20 @@ func TestUnconfirmedProductsArgBuilding(t *testing.T) {
 		t.Fatalf("out = %v, want sorted [%s %s %s]", out, a, b, c)
 	}
 
-	if len(q.args) != 2 {
-		t.Fatalf("args = %v (%d), want 2", q.args, len(q.args))
+	if len(q.args) != 3 {
+		t.Fatalf("args = %v (%d), want 3", q.args, len(q.args))
 	}
-	ids, ok := q.args[0].([]uuid.UUID)
+	// Без кэша плана: generic plan, построенный на ещё пустых таблицах, держит seq scan.
+	if q.args[0] != pgx.QueryExecModeDescribeExec {
+		t.Errorf("exec mode arg = %v, want pgx.QueryExecModeDescribeExec", q.args[0])
+	}
+	ids, ok := q.args[1].([]uuid.UUID)
 	if !ok || len(ids) != 3 || ids[0] != a || ids[1] != b || ids[2] != c {
-		t.Errorf("product_ids arg = %v, want the three ids in order", q.args[0])
+		t.Errorf("product_ids arg = %v, want the three ids in order", q.args[1])
 	}
 	// picking = 3 — код SignedAction.Type.Pick (ADR-0001 §3).
-	if got, ok := q.args[1].(int16); !ok || got != 3 {
-		t.Errorf("action_type arg = %v (%T), want int16(3)", q.args[1], q.args[1])
+	if got, ok := q.args[2].(int16); !ok || got != 3 {
+		t.Errorf("action_type arg = %v (%T), want int16(3)", q.args[2], q.args[2])
 	}
 	for _, part := range []string{"unnest($1::uuid[])", "(SELECT oe.status FROM public.onchain_events oe WHERE oe.event_id = wa.action_id) = 'COMMITTED'", "wa.submitted_at IS NOT NULL", "wa.action_type = $2", "wa.item_ids @> ARRAY[p.product_id]", "LEFT JOIN LATERAL", "LIMIT 1"} {
 		if !strings.Contains(q.sql, part) {

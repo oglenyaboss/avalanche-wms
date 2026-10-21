@@ -112,7 +112,7 @@ func UnconfirmedProducts(ctx context.Context, q RowsQuerier, productIDs []uuid.U
 		) c ON true
 		WHERE c.confirmed IS NULL`
 
-	rows, err := q.Query(ctx, query, productIDs, actionTypeByAggregate[aggregate])
+	rows, err := q.Query(ctx, query, pgx.QueryExecModeDescribeExec, productIDs, actionTypeByAggregate[aggregate])
 	if err != nil {
 		return nil, fmt.Errorf("ledger.UnconfirmedProducts: %w", err)
 	}
