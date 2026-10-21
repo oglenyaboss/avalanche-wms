@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -60,6 +61,31 @@ func TestParseOrgFile_Invalid(t *testing.T) {
 			_, err := parseOrgFile(tc.data)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRevokeKey_InvalidKeyID(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"флага нет", nil},
+		{"пустой key-id", []string{"--key-id", ""}},
+		{"короче 32 байт", []string{"--key-id", "0x12"}},
+		{"без 0x", []string{"--key-id", strings.Repeat("ab", 32)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Валидация должна упасть до dialRegistry: RPC_URL не задан, любой
+			// сетевой вызов дал бы другую ошибку.
+			err := revokeKey(context.Background(), tc.args)
+			if err == nil {
+				t.Fatal("err = nil, want key-id validation error")
+			}
+			if strings.Contains(err.Error(), "dial registry") || strings.Contains(err.Error(), "RPC_URL") {
+				t.Fatalf("err = %v, want a key-id validation error before any network call", err)
 			}
 		})
 	}

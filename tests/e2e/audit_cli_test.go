@@ -311,6 +311,12 @@ func TestAudit_PutawayProductSwapped_ItemsMismatch(t *testing.T) {
 		SELECT product_id FROM wms_inventory.products WHERE product_id <> ALL($1) LIMIT 1`, fx.productIDs).Scan(&other)
 	require.NoError(t, err)
 	mustExec(t, ctx, env, `UPDATE wms_ops.putaways SET product_id = $1 WHERE action_id = $2 AND product_id = $3`, other, fx.putawayActionID, fx.productIDs[1])
+	t.Cleanup(func() {
+		if _, err := env.db.Exec(context.Background(), `UPDATE wms_ops.putaways SET product_id = $1 WHERE action_id = $2 AND product_id = $3`,
+			fx.productIDs[1], fx.putawayActionID, other); err != nil {
+			t.Errorf("swapped putaway cleanup: %v", err)
+		}
+	})
 
 	stdout, code := runAudit(t, ctx, env, "product", fx.productIDs[0].String())
 	require.Equal(t, 1, code, "swapped putaway product must exit 1")

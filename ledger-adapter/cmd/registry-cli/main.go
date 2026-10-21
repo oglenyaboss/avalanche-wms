@@ -14,9 +14,10 @@ import (
 const usage = `usage:
   registry-cli register-org --file <org.json>
   registry-cli add-admin-key --file <org.json>
+  registry-cli revoke-key --key-id <0x…>
   registry-cli list
 
-окружение: RPC_URL, REGISTRY_ADDR (или <NAME>_FILE); OWNER_KEY (или OWNER_KEY_FILE) — для register-org и add-admin-key
+окружение: RPC_URL, REGISTRY_ADDR (или <NAME>_FILE); OWNER_KEY (или OWNER_KEY_FILE) — для register-org, add-admin-key и revoke-key
 `
 
 var errUsage = errors.New("usage")
@@ -44,6 +45,8 @@ func run(args []string) error {
 		return registerOrg.run(ctx, args[1:])
 	case "add-admin-key":
 		return addAdminKey.run(ctx, args[1:])
+	case "revoke-key":
+		return revokeKey(ctx, args[1:])
 	case "list":
 		return list(ctx)
 	default:
