@@ -51,6 +51,7 @@ The suite uses an **isolated compose project `blockchain_project_e2e`**, so it c
 | `insufficientstock_test.go` | Allocate shortage → 200 + `insufficient_orders`, all-or-nothing (order NEW, 0 tasks). |
 | `noop_test.go` | Allocate a destination with no orders → 0/0. |
 | `known_failures_test.go` | Regression tests for the BUGHUNT defects: S1/S2, Assembly-1, N1, Shipping-2, Receiving-1, Dispatches-1, N9. |
+| `registry_cli_test.go` | Live registry-cli smoke: register-org (+ repeat rejected), add-admin-key (+ unknown org rejected), list shows both admin keys active. |
 
 Helpers: `api_test.go` (HTTP + auth + error helpers), `db_assertions_test.go`, `chain_assertions_test.go`, `fixtures_test.go` (per-run unique fixtures + FK-ordered cleanup).
 
