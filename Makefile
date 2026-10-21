@@ -2,7 +2,7 @@
         stress stress-logs stress-smoke stress-health stress-auth stress-receiving stress-full \
         kms-up kms-down kms-logs registry-cli
 
-COMPOSE := docker compose
+COMPOSE ?= docker compose
 COMPOSE_KMS := docker compose -f docker-compose.yaml -f docker-compose.kms.yaml
 
 help: ## Show this help

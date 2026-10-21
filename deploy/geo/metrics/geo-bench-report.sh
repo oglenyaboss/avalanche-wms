@@ -5,6 +5,7 @@
 #
 # Inherits from the caller: OUT, DBCSV, NHCSV, RUN_START, RUN_T0, RUN_T1, FAULTLOG, BLOCKCHAIN_ID,
 #   QR, FAULT, FAULT_AT, FAULT_DOWN, PACE_RPS, PACE_DURATION, NODES_NAME/HOST/GEO, PSQL/RAW fns.
+# "events" = signed actions (one outbox/onchain row = one action of N items); items via warehouse_actions.item_ids.
 # NOTE: latency is COMMIT/PIPELINE latency (updated_at-created_at), not raw consensus finality.
 
 JSON="$OUT/geo-bench.json"
@@ -17,12 +18,13 @@ UP_TS=$(awk '/UP/{print $1}'   "$FAULTLOG" 2>/dev/null | head -1)
 
 # --- sustained commit-rate (slope of committed vs ts), windowed -------------------------------
 # pre-fault steady = [RUN_T0+30 .. DOWN_TS] (or whole run if no fault). The honest headline number.
-slope(){ awk -F, -v a="$1" -v b="$2" 'NR>1 && $2!="NA" && $1>=a && $1<=b { if(ft==""){ft=$1;fc=$2} lt=$1;lc=$2 } END{ if(lt>ft) printf "%.2f",(lc-fc)/(lt-ft); else print "0" }' "$DBCSV"; }
+slope(){ awk -F, -v a="$1" -v b="$2" -v col="$3" 'NR>1 && $col!="NA" && $1>=a && $1<=b { if(ft==""){ft=$1;fc=$col} lt=$1;lc=$col } END{ if(lt>ft) printf "%.2f",(lc-fc)/(lt-ft); else print "0" }' "$DBCSV"; }
 PRE_END="${DOWN_TS:-$RUN_T1}"
-SUSTAINED=$(slope "$((RUN_T0+30))" "$PRE_END")
+SUSTAINED=$(slope "$((RUN_T0+30))" "$PRE_END" 2)
+SUSTAINED_ITEMS=$(slope "$((RUN_T0+30))" "$PRE_END" 9)
 if [ "$FAULT_FIRED" = 1 ]; then
-  DURING_FAULT=$(slope "$DOWN_TS" "$UP_TS")
-  POST_FAULT=$(slope "$UP_TS" "$(date +%s)")
+  DURING_FAULT=$(slope "$DOWN_TS" "$UP_TS" 2)
+  POST_FAULT=$(slope "$UP_TS" "$(date +%s)" 2)
 else
   DURING_FAULT="NA"; POST_FAULT="NA"
 fi
@@ -36,10 +38,11 @@ BACKLOG_FINAL=$(PSQL "SELECT count(*) FROM public.outbox_events oe WHERE oe.crea
 
 # --- final run-scoped integrity + commit latency -----------------------------------------------
 COMMITTED=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='COMMITTED' AND created_at>='$RUN_START'")
+COMMITTED_ITEMS=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED' AND oe.created_at>='$RUN_START'")
 FAILED=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='FAILED' AND created_at>='$RUN_START'")
 read -r LP50 LP95 LP99 <<<"$(RAW "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY e), percentile_disc(0.95) WITHIN GROUP (ORDER BY e), percentile_disc(0.99) WITHIN GROUP (ORDER BY e) FROM (SELECT EXTRACT(EPOCH FROM (updated_at-created_at)) e FROM public.onchain_events WHERE status='COMMITTED' AND created_at>='$RUN_START') q" | tr '|' ' ')"
 SHIPPED_WMS=$(PSQL "SELECT count(*) FROM wms_inventory.products WHERE qr_code LIKE '$QR' AND status='SHIPPED'")
-SHIPPED_CHAIN=$(PSQL "SELECT count(*) FROM public.onchain_events oe JOIN public.outbox_events ob USING(event_id) JOIN wms_inventory.products p ON p.product_id=ob.aggregate_id WHERE oe.aggregate_type='shipping' AND oe.status='COMMITTED' AND p.qr_code LIKE '$QR'")
+SHIPPED_CHAIN=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED' AND wa.action_type=4 AND oe.created_at>='$RUN_START' AND EXISTS (SELECT 1 FROM wms_inventory.products p WHERE p.product_id = ANY(wa.item_ids) AND p.qr_code LIKE '$QR')")
 [ "${SHIPPED_WMS:-0}" = "${SHIPPED_CHAIN:-1}" ] && CONSISTENT=true || CONSISTENT=false
 RECONCILED=$(docker logs ledger-adapter --since "$(date -u -r "$RUN_T0" +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo '10m')" 2>&1 | grep -oE 'reconciled to committed n:[0-9]+' | awk -F: '{s+=$2} END{print s+0}')
 
@@ -118,9 +121,11 @@ cat > "$JSON" <<EOF
   },
   "throughput": {
     "sustained_commit_evps": $(norm "$SUSTAINED"),
+    "sustained_commit_items_ps": $(norm "$SUSTAINED_ITEMS"),
     "during_fault_evps": $(norm "$DURING_FAULT"),
     "post_fault_evps": $(norm "$POST_FAULT"),
     "committed_total": $(norm "$COMMITTED"),
+    "committed_items": $(norm "$COMMITTED_ITEMS"),
     "k6_iterations": $(norm "$K6_ITERS"),
     "k6_dropped_iterations": $(norm "$K6_DROPPED"),
     "k6_http_fail_pct": "${K6_FAILPCT:-0.00%}",
@@ -139,7 +144,7 @@ cat > "$JSON" <<EOF
 }
 EOF
 
-echo "  sustained=${SUSTAINED} ev/s | commit-lat p50/p95/p99=${LP50}/${LP95}/${LP99}s | backlog max=${BACKLOG_MAX} final=${BACKLOG_FINAL} bounded=$BOUNDED"
-echo "  integrity: committed=$COMMITTED failed=$FAILED reconciled=$RECONCILED  shipped wms=$SHIPPED_WMS==chain=$SHIPPED_CHAIN ($CONSISTENT)"
+echo "  sustained=${SUSTAINED} ev/s | items/s=${SUSTAINED_ITEMS} | commit-lat p50/p95/p99=${LP50}/${LP95}/${LP99}s | backlog max=${BACKLOG_MAX} final=${BACKLOG_FINAL} bounded=$BOUNDED"
+echo "  integrity: committed=$COMMITTED committed_items=$COMMITTED_ITEMS failed=$FAILED reconciled=$RECONCILED  shipped wms=$SHIPPED_WMS==chain=$SHIPPED_CHAIN ($CONSISTENT)"
 echo "  sync spread=${SPREAD} blocks  fault: ${FAULT_JSON}"
 echo "  JSON → $JSON"

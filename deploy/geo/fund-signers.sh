@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # fund-signers.sh — фондит N детерминированных signer-аккаунтов из ewoq на geo-цепи
-# для multi-signer ledger-adapter'а и разрешает их в tx-allow-list (issue #5: в genesis
-# включён allow-list отправителей tx, поэтому signer без роли в прекомпайле
-# 0x0200000000000000000000000000000000000002 не может слать tx — адаптер отвалится).
-# Flusher шардит in-flight tx по этим аккаунтам
-# (каждый ограничен TxPoolAccountSlots узла → N аккаунтов = N× in-flight ёмкость →
-# насыщение WAN-цепи; single signer её голодит). Ключи выводятся ДЕТЕРМИНИРОВАННО из
-# публичного seed keccak("geo-ms-signer-v1:<i>") — воспроизводимо для ВКР и не секрет
-# на disposable test-цепи. Печатает PRIVATE_KEYS (comma-separated) в stdout.
+# для adapter-bypass load-генератора ledger-adapter/cmd/blaster и разрешает их в
+# tx-allow-list (issue #5: в genesis включён allow-list отправителей tx, поэтому signer
+# без роли в прекомпайле 0x0200000000000000000000000000000000000002 не может слать tx).
+# blaster шардит in-flight tx по этим аккаунтам (каждый ограничен TxPoolAccountSlots
+# узла → N аккаунтов = N× in-flight ёмкость → насыщение WAN-цепи; single signer её
+# голодит). Сам адаптер это НЕ касается: с #51 он подписывает одиночным ewoq-ключом
+# (genesis-funded и админ allow-list — фондирование и выдача роли ему не нужны).
+# Ключи выводятся ДЕТЕРМИНИРОВАННО из публичного seed keccak("geo-ms-signer-v1:<i>") —
+# воспроизводимо для ВКР и не секрет на disposable test-цепи. Печатает ключи
+# (comma-separated) в stdout.
 #
 # Usage:
-#   N=8 deploy/geo/fund-signers.sh                 # печатает PRIVATE_KEYS
-#   PRIVATE_KEYS="$(N=8 deploy/geo/fund-signers.sh)" \
-#     deploy/geo/run-app-on-geo.sh up -d --force-recreate --no-deps ledger-adapter
+#   N=8 deploy/geo/fund-signers.sh   # печатает ключи для blaster
 set -euo pipefail
 export PATH="$HOME/.foundry/bin:$PATH"
 cd "$(git rev-parse --show-toplevel)"
