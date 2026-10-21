@@ -20,6 +20,7 @@ const basketPredicate = `
 		JOIN wms_ops.assembly_tasks t ON t.product_id = p.product_id
 		WHERE t.operator_id = $1
 		  AND t.status = 'DONE'
+		  AND t.action_id IS NULL
 		  AND t.destination_id = $2
 		  AND p.status = 'ASSEMBLED'`
 

@@ -430,7 +430,7 @@ func (r *Repository) UpdateOrdersToAssembled(ctx context.Context, orderIDs []uui
 }
 
 // CountAssembledByOperator counts the products the operator has picked but not yet moved
-// to a shipping buffer (product ASSEMBLED + its assembly_task DONE). DB-derived replacement
+// to a shipping buffer (product ASSEMBLED + its assembly_task DONE, not yet unloaded — action_id IS NULL). DB-derived replacement
 // for the old in-memory cart counter (issue #46): the pick-cart size, reconstructed from
 // DB state so it survives a WMS restart. COUNT(DISTINCT product_id): a product can
 // accumulate more than one DONE task after re-allocation (the 0009 unique index only
@@ -441,7 +441,7 @@ func (r *Repository) CountAssembledByOperator(ctx context.Context, operatorID uu
 		SELECT count(DISTINCT p.product_id)
 		FROM wms_inventory.products p
 		JOIN wms_ops.assembly_tasks t ON t.product_id = p.product_id
-		WHERE t.operator_id = $1 AND p.status = 'ASSEMBLED' AND t.status = 'DONE'`
+		WHERE t.operator_id = $1 AND t.status = 'DONE' AND t.action_id IS NULL AND p.status = 'ASSEMBLED'`
 
 	var count int
 	if err := r.q.QueryRow(ctx, query, operatorID).Scan(&count); err != nil {
