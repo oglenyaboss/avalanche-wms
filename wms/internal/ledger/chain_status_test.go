@@ -116,13 +116,16 @@ func TestUnconfirmedProductsArgBuilding(t *testing.T) {
 	if got, ok := q.args[1].(int16); !ok || got != 3 {
 		t.Errorf("action_type arg = %v (%T), want int16(3)", q.args[1], q.args[1])
 	}
-	for _, part := range []string{"unnest($1::uuid[])", "oe.status = 'COMMITTED'", "wa.submitted_at IS NOT NULL", "wa.action_type = $2", "wa.item_ids @> ARRAY[p.product_id]", "LEFT JOIN LATERAL", "LIMIT 1"} {
+	for _, part := range []string{"unnest($1::uuid[])", "(SELECT oe.status FROM public.onchain_events oe WHERE oe.event_id = wa.action_id) = 'COMMITTED'", "wa.submitted_at IS NOT NULL", "wa.action_type = $2", "wa.item_ids @> ARRAY[p.product_id]", "LEFT JOIN LATERAL", "LIMIT 1"} {
 		if !strings.Contains(q.sql, part) {
 			t.Errorf("query lacks %q:\n%s", part, q.sql)
 		}
 	}
 	if strings.Contains(q.sql, "outbox_events") {
 		t.Errorf("query still references outbox_events:\n%s", q.sql)
+	}
+	if strings.Contains(q.sql, "JOIN public.onchain_events") {
+		t.Errorf("query joins onchain_events, which stale status stats let the planner drive from idx_onchain_events_status:\n%s", q.sql)
 	}
 	if strings.Contains(q.sql, "NOT EXISTS") {
 		t.Errorf("query uses NOT EXISTS, which the planner may hash over the whole history:\n%s", q.sql)

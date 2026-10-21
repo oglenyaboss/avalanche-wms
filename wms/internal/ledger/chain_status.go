@@ -104,11 +104,10 @@ func UnconfirmedProducts(ctx context.Context, q RowsQuerier, productIDs []uuid.U
 		LEFT JOIN LATERAL (
 			SELECT true AS confirmed
 			FROM public.warehouse_actions wa
-			JOIN public.onchain_events oe ON oe.event_id = wa.action_id
 			WHERE wa.item_ids @> ARRAY[p.product_id]
 			  AND wa.action_type = $2
 			  AND wa.submitted_at IS NOT NULL
-			  AND oe.status = 'COMMITTED'
+			  AND (SELECT oe.status FROM public.onchain_events oe WHERE oe.event_id = wa.action_id) = 'COMMITTED'
 			LIMIT 1
 		) c ON true
 		WHERE c.confirmed IS NULL`
