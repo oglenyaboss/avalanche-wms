@@ -16,6 +16,7 @@ import (
 
 	"wms/internal/domain"
 	"wms/internal/signedaction"
+	"wms/internal/signedops"
 )
 
 type hexBytes []byte
@@ -208,10 +209,11 @@ func (f fixture) productOf(t *testing.T) uuid.UUID {
 }
 
 type fakeStore struct {
-	byProduct map[uuid.UUID][]Action
-	byID      map[uuid.UUID]*Action
-	all       []Action
-	details   func(a Action) (Details, error)
+	byProduct   map[uuid.UUID][]Action
+	byID        map[uuid.UUID]*Action
+	all         []Action
+	details     func(a Action) (Details, error)
+	domainItems func(a Action) ([]uuid.UUID, error)
 }
 
 func (f *fakeStore) ActionsForProduct(ctx context.Context, productID uuid.UUID) ([]Action, error) {
@@ -228,6 +230,15 @@ func (f *fakeStore) AllActions(ctx context.Context) ([]Action, error) {
 
 func (f *fakeStore) Details(ctx context.Context, a Action) (Details, error) {
 	return f.details(a)
+}
+
+// DomainItems falls back to the action's item_ids copy so old scenarios that do
+// not care about domain rows stay meaningful.
+func (f *fakeStore) DomainItems(ctx context.Context, a Action) ([]uuid.UUID, error) {
+	if f.domainItems != nil {
+		return f.domainItems(a)
+	}
+	return a.ItemIDs, nil
 }
 
 type fakeLedger struct {
@@ -504,6 +515,78 @@ func TestAudit_Product_SignerMismatch(t *testing.T) {
 	}
 	if stage.Signature != CheckOK || stage.DetailsHash != CheckOK {
 		t.Errorf("unrelated checks = %s/%s, want OK", stage.Signature, stage.DetailsHash)
+	}
+}
+
+// TestAudit_Product_DomainItemsMismatch compares the domain rows of the action
+// with the signed chain item set: missing, extra, duplicated or substituted
+// product rows all give an ITEMS_MISMATCH finding.
+func TestAudit_Product_DomainItemsMismatch(t *testing.T) {
+	f := newFixture(t)
+	product := f.productOf(t)
+	p1 := mustParseUUID(t, f.vectors.Products[0].ProductID)
+	p2 := mustParseUUID(t, f.vectors.Products[1].ProductID)
+	p3 := mustParseUUID(t, f.vectors.Products[2].ProductID)
+	chain := [][32]byte{signedaction.ItemID(p1), signedaction.ItemID(p2)}
+
+	cases := []struct {
+		name    string
+		domain  []uuid.UUID
+		items   Check
+		finding bool
+		detail  string
+	}{
+		{name: "domain rows equal the chain set", domain: []uuid.UUID{p1, p2}, items: CheckOK},
+		{name: "missing domain row", domain: []uuid.UUID{p1}, items: CheckMismatch, finding: true, detail: "db 1 chain 2 items"},
+		{name: "extra domain row", domain: []uuid.UUID{p1, p2, p3}, items: CheckMismatch, finding: true, detail: "db 3 chain 2 items"},
+		{name: "duplicated domain row", domain: []uuid.UUID{p1, p1}, items: CheckMismatch, finding: true, detail: "db 2 chain 2 items"},
+		{name: "substituted product id", domain: []uuid.UUID{p1, p3}, items: CheckMismatch, finding: true, detail: "db 2 chain 2 items"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, l := consistentFakes(f, product)
+			l.items[f.actionID] = chain
+			s.domainItems = func(a Action) ([]uuid.UUID, error) { return tc.domain, nil }
+			report, err := NewAuditor(s, l).Product(context.Background(), product)
+			if err != nil {
+				t.Fatalf("Product: %v", err)
+			}
+			stage := report.Stages[0]
+			if stage.Items != tc.items {
+				t.Errorf("items = %s, want %s", stage.Items, tc.items)
+			}
+			finding := findFinding(report.Findings(), KindItems)
+			if tc.finding {
+				if finding == nil {
+					t.Fatalf("no %s finding in %v", KindItems, report.Findings())
+				}
+				if finding.Detail != tc.detail {
+					t.Errorf("detail = %q, want %q", finding.Detail, tc.detail)
+				}
+			} else if finding != nil {
+				t.Errorf("unexpected %s finding in %v", KindItems, report.Findings())
+			}
+		})
+	}
+}
+
+// TestPartItems cuts the item-id sorted receive items into MaxItemsPerAction chunks.
+func TestPartItems(t *testing.T) {
+	ids := make([]uuid.UUID, signedops.MaxItemsPerAction+1)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+	sorted := signedaction.SortByItemID(ids)
+
+	if got := partItems(sorted, 0); len(got) != signedops.MaxItemsPerAction {
+		t.Errorf("part 0 len = %d, want %d", len(got), signedops.MaxItemsPerAction)
+	}
+	p1 := partItems(sorted, 1)
+	if len(p1) != 1 || p1[0] != sorted[signedops.MaxItemsPerAction] {
+		t.Errorf("part 1 = %d items, want the single last item", len(p1))
+	}
+	if got := partItems(sorted, 2); len(got) != 0 {
+		t.Errorf("part 2 len = %d, want 0", len(got))
 	}
 }
 

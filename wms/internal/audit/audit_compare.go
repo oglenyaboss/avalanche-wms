@@ -148,12 +148,16 @@ func (a *Auditor) checkItems(ctx context.Context, db *Action, s *Stage) error {
 	if err != nil {
 		return err
 	}
+	domainItems, err := a.store.DomainItems(ctx, *db)
+	if err != nil {
+		return err
+	}
 	chainSet := make(map[[32]byte]bool, len(chainItems))
 	for _, it := range chainItems {
 		chainSet[it] = true
 	}
-	dbSet := make(map[[32]byte]bool, len(db.ItemIDs))
-	for _, p := range db.ItemIDs {
+	dbSet := make(map[[32]byte]bool, len(domainItems))
+	for _, p := range domainItems {
 		dbSet[signedaction.ItemID(p)] = true
 	}
 	same := len(chainSet) == len(dbSet)
@@ -165,9 +169,11 @@ func (a *Auditor) checkItems(ctx context.Context, db *Action, s *Stage) error {
 			}
 		}
 	}
-	if !same {
+	// a duplicated domain row leaves the set equal but must still fail the check
+	duplicated := len(dbSet) != len(domainItems)
+	if !same || duplicated {
 		s.Items = CheckMismatch
-		s.Findings = append(s.Findings, Finding{ActionID: db.ActionID, Kind: KindItems, Detail: fmt.Sprintf("db %d chain %d items", len(dbSet), len(chainSet))})
+		s.Findings = append(s.Findings, Finding{ActionID: db.ActionID, Kind: KindItems, Detail: fmt.Sprintf("db %d chain %d items", len(domainItems), len(chainSet))})
 		return nil
 	}
 	s.Items = CheckOK

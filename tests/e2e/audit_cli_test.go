@@ -269,6 +269,66 @@ func TestAudit_BinChangedInDB_DetailsHashMismatch(t *testing.T) {
 		"all findings must contain the tampered putaway")
 }
 
+// TestAudit_PutawayRowDeleted_ItemsMismatch deletes one putaway product row:
+// the CLI catches the items mismatch for the product and in `all`.
+func TestAudit_PutawayRowDeleted_ItemsMismatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	env := testEnv
+	require.NotNil(t, env)
+
+	fx := signedPutawayFixture(t, ctx, env)
+	mustExec(t, ctx, env, `DELETE FROM wms_ops.putaways WHERE action_id = $1 AND product_id = $2`, fx.putawayActionID, fx.productIDs[1])
+
+	stdout, code := runAudit(t, ctx, env, "product", fx.productIDs[0].String())
+	require.Equal(t, 1, code, "deleted putaway row must exit 1")
+	stages := auditStagesByID(t, stdout)
+	pa, ok := stages[fx.putawayActionID.String()]
+	require.True(t, ok, "no putaway stage in %s", stdout)
+	require.Equal(t, "MISMATCH", pa.Items, "putaway items check")
+	require.True(t, containsFinding(pa.Findings, fx.putawayActionID, "ITEMS_MISMATCH"), "putaway findings %v", pa.Findings)
+	rec, ok := stages[fx.receiveActionID.String()]
+	require.True(t, ok, "no receive stage in %s", stdout)
+	require.Equal(t, "OK", rec.Items, "receive stage must stay OK")
+
+	stdout, code = runAudit(t, ctx, env, "all")
+	require.Equal(t, 1, code, "all must exit 1 with findings")
+	require.True(t, containsFinding(parseAuditFindings(t, stdout), fx.putawayActionID, "ITEMS_MISMATCH"),
+		"all findings must contain the tampered putaway")
+}
+
+// TestAudit_PutawayProductSwapped_ItemsMismatch substitutes one putaway row's
+// product with another existing one: the CLI catches the items mismatch.
+func TestAudit_PutawayProductSwapped_ItemsMismatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	env := testEnv
+	require.NotNil(t, env)
+
+	fx := signedPutawayFixture(t, ctx, env)
+	var other uuid.UUID
+	err := env.db.QueryRow(ctx, `
+		SELECT product_id FROM wms_inventory.products WHERE product_id <> ALL($1) LIMIT 1`, fx.productIDs).Scan(&other)
+	require.NoError(t, err)
+	mustExec(t, ctx, env, `UPDATE wms_ops.putaways SET product_id = $1 WHERE action_id = $2 AND product_id = $3`, other, fx.putawayActionID, fx.productIDs[1])
+
+	stdout, code := runAudit(t, ctx, env, "product", fx.productIDs[0].String())
+	require.Equal(t, 1, code, "swapped putaway product must exit 1")
+	stages := auditStagesByID(t, stdout)
+	pa, ok := stages[fx.putawayActionID.String()]
+	require.True(t, ok, "no putaway stage in %s", stdout)
+	require.Equal(t, "MISMATCH", pa.Items, "putaway items check")
+	require.True(t, containsFinding(pa.Findings, fx.putawayActionID, "ITEMS_MISMATCH"), "putaway findings %v", pa.Findings)
+	rec, ok := stages[fx.receiveActionID.String()]
+	require.True(t, ok, "no receive stage in %s", stdout)
+	require.Equal(t, "OK", rec.Items, "receive stage must stay OK")
+
+	stdout, code = runAudit(t, ctx, env, "all")
+	require.Equal(t, 1, code, "all must exit 1 with findings")
+	require.True(t, containsFinding(parseAuditFindings(t, stdout), fx.putawayActionID, "ITEMS_MISMATCH"),
+		"all findings must contain the tampered putaway")
+}
+
 // TestAudit_ActionRowDeleted_MissingInDB deletes the putaway action row (and
 // unlinks the domain row): the chain-only action is reported MISSING_IN_DB.
 func TestAudit_ActionRowDeleted_MissingInDB(t *testing.T) {

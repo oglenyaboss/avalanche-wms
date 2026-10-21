@@ -95,6 +95,7 @@ type store interface {
 	Action(ctx context.Context, actionID uuid.UUID) (*Action, error)
 	AllActions(ctx context.Context) ([]Action, error)
 	Details(ctx context.Context, a Action) (Details, error)
+	DomainItems(ctx context.Context, a Action) ([]uuid.UUID, error)
 }
 
 type ledger interface {

@@ -202,6 +202,7 @@ async function appliedStage(
 
 function sameItems(chainItems: readonly bigint[], dbItemIds: readonly string[]): boolean {
   if (chainItems.length !== dbItemIds.length) return false
+  if (new Set(dbItemIds).size !== dbItemIds.length) return false
   const onChain = new Set(chainItems.map(String))
   return dbItemIds.every((uuid) => onChain.has(itemId(uuid).toString()))
 }

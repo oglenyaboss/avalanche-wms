@@ -20,11 +20,12 @@ import (
 
 // fakeRepo stubs productActions the way products handler tests stub service.
 type fakeRepo struct {
-	productID    uuid.UUID
-	productIDErr error
-	actions      []Action
-	details      Details
-	detailsErr   error
+	productID     uuid.UUID
+	productIDErr  error
+	actions       []Action
+	details       Details
+	detailsErr    error
+	domainItemsFn func(a Action) ([]uuid.UUID, error)
 }
 
 func (f *fakeRepo) ProductID(_ context.Context, _ string) (uuid.UUID, error) {
@@ -35,6 +36,14 @@ func (f *fakeRepo) ActionsForProduct(_ context.Context, _ uuid.UUID) ([]Action, 
 }
 func (f *fakeRepo) Details(_ context.Context, _ Action) (Details, error) {
 	return f.details, f.detailsErr
+}
+
+// DomainItems falls back to the action's item_ids copy when no override is set.
+func (f *fakeRepo) DomainItems(_ context.Context, a Action) ([]uuid.UUID, error) {
+	if f.domainItemsFn != nil {
+		return f.domainItemsFn(a)
+	}
+	return a.ItemIDs, nil
 }
 
 // asRole injects an authenticated identity — RequireAuditorOrAdmin (top of the

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"wms/internal/signedaction"
+	"wms/internal/signedops"
 )
 
 // Details recomputes the detailsHash inputs of the action from the domain tables it changed (ADR §4).
@@ -26,6 +27,71 @@ func (r *Repository) Details(ctx context.Context, a Action) (Details, error) {
 	default:
 		return Details{}, fmt.Errorf("audit.Repository.Details: %w %d", ErrUnknownActionType, a.ActionType)
 	}
+}
+
+// DomainItems returns the product_ids of the domain rows the action changed,
+// without DISTINCT so a duplicated row stays visible to the audit (issue #56).
+func (r *Repository) DomainItems(ctx context.Context, a Action) ([]uuid.UUID, error) {
+	switch a.ActionType {
+	case signedaction.TypeReceive:
+		return r.receiveDomainItems(ctx, a)
+	case signedaction.TypePutAway:
+		return r.domainItems(ctx, "putaways", a.ActionID)
+	case signedaction.TypePick:
+		return r.domainItems(ctx, "assembly_tasks", a.ActionID)
+	case signedaction.TypeShip:
+		return r.domainItems(ctx, "shippings", a.ActionID)
+	default:
+		return nil, fmt.Errorf("audit.Repository.DomainItems: %w %d", ErrUnknownActionType, a.ActionType)
+	}
+}
+
+// domainItems collects product_id of every row of one action-keyed domain table.
+func (r *Repository) domainItems(ctx context.Context, table string, actionID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT product_id
+		FROM wms_ops.`+table+`
+		WHERE action_id = $1`, actionID)
+	if err != nil {
+		return nil, fmt.Errorf("audit.Repository.DomainItems %s: %w", table, err)
+	}
+	defer rows.Close()
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, fmt.Errorf("audit.Repository.DomainItems %s: %w", table, err)
+	}
+	return ids, nil
+}
+
+// receiveDomainItems collects the SCAN_QR products of the operation's closed
+// cargoplaces and cuts the part's chunk of the item-id sorted list.
+func (r *Repository) receiveDomainItems(ctx context.Context, a Action) ([]uuid.UUID, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT rt.product_id
+		FROM wms_ops.receiving_table rt
+		JOIN wms_inventory.boxes b ON b.box_id = rt.box_id
+		WHERE rt.action = 'SCAN_QR' AND rt.product_id IS NOT NULL AND b.status = 'CLOSED'
+			AND rt.cargoplace_id IN (SELECT cargoplace_id FROM wms_ops.receiving_table WHERE operation_id = $1 AND action = 'CLOSE_CARGO')`, a.OperationID)
+	if err != nil {
+		return nil, fmt.Errorf("audit.Repository.DomainItems receiving_table: %w", err)
+	}
+	defer rows.Close()
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, fmt.Errorf("audit.Repository.DomainItems receiving_table: %w", err)
+	}
+	return partItems(signedaction.SortByItemID(ids), a.PartIndex), nil
+}
+
+// partItems cuts the part's consecutive chunk of the item-id sorted items,
+// empty when the part index is out of range.
+func partItems(sorted []uuid.UUID, part int16) []uuid.UUID {
+	start := int(part) * signedops.MaxItemsPerAction
+	if start < 0 || start >= len(sorted) {
+		return []uuid.UUID{}
+	}
+	end := min(start+signedops.MaxItemsPerAction, len(sorted))
+	return sorted[start:end]
 }
 
 // detailRow is the single DISTINCT (entity, operator, occurred_at) row of one detail query;

@@ -215,6 +215,17 @@ describe('auditProduct', () => {
     expect(stages[0].problems).toEqual([])
   })
 
+  it('flags duplicated DB item rows as items mismatch', async () => {
+    const first = vectors.products.find((product) => product.itemId === putAway.itemIds[0])!
+    const action = dbAction({ itemIds: [first.productId, first.productId] })
+    const chain = mockChain({
+      auth: { ...vectorAuth(), itemIds: putAway.itemIds.slice(0, 2).map((id) => hexToBigInt(id)) },
+    })
+    const stages = await auditProduct(dbAudit(action), chain)
+    expect(stages[0].items).toBe('mismatch')
+    expect(stages[0].problems).toContain('Список товаров в БД не совпадает с цепью')
+  })
+
   it('flags a flipped signature r as signature mismatch', async () => {
     const auth = vectorAuth()
     const r = hexToBytes(auth.webauthn.r)
