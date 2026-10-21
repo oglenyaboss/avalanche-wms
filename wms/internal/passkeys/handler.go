@@ -177,6 +177,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httputil.WriteError(w, http.StatusBadRequest, "INVALID_REGISTRATION", "Некорректная регистрация passkey")
 	case errors.Is(err, ErrPasskeyNotFound):
 		httputil.WriteError(w, http.StatusNotFound, "PASSKEY_NOT_FOUND", "Ключ не найден")
+	case errors.Is(err, ErrRegistryUnavailable):
+		httputil.WriteError(w, http.StatusServiceUnavailable, "REGISTRY_UNAVAILABLE", "Реестр недоступен, повторите позже")
 	case errors.Is(err, ErrSignerKeyNotActive):
 		httputil.WriteError(w, http.StatusConflict, "SIGNER_KEY_NOT_ACTIVE", "Ключ администратора не активен в реестре")
 	case errors.Is(err, ErrTargetNotPending):

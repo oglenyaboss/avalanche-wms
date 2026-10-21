@@ -501,6 +501,70 @@ func TestSyncStatuses(t *testing.T) {
 	}
 }
 
+// TestActiveSigner locks signing to a live registry answer: a registry error is
+// fatal (nothing written), a stored status alone is never enough when the
+// adapter is wired.
+func TestActiveSigner(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      domain.PasskeyStatus
+		chain       *fakeChain // nil — синхронизация статусов отключена
+		updateErr   error
+		wantErr     error
+		wantStatus  domain.PasskeyStatus
+		wantUpdates int
+		wantCalls   int
+	}{
+		{"registry error is fatal", domain.PasskeyStatusActive, &fakeChain{err: errors.New("502")}, nil, ErrRegistryUnavailable, "", 0, 1},
+		{"key absent from registry", domain.PasskeyStatusActive, &fakeChain{keys: map[string]ledger.RegistryKey{}}, nil, ErrSignerKeyNotActive, "", 0, 1},
+		{"inactive with failing update", domain.PasskeyStatusActive, &fakeChain{key: ledger.RegistryKey{Found: true, Active: false}}, errors.New("db down"), ErrSignerKeyNotActive, "", 1, 1},
+		{"pending confirmed active", domain.PasskeyStatusPending, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true}}, nil, nil, domain.PasskeyStatusActive, 1, 1},
+		{"revoked is not queried", domain.PasskeyStatusRevoked, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true}}, nil, ErrSignerKeyNotActive, "", 0, 0},
+		{"no chain keeps stored status", domain.PasskeyStatusActive, nil, nil, nil, domain.PasskeyStatusActive, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := membersRepo(nil)
+			signer := livePasskey(adminA, orgA, tc.status)
+			repo.latestPasskeyFn = func(context.Context, uuid.UUID) (*domain.Passkey, error) {
+				return signer, nil
+			}
+			updates := 0
+			var updatedStatus domain.PasskeyStatus
+			repo.updatePasskeyStatusFn = func(_ context.Context, _ []byte, status domain.PasskeyStatus) error {
+				updates++
+				updatedStatus = status
+				return tc.updateErr
+			}
+			var chain KeyStatusGetter
+			if tc.chain != nil {
+				chain = tc.chain
+			}
+			svc := newTestService(t, repo, chain)
+
+			got, err := svc.ActiveSigner(context.Background(), adminA)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr != nil {
+				return
+			}
+			if got != signer || got.Status != tc.wantStatus {
+				t.Fatalf("signer = %+v, want the stored key with status %s", got, tc.wantStatus)
+			}
+			if updates != tc.wantUpdates || (updates == 1 && updatedStatus != tc.wantStatus) {
+				t.Fatalf("updates = %d (status %s), want %d (%s)", updates, updatedStatus, tc.wantUpdates, tc.wantStatus)
+			}
+			if tc.chain != nil && tc.chain.calls != tc.wantCalls {
+				t.Fatalf("adapter calls = %d, want %d", tc.chain.calls, tc.wantCalls)
+			}
+			if tc.wantCalls == 1 && !reflect.DeepEqual(tc.chain.lastIDs, []string{keyIDHex(*signer)}) {
+				t.Fatalf("queried ids = %v, want [%s]", tc.chain.lastIDs, keyIDHex(*signer))
+			}
+		})
+	}
+}
+
 // orgPasskey — копия livePasskey с уникальным ключом (Key.X variant) и credential id.
 func orgPasskey(userID, org uuid.UUID, status domain.PasskeyStatus, variant byte) domain.Passkey {
 	p := *livePasskey(userID, org, status)

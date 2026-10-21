@@ -3,6 +3,7 @@ package shipping
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"wms/internal/auth"
 	"wms/internal/domain"
+	"wms/internal/passkeys"
 	"wms/internal/signedaction/signedactiontest"
 )
 
@@ -112,6 +114,17 @@ func TestShipSignedHandler(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), "2 шт.") {
 			t.Errorf("message lacks the unconfirmed count: %s", rec.Body.String())
+		}
+	})
+	t.Run("draft maps REGISTRY_UNAVAILABLE", func(t *testing.T) {
+		repo, ops, _ := newEnv()
+		failingSvc := NewService(repo, ops, &shipMockSigner{signerErr: fmt.Errorf("x: %w", passkeys.ErrRegistryUnavailable)})
+		rec := serveShipping(t, failingSvc, http.MethodPost, "/shipping/ship/draft", draftBody, operatorID, domain.UserRoleOperator)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"REGISTRY_UNAVAILABLE"`) {
+			t.Errorf("body lacks REGISTRY_UNAVAILABLE: %s", rec.Body.String())
 		}
 	})
 	t.Run("draft returns parts", func(t *testing.T) {

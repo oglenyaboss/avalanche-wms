@@ -3,6 +3,7 @@ package passkeys
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"log"
 
 	"wms/internal/domain"
@@ -49,4 +50,33 @@ func (s *Service) syncStatuses(ctx context.Context, keys []*domain.Passkey) {
 		}
 		p.Status = next
 	}
+}
+
+// confirmActive requires the on-chain registry to confirm right now that the
+// key is active: a registry error is fatal for signing, so it is returned
+// instead of falling back to the stored status.
+func (s *Service) confirmActive(ctx context.Context, p *domain.Passkey) error {
+	id := "0x" + hex.EncodeToString(p.KeyID[:])
+	statuses, err := s.chain.GetRegistryKeys(ctx, []string{id})
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrRegistryUnavailable, err)
+	}
+	key, ok := statuses[id]
+	if !ok || !key.Found {
+		return ErrSignerKeyNotActive
+	}
+	next := domain.PasskeyStatusRevoked
+	if key.Active {
+		next = domain.PasskeyStatusActive
+	}
+	if next != p.Status {
+		if err := s.repo.UpdatePasskeyStatus(ctx, p.CredentialID, next); err != nil {
+			log.Printf("passkeys: update status for key %x: %v", p.KeyID, err)
+		}
+		p.Status = next
+	}
+	if next != domain.PasskeyStatusActive {
+		return ErrSignerKeyNotActive
+	}
+	return nil
 }
