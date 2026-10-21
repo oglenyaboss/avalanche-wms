@@ -4,8 +4,10 @@ import {
   createPublicClient,
   decodeFunctionData,
   http,
+  isAddressEqual,
   type Address,
   type Hex,
+  type Transport,
 } from 'viem'
 
 import { uuidToBytes16, type WebAuthnTuple } from '@/entities/signed-action'
@@ -69,8 +71,8 @@ export function bytes16ToUuid(value: Hex): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
 }
 
-export function createChainReader(rpcUrl: string, contract: Address): ChainReader {
-  const client = createPublicClient({ transport: http(rpcUrl) })
+export function createChainReader(rpcUrl: string, contract: Address, transport: Transport = http(rpcUrl)): ChainReader {
+  const client = createPublicClient({ transport })
   const blockTimes = new Map<bigint, Date>()
   let registryAddress: Address | null = null
 
@@ -85,6 +87,7 @@ export function createChainReader(rpcUrl: string, contract: Address): ChainReade
 
   const actionIdsForItem = async (itemId: bigint): Promise<string[]> => {
     const logs = await client.getLogs({
+      address: contract,
       event: itemMovedEvent,
       args: { itemId },
       fromBlock: 0n,
@@ -102,6 +105,7 @@ export function createChainReader(rpcUrl: string, contract: Address): ChainReade
     const out = new Map<string, AppliedAction>()
     if (actionIds.length === 0) return out
     const logs = await client.getLogs({
+      address: contract,
       event: actionAppliedEvent,
       args: { actionId: actionIds.map(uuidToBytes16) },
       fromBlock: 0n,
@@ -136,6 +140,7 @@ export function createChainReader(rpcUrl: string, contract: Address): ChainReade
     const out = new Map<string, RejectedAction>()
     if (actionIds.length === 0) return out
     const logs = await client.getLogs({
+      address: contract,
       event: actionRejectedEvent,
       args: { actionId: actionIds.map(uuidToBytes16) },
       fromBlock: 0n,
@@ -172,6 +177,7 @@ export function createChainReader(rpcUrl: string, contract: Address): ChainReade
   const actionAuth = async (txHash: Hex, actionId: string): Promise<OnChainAuth | null> => {
     try {
       const tx = await client.getTransaction({ hash: txHash })
+      if (!tx.to || !isAddressEqual(tx.to, contract)) return null
       const decoded = decodeFunctionData({ abi: wmsAbi, data: tx.input })
       if (decoded.functionName !== 'applyActions') return null
       const [actions] = decoded.args
