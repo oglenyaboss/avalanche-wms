@@ -6,4 +6,5 @@ const (
 	UserRoleAdmin    UserRole = "ADMIN"
 	UserRoleOperator UserRole = "OPERATOR"
 	UserRoleCustomer UserRole = "CUSTOMER"
+	UserRoleAuditor  UserRole = "AUDITOR"
 )

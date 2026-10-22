@@ -52,16 +52,12 @@ type ScanProductResponse struct {
 	CartSize  int    `json:"cart_size"`
 }
 
-type ScanStorageBinRequest struct {
-	ProductIDs   []string `json:"product_ids"`
-	StorageBinID string   `json:"storage_bin_id"`
-}
-
 type ScanStorageBinResponse struct {
 	StorageBinID        string `json:"storage_bin_id"`
 	StorageBinCode      string `json:"storage_bin_code"`
 	ProductsPlaced      int    `json:"products_placed"`
 	OutboxEventsCreated int    `json:"outbox_events_created"`
+	OperationID         string `json:"operation_id"`
 }
 
 type envelope struct {
@@ -82,7 +78,8 @@ func NewHandler(svc *Service) *Handler {
 func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/scan-buffer", h.ScanBuffer).Methods(http.MethodPost)
 	router.HandleFunc("/scan-product", h.ScanProduct).Methods(http.MethodPost)
-	router.HandleFunc("/scan-storage-bin", h.ScanStorageBin).Methods(http.MethodPost)
+	router.HandleFunc("/scan-storage-bin/draft", h.DraftPlaceToStorageBin).Methods(http.MethodPost)
+	router.HandleFunc("/scan-storage-bin/submit", h.SubmitPlaceToStorageBin).Methods(http.MethodPost)
 }
 
 // Сканирование буфферной ячейки - выдает все товары, которые хранятся в данном буфере
@@ -147,54 +144,6 @@ func (h *Handler) ScanProduct(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
-// Сканирование ячейки хранения товара и размещения товара - сканируем мезонин и размещаем туда товар
-func (h *Handler) ScanStorageBin(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := httputil.RequireOperator(w, r)
-	if !ok {
-		return
-	}
-
-	var req ScanStorageBinRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
-		return
-	}
-
-	if len(req.ProductIDs) == 0 {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "product_ids не может быть пустым")
-		return
-	}
-	if len(req.ProductIDs) > maxProductIDsPerRequest {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("product_ids не может содержать более %d элементов", maxProductIDsPerRequest))
-		return
-	}
-
-	productIDs := make([]uuid.UUID, 0, len(req.ProductIDs))
-	for _, idStr := range req.ProductIDs {
-		id, err := uuid.Parse(idStr)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "product_id должен быть UUID")
-			return
-		}
-		productIDs = append(productIDs, id)
-	}
-
-	storageBinID, err := uuid.Parse(req.StorageBinID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "storage_bin_id должен быть UUID")
-		return
-	}
-
-	result, err := h.svc.PlaceProductsToStorageBin(r.Context(), operatorID, productIDs, storageBinID)
-	if err != nil {
-		status, code, message := mapServiceError(err)
-		writeError(w, status, code, message)
-		return
-	}
-
-	writeSuccess(w, http.StatusOK, result)
-}
-
 func decodeJSON(r *http.Request, dest any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -243,6 +192,10 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "PRODUCT_NOT_IN_BUFFER", "Товар не находится в указанной буферной ячейке"
 	case errors.Is(err, ErrProductNotReceived):
 		return http.StatusConflict, "PRODUCT_NOT_RECEIVED", "Товар не в статусе RECEIVED"
+	case errors.Is(err, ErrCargoplaceNotClosed):
+		return http.StatusConflict, "CARGOPLACE_NOT_CLOSED", "Грузоместо товара ещё не закрыто на приёмке"
+	case errors.Is(err, ErrDraftStale):
+		return http.StatusConflict, "DRAFT_STALE", "Состав корзины изменился, подтвердите размещение заново"
 	case errors.Is(err, ledger.ErrChainEventRejected):
 		return http.StatusConflict, "CHAIN_EVENT_REJECTED", "Размещение отклонено: приёмка товара не подтверждена в блокчейне (FAILED)"
 	case errors.Is(err, ErrInvalidInput):

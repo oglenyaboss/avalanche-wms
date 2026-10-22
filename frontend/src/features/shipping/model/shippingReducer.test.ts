@@ -64,6 +64,7 @@ function shipResult(overrides: Partial<ShipResult> = {}): ShipResult {
     ordersPartiallyShipped: 0,
     dispatchDeparted: true,
     bufferRemaining: 0,
+    operationId: 'op-1',
     ...overrides,
   }
 }

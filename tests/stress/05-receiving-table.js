@@ -8,7 +8,8 @@
  *   POST /receiving/table/scan-qr
  *   POST /receiving/table/close-box
  *   POST /receiving/table/scan-buffer
- *   POST /receiving/table/close-cargoplace  ← создаёт outbox event (→ Kafka → блокчейн)
+ *   POST /receiving/table/close-cargoplace/draft + /submit  ← подписанное действие
+ *                                                        (P-256 WebAuthn, → outbox → Kafka → блокчейн)
  *
  * Модель нагрузки: closed-model (shared-iterations).
  * Каждая итерация получает уникальный UUID грузоместа через exec.scenario.iterationInTest,
@@ -17,6 +18,9 @@
  * Требования к данным:
  *   Перед запуском выполнить: tests/stress/setup/stress-seed.sql
  *   (создаёт грузоместа STRESS-TABLE-CP-0001..2000 в статусе RECEIVED_AT_GATE)
+ *   + tests/stress/.signed/operators.json — операторы с ACTIVE-ключами
+ *     (`cd tests/e2e && go run ./cmd/stress-provision -operators 100`):
+ *     один оператор на VU, подпись close-cargoplace его ключом.
  *
  * Запуск:
  *   k6 run tests/stress/05-receiving-table.js
@@ -27,8 +31,11 @@ import exec from 'k6/execution';
 import { SharedArray } from 'k6/data';
 import { BASE_URL } from './lib/config.js';
 import { login, authHeaders, pad } from './lib/helpers.js';
+import { importSigner } from './lib/signer.js';
+import { loadOperators, signedPost } from './lib/signedflow.js';
 
 const TOTAL_CARGOPLACES = 2000;
+const VUS = 60;
 const SEED_BARCODE = '4600000099999';
 
 // UUID грузомест STRESS-TABLE-CP-0001..2000 (в том же порядке, что и cargoplace_code).
@@ -36,12 +43,15 @@ const SEED_BARCODE = '4600000099999';
 const CP_UUIDS = new SharedArray('table_cargoplaces', () =>
   JSON.parse(open('/tmp/stress-table-cps.json')));
 
+// Операторы с активными ключами (stress-provision): VU i подписывает оператором i.
+const OPERATORS = loadOperators();
+
 export const options = {
   scenarios: {
     table_flow: {
       // closed-model: ровно TOTAL_CARGOPLACES итераций, каждая — уникальное грузоместо.
       executor: 'shared-iterations',
-      vus: 60,
+      vus: VUS,
       iterations: TOTAL_CARGOPLACES,
       maxDuration: '8m',
     },
@@ -58,9 +68,20 @@ export const options = {
 };
 
 export function setup() {
-  const token = login('operator', 'operator');
-  if (!token) {
-    exec.test.abort('setup: не удалось получить токен оператора. Проверьте WMS_URL и учётные данные.');
+  if (OPERATORS.length < VUS) {
+    exec.test.abort('[05-receiving-table] ABORT: нет операторов с ключами: ' +
+      'прогони cd tests/e2e && go run ./cmd/stress-provision -operators 100');
+  }
+
+  // Токены: VU i логинится оператором i (у каждого свой ключ подписи).
+  const tokens = [];
+  for (let i = 0; i < VUS; i++) {
+    const op = OPERATORS[i];
+    const t = login(op.username, op.password);
+    if (!t) {
+      exec.test.abort(`setup: не удалось залогинить ${op.username} (прогони stress-provision, проверь стек)`);
+    }
+    tokens.push(t);
   }
 
   const bufferBinId = __ENV.RECEIVING_BIN_ID || '';
@@ -70,12 +91,20 @@ export function setup() {
       'Для полного теста: source <(bash tests/stress/setup/generate-stress-data.sh)',
     );
   }
-  return { token, bufferBinId };
+  return { tokens, operators: OPERATORS, bufferBinId };
 }
 
-export default function (data) {
-  const { token, bufferBinId } = data;
+// Подписант VU — импортируется один раз и кэшится в переменной уровня модуля
+// (инит-контекст у каждого VU свой → кэш живёт на VU).
+let vuSigner = null;
+
+export default async function (data) {
+  const { tokens, operators, bufferBinId } = data;
+  const opIdx = (__VU - 1) % operators.length;
+  const token = tokens[opIdx];
   if (!token) return;
+  if (!vuSigner) vuSigner = await importSigner(operators[opIdx]);
+  const signer = vuSigner;
 
   // 404 = грузоместо не найдено; 409 = гонка (два VU взяли одно грузоместо) — редко.
   http.setResponseCallback(http.expectedStatuses(
@@ -179,12 +208,12 @@ export default function (data) {
     sleep(0.05);
   }
 
-  // 7. close-cargoplace → создаёт outbox events → Kafka → блокчейн
-  const closeCpRes = http.post(
-    `${BASE_URL}/receiving/table/close-cargoplace`,
-    JSON.stringify({ cargoplace_id: cargoplaceId }),
-    { headers: H, tags: { step: 'close_cp' } },
-  );
+  // 7. close-cargoplace подписан: draft → подпись → submit → outbox events → Kafka → блокчейн.
+  //    Тег step:close_cp стоит на обоих запросах — порог покрывает пару целиком.
+  const closeCp = await signedPost(H, signer,
+    '/receiving/table/close-cargoplace/draft', '/receiving/table/close-cargoplace/submit',
+    { cargoplace_id: cargoplaceId }, { step: 'close_cp' });
+  const closeCpRes = closeCp.submitRes || closeCp.draftRes;
   check(closeCpRes, {
     'close_cp: 200': (r) => r.status === 200,
     'close_cp: TABLE_CLOSED': (r) => {

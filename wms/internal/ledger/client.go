@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -35,40 +36,46 @@ func (c *Client) HealthCheck() error {
 	return nil
 }
 
-// TxReceipt is the on-chain proof returned by the adapter's receipt endpoint.
-type TxReceipt struct {
-	Found         bool   `json:"found"`
-	Status        string `json:"status"` // success | failed | pending
-	BlockNumber   uint64 `json:"block_number"`
-	Confirmations uint64 `json:"confirmations"`
-	GasUsed       uint64 `json:"gas_used"`
+// RegistryKey is the adapter's view of a key in the on-chain registry. Found is
+// false when the keyId is unknown to the registry.
+type RegistryKey struct {
+	Found  bool   `json:"found"`
+	OrgID  string `json:"org_id"`
+	Role   string `json:"role"`
+	Active bool   `json:"active"`
 }
 
-// GetTxReceipt proxies the adapter's GET /onchain/tx/{hash}. A transport error
-// or non-200 is returned as an error (caller maps to CHAIN_UNREACHABLE). A 200
-// with found:false (tx not yet mined) is a valid, non-error result.
-func (c *Client) GetTxReceipt(ctx context.Context, txHash string) (TxReceipt, error) {
-	// Explicit per-call deadline (independent of the transport-level
-	// httpClient.Timeout): bounds this UI-facing proxy and is cancellable
-	// mid-stream by the caller. Mirrors the adapter's own 4s receipt guard.
+// GetRegistryKeys proxies the adapter's POST /registry/keys (batched key
+// status lookup). A transport error or non-200 is returned as an error.
+func (c *Client) GetRegistryKeys(ctx context.Context, keyIDs []string) (map[string]RegistryKey, error) {
+	if len(keyIDs) == 0 {
+		return map[string]RegistryKey{}, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/onchain/tx/"+txHash, http.NoBody)
+	payload, err := json.Marshal(map[string][]string{"key_ids": keyIDs})
 	if err != nil {
-		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt build: %w", err)
+		return nil, fmt.Errorf("ledger GetRegistryKeys marshal: %w", err)
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/registry/keys", bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("ledger GetRegistryKeys build: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt: %w", err)
+		return nil, fmt.Errorf("ledger GetRegistryKeys: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt: adapter status %d", resp.StatusCode)
+		return nil, fmt.Errorf("ledger GetRegistryKeys: adapter status %d", resp.StatusCode)
 	}
-	var out TxReceipt
+	var out struct {
+		Keys map[string]RegistryKey `json:"keys"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return TxReceipt{}, fmt.Errorf("ledger GetTxReceipt decode: %w", err)
+		return nil, fmt.Errorf("ledger GetRegistryKeys decode: %w", err)
 	}
-	return out, nil
+	return out.Keys, nil
 }

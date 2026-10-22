@@ -3,39 +3,43 @@ package chain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// fakeEthBackend подменяет *ethclient.Client в unit-тестах sendMethod/ReseedNonce.
+// fakeEthBackend подменяет *ethclient.Client в unit-тестах SendCalldata/ReseedNonce.
 // Считает вызовы PendingNonceAt и записывает все отправленные tx, чтобы тесты
 // могли проверить nonce/gasPrice подписанной транзакции без живого RPC.
 type fakeEthBackend struct {
-	mu            sync.Mutex
-	nonce         uint64
-	pendingNonceN int
-	gasPrice      *big.Int
-	estimateGas   uint64
-	chainID       *big.Int
-	sentTxs       []*types.Transaction
-	sendErr       error // если != nil — SendTransaction падает (и НЕ записывает tx)
-	sendErrOnce   bool  // если true — sendErr срабатывает только на первом вызове
-	sendCalls     int
+	mu                sync.Mutex
+	nonce             uint64
+	pendingNonceN     int
+	pendingNonceErr   error // если != nil — PendingNonceAt падает на вызове № pendingNonceErrAt
+	pendingNonceErrAt int   // номер вызова PendingNonceAt (1-based), на котором срабатывает pendingNonceErr; 0 — всегда
+	gasPrice          *big.Int
+	estimateGas       uint64
+	chainID           *big.Int
+	sentTxs           []*types.Transaction
+	sendErr           error // если != nil — SendTransaction падает (и НЕ записывает tx)
+	sendErrOnce       bool  // если true — sendErr срабатывает только на первом вызове
+	sendCalls         int
 }
 
 func (f *fakeEthBackend) PendingNonceAt(_ context.Context, _ common.Address) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pendingNonceN++
+	if f.pendingNonceErr != nil && (f.pendingNonceErrAt == 0 || f.pendingNonceErrAt == f.pendingNonceN) {
+		return 0, f.pendingNonceErr
+	}
 	return f.nonce, nil
 }
 
@@ -86,28 +90,30 @@ func newTestClient(t *testing.T, eth ethBackend) *Client {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	parsed, err := abi.JSON(strings.NewReader(ContractABI))
-	if err != nil {
-		t.Fatalf("parse abi: %v", err)
-	}
 	return &Client{
-		eth:          eth,
-		privateKey:   pk,
-		fromAddress:  crypto.PubkeyToAddress(pk.PublicKey),
-		contractAddr: common.HexToAddress("0x0000000000000000000000000000000000000001"),
-		parsedABI:    parsed,
+		eth:    eth,
+		signer: &staticSigner{pk: pk, addr: crypto.PubkeyToAddress(pk.PublicKey)},
 	}
+}
+
+// sendOneGas — единица send-пути с явной нижней границей gas-лимита (minGas);
+// calldata фиктивные (паковка больше не часть Client'а).
+func sendOneGas(ctx context.Context, c *Client, minGas uint64) (common.Hash, error) {
+	return c.SendCalldata(ctx, common.HexToAddress("0x0000000000000000000000000000000000000001"), []byte{0x01}, minGas)
+}
+
+// sendOne — sendOneGas с minGas = 0 (без нижней границы).
+func sendOne(ctx context.Context, c *Client) (common.Hash, error) {
+	return sendOneGas(ctx, c, 0)
 }
 
 func TestClient_NonceMonotonicAcrossSends(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 5}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
 
@@ -128,14 +134,12 @@ func TestClient_NonceMonotonicAcrossSends(t *testing.T) {
 func TestClient_NonceUnchangedOnSendFailure(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 10, sendErr: errors.New("dial tcp: connection refused"), sendErrOnce: true}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
 	// Первый send падает (transient) → nonce НЕ должен продвинуться.
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err == nil {
+	if _, err := sendOne(context.Background(), c); err == nil {
 		t.Fatal("expected send to fail")
 	}
 	// Второй send (backend больше не падает) должен переиспользовать nonce=10.
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
 	if len(eth.sentTxs) != 1 {
@@ -146,12 +150,117 @@ func TestClient_NonceUnchangedOnSendFailure(t *testing.T) {
 	}
 }
 
+// externalTxBackend — fakeEthBackend с хуком onSendErr: тест двигает pending
+// nonce сразу после отбитой отправки, изображая внешнюю tx с того же адреса,
+// которая уже заняла nonce.
+type externalTxBackend struct {
+	*fakeEthBackend
+	onSendErr func()
+}
+
+func (b *externalTxBackend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
+	err := b.fakeEthBackend.SendTransaction(ctx, tx)
+	if err != nil && b.onSendErr != nil {
+		b.onSendErr()
+	}
+	return err
+}
+
+// TestClient_NonceTooLowReseeds: внешняя tx с того же ключа съела локальный
+// nonce → pool отвечает «nonce too low»; send перечитывает pending nonce, и
+// retry уходит уже с ним — без рестарта адаптера (issue #43).
+func TestClient_NonceTooLowReseeds(t *testing.T) {
+	eth := &fakeEthBackend{
+		nonce:       5,
+		sendErr:     errors.New("nonce too low: next nonce 7, tx nonce 5"),
+		sendErrOnce: true,
+	}
+	c := newTestClient(t, &externalTxBackend{fakeEthBackend: eth, onSendErr: func() { eth.nonce = 7 }})
+
+	if _, err := sendOne(context.Background(), c); !errors.Is(err, ErrChainTransient) {
+		t.Fatalf("nonce too low must classify as ErrChainTransient, got %v", err)
+	}
+	if eth.pendingNonceN != 2 {
+		t.Errorf("PendingNonceAt: want 2 calls (seed + reseed), got %d", eth.pendingNonceN)
+	}
+	if _, err := sendOne(context.Background(), c); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if _, err := sendOne(context.Background(), c); err != nil {
+		t.Fatalf("send 3: %v", err)
+	}
+	if len(eth.sentTxs) != 2 {
+		t.Fatalf("expected 2 sent txs, got %d", len(eth.sentTxs))
+	}
+	if got := eth.sentTxs[0].Nonce(); got != 7 {
+		t.Errorf("retry nonce: want 7 (reseeded), got %d", got)
+	}
+	if got := eth.sentTxs[1].Nonce(); got != 8 {
+		t.Errorf("post-reseed nonce: want 8 (nonce++), got %d", got)
+	}
+	if eth.pendingNonceN != 2 {
+		t.Errorf("reseeded nonce must not be seeded again: PendingNonceAt calls %d, want 2", eth.pendingNonceN)
+	}
+}
+
+// TestClient_NonceTooLowReseedFailureReseedsLater: сам reseed упал (RPC блип) →
+// seed-флаг сброшен, следующий send сеет nonce заново.
+func TestClient_NonceTooLowReseedFailureReseedsLater(t *testing.T) {
+	eth := &fakeEthBackend{
+		nonce:             5,
+		sendErr:           errors.New("nonce too low: next nonce 9, tx nonce 5"),
+		sendErrOnce:       true,
+		pendingNonceErr:   errors.New("rpc unavailable"),
+		pendingNonceErrAt: 2,
+	}
+	c := newTestClient(t, &externalTxBackend{fakeEthBackend: eth, onSendErr: func() { eth.nonce = 9 }})
+
+	if _, err := sendOne(context.Background(), c); !errors.Is(err, ErrChainTransient) {
+		t.Fatalf("first send must be ErrChainTransient, got %v", err)
+	}
+	if eth.pendingNonceN != 2 {
+		t.Fatalf("PendingNonceAt: want 2 calls (seed + failed reseed), got %d", eth.pendingNonceN)
+	}
+	if _, err := sendOne(context.Background(), c); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if eth.pendingNonceN != 3 {
+		t.Errorf("next send must seed again: PendingNonceAt calls %d, want 3", eth.pendingNonceN)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 sent tx, got %d", len(eth.sentTxs))
+	}
+	if got := eth.sentTxs[0].Nonce(); got != 9 {
+		t.Errorf("reseeded nonce: want 9, got %d", got)
+	}
+}
+
+// TestClient_OtherSendErrorKeepsNonce: прочие отказы отправки («already known»)
+// nonce не перечитывают и не сбрасывают seed — поведение прежнее.
+func TestClient_OtherSendErrorKeepsNonce(t *testing.T) {
+	eth := &fakeEthBackend{nonce: 10, sendErr: errors.New("already known"), sendErrOnce: true}
+	c := newTestClient(t, eth)
+	if _, err := sendOne(context.Background(), c); !errors.Is(err, ErrChainTransient) {
+		t.Fatalf("already known must stay ErrChainTransient, got %v", err)
+	}
+	if _, err := sendOne(context.Background(), c); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 successful tx, got %d", len(eth.sentTxs))
+	}
+	if got := eth.sentTxs[0].Nonce(); got != 10 {
+		t.Errorf("nonce must be reused: want 10, got %d", got)
+	}
+	if eth.pendingNonceN != 1 {
+		t.Errorf("PendingNonceAt must stay seed-only: calls %d, want 1", eth.pendingNonceN)
+	}
+}
+
 func TestClient_GasPriceHeadroom(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 0, gasPrice: big.NewInt(100)}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if len(eth.sentTxs) != 1 {
@@ -173,9 +282,7 @@ func TestClient_GasPriceHeadroom(t *testing.T) {
 func TestClient_GasLimitHeadroom(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 0, estimateGas: 1000}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchPutAway", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if len(eth.sentTxs) != 1 {
@@ -190,9 +297,7 @@ func TestClient_GasLimitHeadroom(t *testing.T) {
 func TestClient_ReseedNonce(t *testing.T) {
 	eth := &fakeEthBackend{nonce: 5}
 	c := newTestClient(t, eth)
-	args := []*big.Int{big.NewInt(1)}
-
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
 	// Симулируем продвижение on-chain nonce'а (другой источник / mempool drop).
@@ -200,7 +305,7 @@ func TestClient_ReseedNonce(t *testing.T) {
 	if err := c.ReseedNonce(context.Background()); err != nil {
 		t.Fatalf("reseed: %v", err)
 	}
-	if _, err := c.sendMethod(context.Background(), "batchAccept", args, args); err != nil {
+	if _, err := sendOne(context.Background(), c); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
 	if eth.sentTxs[1].Nonce() != 20 {
@@ -271,7 +376,7 @@ func TestErrChainSentinels_DistinctFromEachOther(t *testing.T) {
 
 func TestClient_SendMu_SerializesConcurrentCalls(t *testing.T) {
 	// Смоук-тест для C1 фикса (MR !35): мьютекс sendMu в *Client должен
-	// реально блокировать параллельный доступ. Прямо тестировать sendMethod
+	// реально блокировать параллельный доступ. Прямо тестировать send-путь
 	// без мокания concrete *ethclient.Client нельзя, поэтому проверяем сам
 	// мьютекс через прямое взаимодействие с полем (in-package test).
 	// Race-detector в остальных тестах ловит реальные гонки; этот тест —
@@ -298,5 +403,75 @@ func TestClient_SendMu_SerializesConcurrentCalls(t *testing.T) {
 
 	if elapsed < 40*time.Millisecond {
 		t.Errorf("sendMu should have blocked ~50ms; blocked for %s", elapsed)
+	}
+}
+
+// failingSigner имитирует удалённый KMS-signer с заданной ошибкой подписи.
+type failingSigner struct{ err error }
+
+func (f failingSigner) Address() common.Address { return common.Address{1} }
+
+func (f failingSigner) SignTx(context.Context, *types.Transaction, *big.Int) (*types.Transaction, error) {
+	return nil, f.err
+}
+
+func TestSendMethod_SignerTransientIsChainTransient(t *testing.T) {
+	// KMS недоступен → ErrSignerTransient должен выйти как ErrChainTransient
+	// (flusher ретраит, DLQ не уходит) и НЕ сжечь nonce (invariant 3).
+	eth := &fakeEthBackend{nonce: 5}
+	c := &Client{
+		eth:    eth,
+		signer: failingSigner{fmt.Errorf("%w: kms down", ErrSignerTransient)},
+	}
+	if _, err := sendOne(context.Background(), c); err == nil {
+		t.Fatal("expected error from failing signer")
+	} else if !errors.Is(err, ErrChainTransient) {
+		t.Fatalf("signer transient must classify as ErrChainTransient, got %v", err)
+	}
+	if eth.pendingNonceN != 1 {
+		t.Fatalf("PendingNonceAt called %d times, want 1 (seed only)", eth.pendingNonceN)
+	}
+
+	// Локальная (terminal) ошибка подписи не должна становиться transient.
+	c2 := &Client{
+		eth:    &fakeEthBackend{nonce: 5},
+		signer: failingSigner{errors.New("local crypto broke")},
+	}
+	if _, err := sendOne(context.Background(), c2); errors.Is(err, ErrChainTransient) {
+		t.Fatalf("local sign error must stay terminal, got %v", err)
+	}
+}
+
+// TestClient_GasFloorRaisesLimit: minGas выше estimate×3/2 поднимает gas-лимит
+// до нижней границы — защита от OOG, когда estimate видел дешёвый reject-путь,
+// а к майнингу действие применяется с записью на каждый товар.
+func TestClient_GasFloorRaisesLimit(t *testing.T) {
+	eth := &fakeEthBackend{nonce: 0, estimateGas: 100_000}
+	c := newTestClient(t, eth)
+	if _, err := sendOneGas(context.Background(), c, 2_000_000); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 sent tx, got %d", len(eth.sentTxs))
+	}
+	if got := eth.sentTxs[0].Gas(); got != 2_000_000 {
+		t.Errorf("gas limit: want 2_000_000 (minGas), got %d", got)
+	}
+}
+
+// TestClient_GasFloorBelowHeadroom: minGas ниже estimate×3/2 ничего не меняет —
+// действует обычный headroom, итог = max(estimate×3/2, minGas).
+func TestClient_GasFloorBelowHeadroom(t *testing.T) {
+	eth := &fakeEthBackend{nonce: 0, estimateGas: 100_000}
+	c := newTestClient(t, eth)
+	if _, err := sendOneGas(context.Background(), c, 120_000); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(eth.sentTxs) != 1 {
+		t.Fatalf("expected 1 sent tx, got %d", len(eth.sentTxs))
+	}
+	want := uint64(100_000) * gasLimitHeadroomNum / gasLimitHeadroomDen // 150_000
+	if got := eth.sentTxs[0].Gas(); got != want {
+		t.Errorf("gas limit: want %d (headroom), got %d", want, got)
 	}
 }

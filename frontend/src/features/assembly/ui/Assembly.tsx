@@ -34,6 +34,7 @@ export function Assembly() {
           allocation={state.allocation}
           tasks={state.tasks}
           successMessage={state.successMessage}
+          lastBufferResult={state.lastBufferResult}
           onSelect={assembly.selectDestination}
           onDeselect={assembly.deselect}
           onAllocate={assembly.allocate}

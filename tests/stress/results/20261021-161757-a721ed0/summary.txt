@@ -1,0 +1,111 @@
+######## E2E+CPU — VUS=70 SKU=70 ITEMS=150000 PER_CP=10 CP=15000 adapter=900/2s/8 ########
+=== 0. chain up + adapter (900/2s/8) ===
+  ready (try 1)
+  adapter: "batch_size":900,"batch_timeout":2000000000,"pipeline_window":8
+=== 1. cleanup + multi-SKU seed (N_CP=15000 × PER_CP=10 = 150000 товаров) ===
+COMMIT
+  RECEIVED_AT_GATE(грузомест): 15000 | SKU: 70 | orders: 150000
+=== 2. fixtures ===
+  RECV=87fa8957-962a-4f31-aa39-9d098e811576 STOR=f1446449-ba54-472c-ae5f-b18ab306c1ed | dests: 70
+=== 3. baseline (item transitions) ===
+  committed_items_base=0 generated_items_base=0
+=== 4. run + committed-items sampler (4s) + CPU sampler (2s) ===
+  k6 wall: 171s
+time="2026-10-21T21:20:59+05:00" level=info msg="teardown: дошипнул хвост 16176 товаров по 70 магазинам" source=console
+    http_req_failed
+    tput_items_picked..............: 147326 866.172686/s
+    tput_items_shipped.............: 131150 771.069246/s
+    tput_items_stored..............: 150000 881.893915/s
+    http_req_failed................: 0.00%  0 out of 664181
+    iterations.....................: 15000  88.189392/s
+  дренаж хвоста (poll 5s, таймаут 300s)…
+tr: write error: Broken pipe
+  drain: ok за 15s
+=== 5. committed items table ===
+  +0  s  committed_items=0         generated_items=0         backlog=0      
+  +4  s  committed_items=0         generated_items=15370     backlog=15370  
+  +8  s  committed_items=0         generated_items=33380     backlog=33380  
+  +13 s  committed_items=0         generated_items=48932     backlog=48932  
+  +17 s  committed_items=15992     generated_items=64330     backlog=48338  
+  +21 s  committed_items=30862     generated_items=81596     backlog=50734  
+  +25 s  committed_items=45700     generated_items=99040     backlog=53340  
+  +30 s  committed_items=55968     generated_items=116004    backlog=60036  
+  +34 s  committed_items=74620     generated_items=132986    backlog=58366  
+  +38 s  committed_items=86426     generated_items=148698    backlog=62272  
+  +42 s  committed_items=97836     generated_items=164028    backlog=66192  
+  +47 s  committed_items=109084    generated_items=178092    backlog=69008  
+  +51 s  committed_items=133790    generated_items=196020    backlog=62230  
+  +55 s  committed_items=153880    generated_items=213984    backlog=60104  
+  +59 s  committed_items=170994    generated_items=231938    backlog=60944  
+  +64 s  committed_items=190594    generated_items=248080    backlog=57486  
+  +68 s  committed_items=209240    generated_items=266286    backlog=57046  
+  +72 s  committed_items=223422    generated_items=284378    backlog=60956  
+  +76 s  committed_items=243298    generated_items=301862    backlog=58564  
+  +81 s  committed_items=258518    generated_items=319246    backlog=60728  
+  +85 s  committed_items=288020    generated_items=336726    backlog=48706  
+  +89 s  committed_items=305568    generated_items=354904    backlog=49336  
+  +93 s  committed_items=316020    generated_items=373124    backlog=57104  
+  +98 s  committed_items=334392    generated_items=390070    backlog=55678  
+  +102s  committed_items=347642    generated_items=406540    backlog=58898  
+  +106s  committed_items=367074    generated_items=422720    backlog=55646  
+  +111s  committed_items=381486    generated_items=438766    backlog=57280  
+  +115s  committed_items=407326    generated_items=455758    backlog=48432  
+  +119s  committed_items=423232    generated_items=473318    backlog=50086  
+  +123s  committed_items=436318    generated_items=491482    backlog=55164  
+  +128s  committed_items=455462    generated_items=506048    backlog=50586  
+  +132s  committed_items=468534    generated_items=521806    backlog=53272  
+  +137s  committed_items=489760    generated_items=537342    backlog=47582  
+  +141s  committed_items=512028    generated_items=556004    backlog=43976  
+  +145s  committed_items=521044    generated_items=573004    backlog=51960  
+  +150s  committed_items=537934    generated_items=578566    backlog=40632  
+  +154s  committed_items=556392    generated_items=578626    backlog=22234  
+  +158s  committed_items=576184    generated_items=578656    backlog=2472   
+  +162s  committed_items=578596    generated_items=580868    backlog=2272   
+  +166s  committed_items=578656    generated_items=587206    backlog=8550   
+  +170s  committed_items=581306    generated_items=594428    backlog=13122  
+  +174s  committed_items=581306    generated_items=594652    backlog=13346  
+  +178s  committed_items=589586    generated_items=594652    backlog=5066   
+  +182s  committed_items=594652    generated_items=594652    backlog=0      
+=== 6. committed-items rate during run ===
+  committed-items rate (всё окно, вкл. прогрев): 3695 /s (15992→581306 за 153с)
+  committed-items rate (sustained как в прежнем замере, +20с … конец k6 вкл. teardown): 3694 /s (30862→581306 за 149с)
+  committed-items rate (лучшее ~30с-окно): 4628 /s
+  peak committed-items rate (одно окно): 7376 /s
+  конец генерации: +174с (строка семплера 42 из 44, generated после неё не растёт)
+  committed-items rate за окно генерации (+20с … конец генерации): 3598 /s (30862→581306 за 153с)
+  generated-items rate за то же окно: 3353 /s (81596→594652 за 153с)
+  дренаж бэклога после конца генерации: 12 с (последний backlog=0 товаров)
+=== 7. CPU split (avg over steady window, skip first 20s ramp) — % of one core; box=1000% ===
+  k6                     67%  (0.7 cores)
+  postgres_db           314%  (3.1 cores)
+  wms-service           141%  (1.4 cores)
+  kafka                   3%  (0.0 cores)
+  debezium-connect        5%  (0.1 cores)
+  ledger-adapter         66%  (0.7 cores)
+  subnet-node1          109%  (1.1 cores)
+  TOTAL                 706%  (7.1 cores)  [box=1000%]
+  samples=74 over steady window
+=== 8. losses ===
+  окно: warehouse_actions.created_at >= to_timestamp(1792599489)
+  submitted: 47423 | COMMITTED: 47423 | rejected (reject_reason): 0 | failed без reject_reason (tx не прошла / ошибка отправки): 0 | still pending: 0
+  items committed по типам действий:
+    receive (type 1): actions=15000 items=150000
+    putaway (type 2): actions=15000 items=150000
+    pick (type 3): actions=14010 items=147326
+    ship (type 4): actions=3413 items=147326
+=== 9. gas per item ===
+  tx 0x009162d9a95c9c3e…: gas=22434602 actions=104 items=1350 gas/item=16618
+  tx 0x00b03c27f0b4cc67…: gas=22788126 actions=104 items=1352 gas/item=16855
+  tx 0x00b233c17c0d0836…: gas=9828888 actions=43 items=496 gas/item=19816
+  tx 0x0147b9c8cb69f71e…: gas=21499606 actions=109 items=1208 gas/item=17798
+  tx 0x01f393ac51e90d07…: gas=21776469 actions=109 items=1222 gas/item=17820
+  tx 0x01fbd10adfa6508e…: gas=22073977 actions=103 items=1354 gas/item=16303
+  tx 0x02ccea246762db09…: gas=21948525 actions=111 items=1162 gas/item=18889
+  tx 0x0335cfd080e3c520…: gas=15247960 actions=71 items=862 gas/item=17689
+  tx 0x0388d54916057846…: gas=15064975 actions=64 items=890 gas/item=16927
+  tx 0x038fa4d911767ae0…: gas=23520152 actions=102 items=1376 gas/item=17093
+  txs=475 gas=10080687623 items=594652 gas/item=16952
+  отклонено действий в этих tx: 0 (их товары не в знаменателе)
+=== 10. raw results ===
+  RAW RESULTS: tests/stress/results/20261021-161757-a721ed0 (summary.txt, e2e-live.log, e2e-cpu.log, e2e-k6.log)
+######## DONE ########

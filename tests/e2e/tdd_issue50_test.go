@@ -76,7 +76,7 @@ func TestAssembly_PendingTaskUniquePerProduct(t *testing.T) {
 		cleanupCtx := context.Background()
 		if _, err := env.db.Exec(cleanupCtx,
 			`DELETE FROM wms_ops.assembly_tasks WHERE product_id = $1`, productID); err != nil {
-			t.Logf("cleanup assembly_tasks for product %s: %v", productID, err)
+			t.Errorf("cleanup assembly_tasks for product %s: %v", productID, err)
 		}
 	})
 

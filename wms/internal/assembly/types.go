@@ -50,14 +50,18 @@ type PickResponse struct {
 	CartSize  int    `json:"cart_size"`
 }
 
-type ScanShippingBufferRequest struct {
-	BufferBinID string `json:"buffer_bin_id"`
-}
-
 type ScanShippingBufferResponse struct {
 	BufferBinID     string `json:"buffer_bin_id"`
 	ProductsPlaced  int    `json:"products_placed"`
 	OrdersAssembled int    `json:"orders_assembled"`
+	OperationID     string `json:"operation_id"`
+}
+
+// BasketItem — одна строка корзины оператора: товар и его заказ (order_id nullable:
+// заказ мог быть удалён в середине потока).
+type BasketItem struct {
+	ProductID uuid.UUID
+	OrderID   *uuid.UUID
 }
 
 // AllocatedProduct — внутренний тип для хранения зарезервированных товаров

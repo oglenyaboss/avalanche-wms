@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,16 +114,26 @@ func TestMain(m *testing.M) {
 			_ = stack.Down(ctx, compose.RemoveOrphans(true), compose.RemoveVolumes(true))
 		}
 
+		stackEnv := map[string]string{
+			"JWT_SECRET":        getenv("JWT_SECRET", e2eTestJWTSecret),
+			"DB_USER":           getenv("DB_USER", "root"),
+			"DB_PASSWORD":       getenv("DB_PASSWORD", "root"),
+			"DB_NAME":           getenv("DB_NAME", "wms_blockchain_db"),
+			"SEED_DATA":         getenv("SEED_DATA", "true"),
+			"DEBEZIUM_PASSWORD": getenv("DEBEZIUM_PASSWORD", "debezium"),
+		}
+
+		// Up builds only missing images, so an image cached from an older checkout
+		// would run stale code. Rebuild explicitly; E2E_SKIP_BUILD=true skips it.
+		if os.Getenv("E2E_SKIP_BUILD") != "true" {
+			if err := buildStackImages(ctx, root, stackEnv); err != nil {
+				log.Fatalf("build compose images: %v", err)
+			}
+		}
+
 		// 7. Inject test environment variables, start compose, and wait for WMS and ledger-adapter health checks.
 		err = stack.
-			WithEnv(map[string]string{
-				"JWT_SECRET":        getenv("JWT_SECRET", e2eTestJWTSecret),
-				"DB_USER":           getenv("DB_USER", "root"),
-				"DB_PASSWORD":       getenv("DB_PASSWORD", "root"),
-				"DB_NAME":           getenv("DB_NAME", "wms_blockchain_db"),
-				"SEED_DATA":         getenv("SEED_DATA", "true"),
-				"DEBEZIUM_PASSWORD": getenv("DEBEZIUM_PASSWORD", "debezium"),
-			}).
+			WithEnv(stackEnv).
 			WaitForService("ledger-adapter", wait.ForHTTP("/health").WithPort("8085/tcp").WithStartupTimeout(3*time.Minute)).
 			WaitForService("wms_app", wait.ForHTTP("/health").WithPort("8080/tcp").WithStartupTimeout(4*time.Minute)).
 			Up(ctx, compose.Wait(true), compose.RunServices(
@@ -276,4 +287,20 @@ func getenv(key, fallback string) string {
 func isUnsetContractAddr(addr string) bool {
 	addr = strings.TrimSpace(addr)
 	return addr == "" || strings.EqualFold(addr, "0x0000000000000000000000000000000000000000")
+}
+
+func buildStackImages(ctx context.Context, root string, env map[string]string) error {
+	cmd := exec.CommandContext(ctx, "docker", "compose",
+		"-p", e2eProjectName,
+		"-f", filepath.Join(root, "docker-compose.yaml"),
+		"--profile", "test",
+		"build")
+	cmd.Dir = root
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	return cmd.Run()
 }

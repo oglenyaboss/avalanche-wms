@@ -23,7 +23,7 @@ type ReconcileRow struct {
 //
 // Таблица: public.onchain_events (event_id UUID unique, aggregate_type text,
 // tx_hash text, status onchain_event_status ENUM('PENDING','SENT','COMMITTED',
-// 'FAILED'), error_message text, created_at/updated_at).
+// 'FAILED'), reject_reason smallint, error_message text, created_at/updated_at).
 //
 // Lifecycle: InsertPending → MarkSent(txHash) → MarkCommitted | MarkFailed.
 type Repository struct {
@@ -123,6 +123,30 @@ func (r *Repository) MarkFailed(ctx context.Context, ids []uuid.UUID, txHash, re
 	return nil
 }
 
+// MarkRejected — контракт отклонил подписанное действие (ActionRejected в
+// receipt'е, ADR §6): status=FAILED + reject_reason (код RejectReason) +
+// error_message. Guard `status <> 'COMMITTED'` и tx_hash COALESCE — как в
+// MarkFailed: строку, которую reconcile уже дотянул до COMMITTED, не
+// откатываем; пустой txHash не затирает существующий.
+func (r *Repository) MarkRejected(ctx context.Context, ids []uuid.UUID, txHash string, reason uint8) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE public.onchain_events
+		 SET status='FAILED',
+		     tx_hash = COALESCE(NULLIF($2,''), tx_hash),
+		     reject_reason=$4,
+		     error_message=$3,
+		     updated_at=now()
+		 WHERE event_id = ANY($1) AND status <> 'COMMITTED'`,
+		ids, txHash, fmt.Sprintf("action rejected: reason %d", reason), reason)
+	if err != nil {
+		return fmt.Errorf("mark rejected: %w", err)
+	}
+	return nil
+}
+
 // Status возвращает текущий статус по event_id (для тестов / debugging).
 func (r *Repository) Status(ctx context.Context, eventID uuid.UUID) (string, error) {
 	var s string
@@ -161,12 +185,19 @@ const reconcileBatchLimit = 1000
 
 // ListReconcilable возвращает stuck rows (SENT/FAILED с tx_hash), не обновлявшиеся
 // дольше minAge. minAge отсекает in-flight события, которые flusher ещё дожимает
-// своим WaitReceipt — их трогать рано. Используется фоновым reconcile-loop'ом (N1).
+// своим WaitReceipt — их трогать рано. Строки с reject_reason исключены: контракт
+// отклонил действие терминально, и без фильтра reconcile-loop перечитывал бы их
+// каждый интервал. Только signed_action-строки: legacy-события на товар остались в
+// таблице, но их исход резолвить нечем, поэтому они навсегда застряли бы в начале
+// ORDER BY и вытесняли живые строки из окна LIMIT. Используется фоновым
+// reconcile-loop'ом (N1).
 func (r *Repository) ListReconcilable(ctx context.Context, minAge time.Duration) ([]ReconcileRow, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT event_id, tx_hash FROM public.onchain_events
 		 WHERE status IN ('SENT','FAILED')
+		   AND aggregate_type = 'signed_action'
 		   AND tx_hash IS NOT NULL AND tx_hash <> ''
+		   AND reject_reason IS NULL
 		   AND updated_at < now() - make_interval(secs => $1)
 		 ORDER BY updated_at ASC
 		 LIMIT $2`,

@@ -54,14 +54,10 @@ type scanQRData struct {
 	Status    string    `json:"status"`
 }
 
-type closeCargoplaceData struct {
-	OutboxEventsCreated int    `json:"outbox_events_created"`
-	Status              string `json:"status"`
-}
-
 type scanStorageBinData struct {
-	OutboxEventsCreated int `json:"outbox_events_created"`
-	ProductsPlaced      int `json:"products_placed"`
+	OutboxEventsCreated int    `json:"outbox_events_created"`
+	ProductsPlaced      int    `json:"products_placed"`
+	OperationID         string `json:"operation_id"`
 }
 
 type allocateData struct {
@@ -96,8 +92,9 @@ type pickData struct {
 }
 
 type scanShippingBufferData struct {
-	ProductsPlaced  int `json:"products_placed"`
-	OrdersAssembled int `json:"orders_assembled"`
+	ProductsPlaced  int    `json:"products_placed"`
+	OrdersAssembled int    `json:"orders_assembled"`
+	OperationID     string `json:"operation_id"`
 }
 
 type scanDriverData struct {
@@ -112,6 +109,8 @@ type shipData struct {
 	OrdersPartiallyShipped int  `json:"orders_partially_shipped"`
 	DispatchDeparted       bool `json:"dispatch_departed"`
 	BufferRemaining        int  `json:"buffer_remaining"`
+	// #15: the signed operation id, echoed by /shipping/ship/submit.
+	OperationID string `json:"operation_id"`
 }
 
 // productIDsFromTasks extracts product ids from a task list response.

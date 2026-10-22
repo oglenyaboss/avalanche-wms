@@ -5,20 +5,17 @@
 # подъёме стека. Запускается одноразовым контейнером connector-init.
 #
 # Зачем: сервис debezium стартует пустым Kafka Connect — коннектор появляется
-# только когда кто-то POST-ит его конфиг в REST API. Этот скрипт делает тот же
-# POST, что и `make register-connector`, но сам, без ручного шага.
+# только когда кто-то регистрирует его в REST API. Этот скрипт делает то же,
+# что и `make register-connector`, но сам, без ручного шага.
 #
-# Идемпотентно: 201 (создан) и 409 (уже есть) — успех. В distributed-режиме
-# конфиг хранится в топике debezium_configs, так что на обычном рестарте
-# коннектор уже есть → 409 → ok; регистрация реально нужна лишь на чистом
-# kafka-volume (первый запуск / после `down -v`).
-#
-# ВАЖНО: при 409 конфиг НЕ обновляется. Изменил postgres-connector.json —
-# применяй через `down -v` либо вручную PUT /connectors/outbox-connector/config.
+# Идемпотентно и с обновлением конфига: если коннектора нет — POST создаёт его
+# (201). Если уже есть (409) — конфиг в топике debezium_configs устарел, поэтому
+# PUT-им актуальный config из /connector.json (200) — изменение конфига
+# применяется на каждом старте стека, `down -v` для этого больше не нужен.
 set -eu
 
-CONNECT_URL="http://debezium:8083"
-CONNECTOR_JSON="/connector.json"
+CONNECT_URL="${CONNECT_URL:-http://debezium:8083}"
+CONNECTOR_JSON="${CONNECTOR_JSON:-/connector.json}"
 MAX_ATTEMPTS=60   # ~120s суммарно при sleep 2
 
 echo "[connector-init] жду готовности Kafka Connect REST API на ${CONNECT_URL} ..."
@@ -44,7 +41,24 @@ echo
 
 case "${http_code}" in
   201) echo "[connector-init] коннектор создан" ;;
-  409) echo "[connector-init] коннектор уже существует — ok" ;;
+  409)
+    echo "[connector-init] коннектор уже существует — обновляю конфиг (PUT)"
+    # ponytail: извлечение объекта config зависит от форматирования файла
+    # (2 пробела у "config" и его закрывающей скобки, 4 у свойств); при смене
+    # форматирования — заменить на jq/python.
+    config_json=$(sed -n '/"config":[[:space:]]*{/,/^  }$/p' "${CONNECTOR_JSON}" | sed '1s/.*/{/')
+    put_code=$(curl -s -o /tmp/put-resp.json -w '%{http_code}' \
+      -X PUT "${CONNECT_URL}/connectors/outbox-connector/config" \
+      -H 'Content-Type: application/json' \
+      -d "${config_json}")
+    echo "[connector-init] PUT HTTP ${put_code}"
+    cat /tmp/put-resp.json 2>/dev/null || true
+    echo
+    case "${put_code}" in
+      200) echo "[connector-init] конфиг коннектора обновлён" ;;
+      *)   echo "[connector-init] обновление конфига НЕ удалось (HTTP ${put_code})" >&2; exit 1 ;;
+    esac
+    ;;
   *)   echo "[connector-init] регистрация НЕ удалась (HTTP ${http_code})" >&2; exit 1 ;;
 esac
 

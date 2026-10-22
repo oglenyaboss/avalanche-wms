@@ -51,6 +51,7 @@ export function Shipping() {
           selectedProductIds={state.selectedProductIds}
           destinationMismatch={state.destinationMismatch}
           partialMessage={state.partialMessage}
+          lastOperationId={state.lastShipResult?.operationId ?? null}
           onToggleProduct={shipping.toggleProduct}
           onScanProduct={shipping.scanProduct}
           onClearSelection={shipping.clearSelection}

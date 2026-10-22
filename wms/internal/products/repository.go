@@ -75,8 +75,9 @@ func (r *Repository) resolveProduct(ctx context.Context, key string) (ProductHea
 	return h, nil
 }
 
-// Timeline returns the product header plus all of its outbox events joined to
-// their on-chain status, oldest first. Multiple rows per stage (re-putaway etc.)
+// Timeline returns the product header plus all steps from signed warehouse
+// actions containing the product (warehouse_actions.item_ids), each joined to
+// its on-chain status, oldest first. Multiple rows per stage (re-putaway etc.)
 // are returned as-is.
 func (r *Repository) Timeline(ctx context.Context, key string) (Timeline, error) {
 	header, err := r.resolveProduct(ctx, key)
@@ -84,13 +85,21 @@ func (r *Repository) Timeline(ctx context.Context, key string) (Timeline, error)
 		return Timeline{}, err
 	}
 	rows, err := r.db.Query(ctx, `
-		SELECT oe.aggregate_type, oe.event_type, oe.created_at, oe.event_id::text,
-		       onc.tx_hash, COALESCE(onc.status::text, 'PENDING'),
-		       onc.updated_at, onc.error_message
-		FROM public.outbox_events oe
-		LEFT JOIN public.onchain_events onc USING (event_id)
-		WHERE oe.aggregate_id = $1::uuid
-		ORDER BY oe.created_at ASC`, header.ProductID)
+		SELECT stage, event_type, created_at, event_id::text,
+		       tx_hash, COALESCE(chain_status, 'PENDING'),
+		       chain_updated_at, error_message
+		FROM (
+			SELECT CASE wa.action_type WHEN 1 THEN 'receiving' WHEN 2 THEN 'putaway'
+				                WHEN 3 THEN 'picking' WHEN 4 THEN 'shipping' END AS stage,
+			       oe.event_type, oe.created_at, wa.action_id AS event_id,
+			       onc.tx_hash, onc.status::text AS chain_status,
+			       onc.updated_at AS chain_updated_at, onc.error_message
+			FROM public.warehouse_actions wa
+			JOIN public.outbox_events oe ON oe.event_id = wa.action_id
+			LEFT JOIN public.onchain_events onc ON onc.event_id = wa.action_id
+			WHERE wa.item_ids @> ARRAY[$1::uuid]
+		) steps
+		ORDER BY created_at ASC`, header.ProductID)
 	if err != nil {
 		return Timeline{}, fmt.Errorf("products.Timeline steps: %w", err)
 	}

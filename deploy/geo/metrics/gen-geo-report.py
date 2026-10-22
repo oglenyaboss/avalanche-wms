@@ -417,7 +417,7 @@ HTML = f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
 </section>
 
 <section>
-  <div class="eyebrow">Отказоустойчивость · kill-1-of-3</div>
+  <div class="eyebrow">Отказоустойчивость · kill-1-of-{NV}</div>
   <h2>Отказ узла под живой нагрузкой</h2>
   <p>{fault_para or 'Инъекция отказа в этом прогоне не выполнялась.'}</p>
   <div class="callout {fault_callout_cls}"><p>{fault_conclusion}</p></div>
@@ -495,7 +495,7 @@ k6-фронт: **{num(tp['k6_iterations'],0)}** итераций, отказов
 ёмкости поглощён без потери закоммиченных событий. Склад генерирует единицы событий/с, поэтому измеренная
 ёмкость кратно перекрывает реальную потребность.
 
-## Отказоустойчивость (kill-1-of-3) — два уровня
+## Отказоустойчивость (kill-1-of-{NV}) — два уровня
 
 {(fault_para.replace('<br><br>','\n\n').replace('<strong>','**').replace('</strong>','**').replace("<span class='mono'>",'`').replace('</span>','`').replace('&lt;','<').replace('&gt;','>')) if FAULT_ON else 'Инъекция отказа в этом прогоне не выполнялась.'}
 

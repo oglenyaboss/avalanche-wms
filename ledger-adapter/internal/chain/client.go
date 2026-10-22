@@ -2,7 +2,6 @@ package chain
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"math/big"
@@ -10,10 +9,8 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -51,13 +48,13 @@ const (
 )
 
 // gasLimitHeadroomNum/Den масштабируют estimateGas вверх. Под пайплайном tx
-// оценивается, пока prior-stage transition того же товара ещё in-flight (не в
-// блоке): estimateGas видит item в раннем статусе → считает по дешёвому
-// skip-пути контракта (ItemTransitionFailed), а к моменту майнинга item уже
-// Accepted/PutAway → реальный SSTORE-путь дороже → OutOfGas без запаса
-// (full-FSM smoke: ~28k skip vs ~32k real putaway → 807/2000 OOG). ×3/2
-// покрывает разрыв с маржой, не раздувая лимит чрезмерно (упаковка блока).
-// Серийный flusher этого не ловил — prior tx домайнивался до estimate.
+// оценивается, пока предыдущее действие с теми же товарами ещё in-flight:
+// estimateGas видит товар в раннем статусе и идёт по пути отклонения
+// (ActionRejected), а к майнингу товар уже в нужном статусе и действие
+// применяется с записью на каждый товар — дороже. ×3/2 сам по себе этот разрыв
+// не покрывает (дешёвая reject-оценка может быть многократно ниже применения);
+// детерминированную нижнюю границу по числу товаров даёт
+// chain.ApplyActionsGasFloor — она подставляется minGas'ом в send.
 const (
 	gasLimitHeadroomNum = 3
 	gasLimitHeadroomDen = 2
@@ -77,54 +74,39 @@ type ethBackend interface {
 	Close()
 }
 
-// Client обёртка над ethclient с методами для BatchMappingWMS.
-// sendMu сериализует nonce-critical секцию в sendMethod: локальный монотонный
+// Client обёртка над ethclient с методами для SignedMappingWMS.
+// sendMu сериализует nonce-critical секцию в send: локальный монотонный
 // nonce (nonce++ только при успешном SendTransaction) позволяет держать
 // несколько tx in-flight в одном блоке без per-send PendingNonceAt — иначе
 // pipeline сериализовался бы на скорости майнинга блоков (старое поведение).
 type Client struct {
-	eth          ethBackend
-	privateKey   *ecdsa.PrivateKey
-	fromAddress  common.Address
-	contractAddr common.Address
-	parsedABI    abi.ABI
-	sendMu       sync.Mutex
-	nonce        uint64 // следующий nonce для отправки; guarded by sendMu
-	nonceSeeded  bool   // seed произошёл; guarded by sendMu
+	eth         ethBackend
+	signer      TxSigner
+	sendMu      sync.Mutex
+	nonce       uint64 // следующий nonce для отправки; guarded by sendMu
+	nonceSeeded bool   // seed произошёл; guarded by sendMu
 }
 
-// NewClient подключается к RPC, парсит приватник и ABI.
-func NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error) {
+// NewClient подключается к RPC и подписывает локальным hex-ключом (static-режим).
+// КМС-режим использует NewClientWithSigner.
+func NewClient(rpcURL, privateKeyHex string) (*Client, error) {
+	signer, err := NewStaticSigner(privateKeyHex)
+	if err != nil {
+		return nil, err
+	}
+	return NewClientWithSigner(rpcURL, signer)
+}
+
+// NewClientWithSigner подключается к RPC и подписывает через внешний TxSigner
+// (static-ключ или удалённый KMS — Client'у без разницы).
+func NewClientWithSigner(rpcURL string, signer TxSigner) (*Client, error) {
 	eth, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return nil, fmt.Errorf("dial rpc %q: %w", rpcURL, err)
 	}
-
-	pk, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
-	if err != nil {
-		eth.Close()
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-
-	pubECDSA, ok := pk.Public().(*ecdsa.PublicKey)
-	if !ok {
-		eth.Close()
-		return nil, fmt.Errorf("cast public key to ECDSA failed")
-	}
-	from := crypto.PubkeyToAddress(*pubECDSA)
-
-	parsed, err := abi.JSON(strings.NewReader(ContractABI))
-	if err != nil {
-		eth.Close()
-		return nil, fmt.Errorf("parse abi: %w", err)
-	}
-
 	return &Client{
-		eth:          eth,
-		privateKey:   pk,
-		fromAddress:  from,
-		contractAddr: common.HexToAddress(contractAddr),
-		parsedABI:    parsed,
+		eth:    eth,
+		signer: signer,
 	}, nil
 }
 
@@ -132,52 +114,7 @@ func NewClient(rpcURL, privateKeyHex, contractAddr string) (*Client, error) {
 func (c *Client) Close() { c.eth.Close() }
 
 // FromAddress — адрес, из-под которого клиент подписывает tx.
-func (c *Client) FromAddress() common.Address { return c.fromAddress }
-
-// aggregateToMethod маппит WMS aggregate_type в solidity-методы BatchMappingWMS.
-var aggregateToMethod = map[string]string{
-	"receiving": "batchAccept",
-	"putaway":   "batchPutAway",
-	"picking":   "batchPick",
-	"shipping":  "batchShip",
-}
-
-// AggregateTypes returns the set of aggregate_type strings known to the chain layer.
-func AggregateTypes() []string {
-	out := make([]string, 0, len(aggregateToMethod))
-	for k := range aggregateToMethod {
-		out = append(out, k)
-	}
-	return out
-}
-
-// BatchCall отправляет batch-tx по aggregate_type. Диспатчер для flusher.
-func (c *Client) BatchCall(ctx context.Context, aggregateType string, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	method, ok := aggregateToMethod[aggregateType]
-	if !ok {
-		return common.Hash{}, fmt.Errorf("unknown aggregate_type: %s", aggregateType)
-	}
-	return c.sendMethod(ctx, method, eventIDs, itemIDs)
-}
-
-// BatchAccept / BatchPutAway / BatchPick / BatchShip — explicit wrappers.
-// Удобнее для ручного использования (тесты, CLI, ad-hoc) чем BatchCall по строке.
-
-func (c *Client) BatchAccept(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	return c.sendMethod(ctx, "batchAccept", eventIDs, itemIDs)
-}
-
-func (c *Client) BatchPutAway(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	return c.sendMethod(ctx, "batchPutAway", eventIDs, itemIDs)
-}
-
-func (c *Client) BatchPick(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	return c.sendMethod(ctx, "batchPick", eventIDs, itemIDs)
-}
-
-func (c *Client) BatchShip(ctx context.Context, eventIDs, itemIDs []*big.Int) (common.Hash, error) {
-	return c.sendMethod(ctx, "batchShip", eventIDs, itemIDs)
-}
+func (c *Client) FromAddress() common.Address { return c.signer.Address() }
 
 // TransactionReceipt проксирует ethclient — нужно чтобы Client удовлетворял
 // ReceiptFetcher интерфейсу из receipt.go.
@@ -190,12 +127,19 @@ func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
 	return c.eth.BlockNumber(ctx)
 }
 
-func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (common.Hash, error) {
-	data, err := c.parsedABI.Pack(method, args...)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("pack %s: %w", method, err)
-	}
+// SendCalldata отправляет произвольные готовые calldata на указанный адрес:
+// applyActions на SignedMappingWMS и applyKeyActions на ConsortiumRegistry
+// пакуются заранее (PackApplyActions / PackApplyKeyActions). Идёт по общему
+// nonce/gas/sign/send-пути send: одна nonce-последовательность подписанта и те
+// же классы ошибок (ErrChainTransient/ErrChainRevert). minGas — нижняя граница
+// gas-лимита, 0 — без неё.
+func (c *Client) SendCalldata(ctx context.Context, to common.Address, data []byte, minGas uint64) (common.Hash, error) {
+	return c.send(ctx, to, data, "calldata", minGas)
+}
 
+// send строит, подписывает и отправляет legacy-tx с готовыми calldata на to.
+// label попадает в текст ошибок estimate-gas для диагностики.
+func (c *Client) send(ctx context.Context, to common.Address, data []byte, label string, minGas uint64) (common.Hash, error) {
 	// Сериализуем nonce-allocation + sign + send: один fromAddress.
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -206,7 +150,7 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	// через ErrChainTransient, чтобы Flusher classified их как retry-able и не
 	// слал в DLQ при транзитивном блипе. См. MR !35 M7.
 	if !c.nonceSeeded {
-		n, nerr := c.eth.PendingNonceAt(ctx, c.fromAddress)
+		n, nerr := c.eth.PendingNonceAt(ctx, c.signer.Address())
 		if nerr != nil {
 			return common.Hash{}, fmt.Errorf("%w: nonce: %v", ErrChainTransient, nerr)
 		}
@@ -223,43 +167,78 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 	gasPrice = new(big.Int).Div(new(big.Int).Mul(gasPrice, big.NewInt(gasPriceHeadroomNum)), big.NewInt(gasPriceHeadroomDen))
 
 	gasLimit, err := c.eth.EstimateGas(ctx, ethereum.CallMsg{
-		From: c.fromAddress,
-		To:   &c.contractAddr,
+		From: c.signer.Address(),
+		To:   &to,
 		Data: data,
 	})
 	if err != nil {
 		// Revert (контракт rejected state transition) — terminal, DLQ.
 		// Network/RPC blip — transient, retry при следующем tick.
 		if isRevertError(err) {
-			return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainRevert, method, err)
+			return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainRevert, label, err)
 		}
-		return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainTransient, method, err)
+		return common.Hash{}, fmt.Errorf("%w: estimate gas for %s: %v", ErrChainTransient, label, err)
 	}
-	// Запас на gas-лимит против skip→real разрыва под пайплайном (см.
-	// gasLimitHeadroomNum/Den) — иначе stale skip-оценка → OutOfGas-реверт.
+	// Запас на gas-лимит против разрыва отклонение→применение под пайплайном (см.
+	// gasLimitHeadroomNum/Den) — иначе stale-оценка → OutOfGas-реверт.
 	gasLimit = gasLimit * gasLimitHeadroomNum / gasLimitHeadroomDen
+	if gasLimit < minGas {
+		gasLimit = minGas
+	}
 
 	chainID, err := c.eth.ChainID(ctx)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("%w: chain id: %v", ErrChainTransient, err)
 	}
 
-	tx := types.NewTransaction(nonce, c.contractAddr, big.NewInt(0), gasLimit, gasPrice, data)
-	signed, err := types.SignTx(tx, types.NewEIP155Signer(chainID), c.privateKey)
+	tx := types.NewTransaction(nonce, to, big.NewInt(0), gasLimit, gasPrice, data)
+	signed, err := c.signer.SignTx(ctx, tx, chainID)
 	if err != nil {
-		// Local crypto error — не chain-related. Оставляем raw, Flusher пометит
-		// как terminal (DLQ) — это адекватно: sign не падает transient'но.
+		// Удалённый signer недоступен — tx не построен, nonce не потрачен:
+		// transient, retry при следующем poll'е (не DLQ). Локальная crypto-ошибка
+		// static-ключа — terminal, как и раньше.
+		if errors.Is(err, ErrSignerTransient) {
+			return common.Hash{}, fmt.Errorf("%w: sign tx: %v", ErrChainTransient, err)
+		}
 		return common.Hash{}, fmt.Errorf("sign tx: %w", err)
 	}
 
 	if err := c.eth.SendTransaction(ctx, signed); err != nil {
+		if isNonceTooLowError(err) {
+			// Nonce занят tx с того же адреса извне (owner-CLI на общем
+			// deployer-ключе): без перечитывания retry вечно переиспользует
+			// устаревший nonce. Отправка остаётся одна на вызов — flusher
+			// ретраит следующим тиком уже с актуальным nonce.
+			if rerr := c.reseedLocked(ctx); rerr != nil {
+				c.nonceSeeded = false
+			}
+		}
 		return common.Hash{}, fmt.Errorf("%w: send tx: %v", ErrChainTransient, err)
 	}
 	// nonce++ ТОЛЬКО после успешного SendTransaction — никаких дыр в nonce
-	// (invariant 3). При любой ошибке выше nonce не трогался → retry
-	// переиспользует то же значение.
+	// (invariant 3). При ошибке выше nonce не продвигается; исключение —
+	// «nonce too low», где он перечитывается из сети под sendMu.
 	c.nonce++
 	return signed.Hash(), nil
+}
+
+// isNonceTooLowError распознаёт отказ txpool'а «nonce too low» (geth
+// core.ErrNonceTooLow, текст с префиксом «next nonce N, tx nonce M»).
+func isNonceTooLowError(err error) bool {
+	return strings.Contains(err.Error(), "nonce too low")
+}
+
+// reseedLocked пере-инициализирует локальный nonce из on-chain PendingNonceAt.
+// Требует удержания sendMu (send зовёт его уже под мьютексом — Lock здесь
+// невозможен, это дедлок).
+func (c *Client) reseedLocked(ctx context.Context) error {
+	n, err := c.eth.PendingNonceAt(ctx, c.signer.Address())
+	if err != nil {
+		return err
+	}
+	c.nonce = n
+	c.nonceSeeded = true
+	return nil
 }
 
 // ReseedNonce пере-инициализирует локальный nonce из on-chain PendingNonceAt.
@@ -269,11 +248,8 @@ func (c *Client) sendMethod(ctx context.Context, method string, args ...any) (co
 func (c *Client) ReseedNonce(ctx context.Context) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	n, err := c.eth.PendingNonceAt(ctx, c.fromAddress)
-	if err != nil {
+	if err := c.reseedLocked(ctx); err != nil {
 		return fmt.Errorf("reseed nonce: %w", err)
 	}
-	c.nonce = n
-	c.nonceSeeded = true
 	return nil
 }

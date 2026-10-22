@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	ethcommon "github.com/ethereum/go-ethereum/common"
 )
 
 // Config holds the application configuration.
@@ -16,6 +18,7 @@ type Config struct {
 	DbURL              string
 	RpcURL             string
 	ContractAddr       string
+	RegistryAddr       string
 	PrivateKey         string
 	BatchSize          int
 	BatchTimeout       time.Duration
@@ -25,23 +28,26 @@ type Config struct {
 	ReconcileMinAge    time.Duration
 	PipelineWindow     int
 	LogLevel           string
-	// PrivateKeys — набор signer-аккаунтов (multi-signer). Всегда ≥1. Если задан
-	// PRIVATE_KEYS (comma-separated) — используется он; иначе [PrivateKey]. Flusher
-	// шардит in-flight tx по ProductID между этими аккаунтами: каждый аккаунт
-	// ограничен TxPoolAccountSlots узла, поэтому N аккаунтов = N× in-flight, что
-	// насыщает WAN-цепь (single signer голодит её — ~16 слотов < block-ёмкость).
-	PrivateKeys []string
+
+	// SignerMode: "static" (дефолт, ТОЛЬКО локальная разработка — приватник в env
+	// открытым текстом) | "kms"
+	// (подпись через внешний Web3Signer — ключевой материал адаптеру не нужен).
+	SignerMode string
+	// KMSURL / KMSPublicKeys — параметры kms-режима. KMSPublicKeys — identifier
+	// (uncompressed X||Y public key) единственного ключа, загруженного в
+	// Web3Signer; поддерживает KMS_PUBLIC_KEYS_FILE (comma-separated в файле).
+	KMSURL        string
+	KMSPublicKeys []string
 }
 
 // perSignerWindow — сколько batch-tx in-flight держим на ОДИН signer-аккаунт. Узел
 // держит TxPoolAccountSlots=16 исполняемых слотов на аккаунт; 8 — это 50% запас (НЕ
 // сам лимит, см. obs 10635) против "account slots" реджекта sequential-nonce tx'ов
-// одного signer'а. Эффективный потолок окна = perSignerWindow × N_signers: каждый
-// batch шардится по N аккаунтам (один tx на signer), per-signer in-flight остаётся
-// ≤ окно, но суммарная slot-ёмкость = N×16 и N независимых nonce-цепей убирают
-// cross-product head-of-line stall. На WAN-цепи глубина окна = throughput (Little:
-// in-flight ÷ latency), потолок НЕ в газе — гео-чейн при 200M gasLimit жжёт
-// ~0.04%/блок (запас ~30×); лимитирует feeding-cadence и WAN receipt-latency.
+// одного signer'а. Signer ровно один (multi-signer запрещён: signed actions держат
+// Kafka-порядок одной nonce-цепочкой), поэтому потолок окна = perSignerWindow.
+// На WAN-цепи глубина окна = throughput (Little: in-flight ÷ latency), потолок НЕ
+// в газе — гео-чейн при 200M gasLimit жжёт ~0.04%/блок (запас ~30×); лимитирует
+// feeding-cadence и WAN receipt-latency.
 const perSignerWindow = 8
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -51,14 +57,16 @@ const perSignerWindow = 8
 // и файл читается — его содержимое (trim'нутое) используется вместо прямого env.
 // Нужно для test-профиля, где contract-deploy пишет артефакты в shared volume.
 //
-// Обязательные поля: KAFKA_BROKERS, DB_URL, RPC_URL, CONTRACT_ADDR, PRIVATE_KEY.
-// Если хоть одно отсутствует — возвращает ошибку.
+// Обязательные поля (static): KAFKA_BROKERS, DB_URL, RPC_URL, CONTRACT_ADDR,
+// PRIVATE_KEY. В kms-режиме (SIGNER_MODE=kms) вместо PRIVATE_KEY требуются
+// KMS_URL и KMS_PUBLIC_KEYS.
 func Load() (*Config, error) {
 	c := &Config{
 		Port:               getDefault("PORT", "8085"),
 		KafkaGroupID:       getDefault("KAFKA_GROUP_ID", "ledger-adapter"),
 		DLQTopic:           getDefault("DLQ_TOPIC", "wms.dlq.v1"),
 		LogLevel:           getDefault("LOG_LEVEL", "info"),
+		SignerMode:         getDefault("SIGNER_MODE", "static"),
 		BatchSize:          getIntDefault("BATCH_SIZE", 10),
 		BatchTimeout:       getDurationDefault("BATCH_TIMEOUT", 100*time.Millisecond),
 		ReceiptPollTimeout: getDurationDefault("RECEIPT_POLL_TIMEOUT", 30*time.Second),
@@ -71,7 +79,9 @@ func Load() (*Config, error) {
 		PipelineWindow: getIntDefault("PIPELINE_WINDOW", 3),
 	}
 
-	required := []struct {
+	// Общие обязательные переменные — для любого signer-режима. PRIVATE_KEY
+	// требуется только в static; в kms вместо него KMS_URL + KMS_PUBLIC_KEYS.
+	common := []struct {
 		name  string
 		field *string
 	}{
@@ -79,39 +89,82 @@ func Load() (*Config, error) {
 		{"DB_URL", &c.DbURL},
 		{"RPC_URL", &c.RpcURL},
 		{"CONTRACT_ADDR", &c.ContractAddr},
-		{"PRIVATE_KEY", &c.PrivateKey},
 	}
-	for _, r := range required {
-		v, err := getRequired(r.name)
+	for _, r := range common {
+		v, err := GetRequired(r.name)
 		if err != nil {
 			return nil, err
 		}
 		*r.field = v
 	}
 
-	// Multi-signer: PRIVATE_KEYS (comma-separated) шардит in-flight нагрузку по N
-	// аккаунтам. Падаем на единственный PRIVATE_KEY, если не задан. PRIVATE_KEY
-	// остаётся required (back-compat + дефолтный signer[0]).
-	if raw := os.Getenv("PRIVATE_KEYS"); raw != "" {
-		for _, k := range strings.Split(raw, ",") {
-			if k = strings.TrimSpace(k); k != "" {
-				c.PrivateKeys = append(c.PrivateKeys, k)
+	// REGISTRY_ADDR необязателен: без него /registry/keys отвечает 502.
+	regAddr, err := GetOptional("REGISTRY_ADDR")
+	if err != nil {
+		return nil, err
+	}
+	if regAddr != "" && !ethcommon.IsHexAddress(regAddr) {
+		return nil, fmt.Errorf("REGISTRY_ADDR: invalid address")
+	}
+	c.RegistryAddr = regAddr
+
+	switch c.SignerMode {
+	case "kms":
+		var err error
+		if c.KMSURL, err = GetRequired("KMS_URL"); err != nil {
+			return nil, err
+		}
+		rawKeys, err := GetRequired("KMS_PUBLIC_KEYS")
+		if err != nil {
+			return nil, err
+		}
+		seen := make(map[string]bool)
+		for _, id := range strings.Split(rawKeys, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				// Дубль identifier'а = два Client'а с одним адресом и независимыми
+				// локальными nonce → replacement-коллизии под нагрузкой.
+				if seen[id] {
+					return nil, fmt.Errorf("KMS_PUBLIC_KEYS: duplicate %s", id)
+				}
+				seen[id] = true
+				c.KMSPublicKeys = append(c.KMSPublicKeys, id)
 			}
 		}
-	}
-	if len(c.PrivateKeys) == 0 {
-		c.PrivateKeys = []string{c.PrivateKey}
+		if len(c.KMSPublicKeys) == 0 {
+			return nil, fmt.Errorf("KMS_PUBLIC_KEYS is empty")
+		}
+	case "static":
+		v, err := GetRequired("PRIVATE_KEY")
+		if err != nil {
+			return nil, err
+		}
+		c.PrivateKey = v
+	default:
+		return nil, fmt.Errorf("SIGNER_MODE must be \"static\" or \"kms\", got %q", c.SignerMode)
 	}
 
-	// Потолок in-flight окна масштабируется с числом signer'ов: каждый держит
-	// perSignerWindow слотов, multi-signer спред даёт суммарно perSignerWindow×N.
-	pipelineWindowMax := perSignerWindow * len(c.PrivateKeys)
+	// Подписанные action'ы (ConsortiumRegistry.applyKeyActions) отправляются
+	// ровно одним signer'ом: порядок действий держится одной nonce-
+	// последовательностью, шардирование по нескольким аккаунтам нарушило бы
+	// Kafka-порядок (ADR-0001 §9). В static signer всегда один (PRIVATE_KEY),
+	// в kms отклоняем конфиг с более чем одним identifier'ом.
+	signerCount := 1
+	if c.SignerMode == "kms" {
+		signerCount = len(c.KMSPublicKeys)
+	}
+	if signerCount > 1 {
+		return nil, fmt.Errorf("only one signer is supported (signed actions keep Kafka order by one nonce sequence), got %d", signerCount)
+	}
+
+	// Потолок in-flight окна = perSignerWindow × signerCount; signer ровно один,
+	// в kms-режиме это единственный KMS-ключ (лимит TxPoolAccountSlots тот же).
+	pipelineWindowMax := perSignerWindow * signerCount
 	if c.PipelineWindow < 1 {
 		c.PipelineWindow = 1
 	}
 	if c.PipelineWindow > pipelineWindowMax {
 		fmt.Fprintf(os.Stderr, "config: PIPELINE_WINDOW=%d clamped to %d (perSignerWindow=%d × %d signers)\n",
-			c.PipelineWindow, pipelineWindowMax, perSignerWindow, len(c.PrivateKeys))
+			c.PipelineWindow, pipelineWindowMax, perSignerWindow, signerCount)
 		c.PipelineWindow = pipelineWindowMax
 	}
 
@@ -132,11 +185,24 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// getRequired сначала читает <NAME>_FILE, потом <NAME>. Пустая строка = missing.
+// GetRequired — GetOptional, но пустое значение = ошибка.
+// Используется и вне config.Load (cmd/registry-cli), поэтому экспортирована.
+func GetRequired(name string) (string, error) {
+	v, err := GetOptional(name)
+	if err != nil {
+		return "", err
+	}
+	if v == "" {
+		return "", fmt.Errorf("missing required env: %s", name)
+	}
+	return v, nil
+}
+
+// GetOptional сначала читает <NAME>_FILE, потом <NAME>. Пустая строка = не задано.
 // Ошибка чтения существующего файла — fatal (явная мисконфигурация).
 // Если <NAME>_FILE задан, но файл не найден — логируем warning в stderr
 // (опечатка в пути молча бы привела к использованию env-var с другим значением).
-func getRequired(name string) (string, error) {
+func GetOptional(name string) (string, error) {
 	if path := os.Getenv(name + "_FILE"); path != "" {
 		b, err := os.ReadFile(path)
 		if err == nil {
@@ -147,11 +213,7 @@ func getRequired(name string) (string, error) {
 		}
 		fmt.Fprintf(os.Stderr, "config: %s_FILE=%q not found, falling back to %s env var\n", name, path, name)
 	}
-	v := os.Getenv(name)
-	if v == "" {
-		return "", fmt.Errorf("missing required env: %s", name)
-	}
-	return v, nil
+	return os.Getenv(name), nil
 }
 
 func getDefault(name, def string) string {

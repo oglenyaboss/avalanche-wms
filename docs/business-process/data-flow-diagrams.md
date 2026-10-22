@@ -34,7 +34,7 @@ flowchart TB
     WMS -->|"задачи сборки,\nпрогресс"| OP_ASM
     OP_SHIP -->|"QR товара,\nномер ТС"| WMS
     WMS -->|"статус верификации,\nподтверждение отгрузки"| OP_SHIP
-    WMS -->|"outbox events →\nDebezium → Kafka →\nLedger Adapter →\nbatch TX"| BC
+    WMS -->|"outbox-строки подписанных действий →\nDebezium → Kafka wms.events.v1 →\nLedger Adapter →\napplyActions"| BC
     BC -->|"TX receipt\n(COMMITTED / FAILED)"| WMS
 ```
 
@@ -64,7 +64,8 @@ flowchart TB
     DS_INV[("products\nboxes\nbins\nskus\nsku_barcodes")]
     DS_OPS[("receiving_gate\nreceiving_table\nputaways\nassembly_tasks\nshippings")]
     DS_ORD[("orders")]
-    DS_EVT[("outbox_events\nonchain_events")]
+    DS_EVT[("outbox_events\nwarehouse_actions")]
+    DS_ONCH[("onchain_events")]
 
     ERP -->|"TTN, грузоместа,\nожидаемые SKU"| P0
     P0 -->|"INSERT shipment,\ncargoplaces,\nexpected_skus"| DS_SHIP
@@ -83,14 +84,14 @@ flowchart TB
     P2 -->|"INSERT/UPDATE boxes"| DS_INV
     P2 -->|"UPDATE cargoplace\nстатус"| DS_SHIP
     P2 -->|"INSERT лог действий"| DS_OPS
-    P2 -->|"INSERT outbox_events\n(receiving)"| DS_EVT
+    P2 -->|"INSERT warehouse_actions\n+ outbox (signed_action)\nпри закрытии грузоместа"| DS_EVT
     P2 -->|"SKU, product,\nпрогресс, недостача"| OP_T
 
     OP_P -->|"код буфера,\nQR товаров,\nкод ячейки"| P3
     DS_INV -->|"products\nв буфере"| P3
     P3 -->|"UPDATE products\n(bin_id, status=STORED)"| DS_INV
     P3 -->|"INSERT putaways"| DS_OPS
-    P3 -->|"INSERT outbox_events\n(putaway)"| DS_EVT
+    P3 -->|"INSERT warehouse_actions\n+ outbox (signed_action)"| DS_EVT
     P3 -->|"подтверждение\nразмещения"| OP_P
 
     MGR -->|"order_id"| P4
@@ -98,9 +99,9 @@ flowchart TB
     DS_INV -->|"products\n(STORED)"| P4
     DS_ORD -->|"заказ +\nтребуемые SKU"| P4
     P4 -->|"UPDATE products\n(ALLOCATED → ASSEMBLED)"| DS_INV
-    P4 -->|"INSERT/UPDATE\nassembly_tasks"| DS_OPS
+    P4 -->|"INSERT/UPDATE\nassembly_tasks\n(+ action_id, unloaded_at\nпри выгрузке в буфер)"| DS_OPS
     P4 -->|"UPDATE order\nстатус"| DS_ORD
-    P4 -->|"INSERT outbox_events\n(picking)"| DS_EVT
+    P4 -->|"INSERT warehouse_actions\n+ outbox (signed_action)\nтолько при выгрузке в буфер"| DS_EVT
     P4 -->|"задачи, прогресс"| OP_A
 
     OP_S -->|"QR товара,\nномер ТС"| P5
@@ -109,11 +110,11 @@ flowchart TB
     P5 -->|"UPDATE products\n(SHIPPED)"| DS_INV
     P5 -->|"INSERT shippings"| DS_OPS
     P5 -->|"UPDATE order\n(SHIPPED)"| DS_ORD
-    P5 -->|"INSERT outbox_events\n(shipping)"| DS_EVT
+    P5 -->|"INSERT warehouse_actions\n+ outbox (signed_action)"| DS_EVT
     P5 -->|"подтверждение\nотгрузки"| OP_S
 
-    DS_EVT -->|"events через\nDebezium → Kafka →\nLedger Adapter"| BC
-    BC -->|"TX receipt"| DS_EVT
+    DS_EVT -->|"конверты подписанных действий через\nDebezium → Kafka wms.events.v1 →\nLedger Adapter"| BC
+    BC -->|"TX receipt"| DS_ONCH
 ```
 
 ---
@@ -216,13 +217,15 @@ flowchart TB
     OP -->|"'Завершить грузоместо'"| P2_7
     DS_PROD -->|"все products\nгрузоместа"| P2_7
     DS_EXP -->|"ожидаемые\nSKU × qty"| P2_7
+    P2_7 -->|"draft: INSERT warehouse_actions\n(часть ≤2000 товаров:\naction_id, salt, challenge)"| DS_EVT
+    P2_7 -->|"passkey-подпись каждой части\n→ submit"| OP
     P2_7 -->|"UPDATE status =\nTABLE_CLOSED"| DS_CARGO
     P2_7 -->|"INSERT\naction=CLOSE_CARGO"| DS_LOG
-    P2_7 -->|"INSERT N events\n(aggregate_type=receiving,\naggregate_id=product_id)"| DS_EVT
+    P2_7 -->|"submit: INSERT 1 outbox-строку на действие\n(aggregate_type=signed_action,\nevent_id=action_id)"| DS_EVT
     P2_7 -->|"итог: принято 10,\nожидалось 12,\nнедостача 2"| OP
 ```
 
-**Ключевой момент:** product создаётся в шаге 2.4 (SCAN_QR), но outbox events создаются в шаге 2.7 (CLOSE_CARGO) — батчем, по 1 на каждый product.
+**Ключевой момент:** product создаётся в шаге 2.4 (SCAN_QR), но подписанное Receive-действие формируется в шаге 2.7 (CLOSE_CARGO): draft режет товары на части-действия, оператор подписывает каждую passkey, submit пишет по одной outbox-строке на часть.
 
 ---
 
@@ -251,14 +254,16 @@ flowchart TB
 
     OP -->|"код ячейки\nхранения"| P3_3
     DS_BIN -->|"bin\n(валидация)"| P3_3
+    P3_3 -->|"draft: INSERT warehouse_actions\n(часть ≤2000 товаров)"| DS_EVT
+    P3_3 -->|"passkey-подпись → submit"| OP
     P3_3 -->|"UPDATE products\nbin_id = storage_bin,\nstatus = STORED"| DS_PROD
-    P3_3 -->|"INSERT putaway\n(product_id, from_bin_id,\nbin_id, operator_id)"| DS_PUT
-    P3_3 -->|"INSERT N events\n(aggregate_type=putaway,\naggregate_id=product_id)"| DS_EVT
+    P3_3 -->|"INSERT putaway\n(product_id, from_bin_id,\nbin_id, operator_id, action_id)"| DS_PUT
+    P3_3 -->|"submit: INSERT 1 outbox-строку на действие\n(aggregate_type=signed_action,\nevent_id=action_id)"| DS_EVT
     P3_3 -->|"размещено N товаров\nв ячейку M2-A-03"| OP
 ```
 
 **Входные данные:** products в буфере (status=RECEIVED).
-**Выходные данные:** products в ячейках хранения (status=STORED) + outbox events для блокчейна.
+**Выходные данные:** products в ячейках хранения (status=STORED) + подписанное PutAway-действие в outbox для блокчейна.
 
 ---
 
@@ -292,14 +297,14 @@ flowchart TB
 
     OP -->|"QR товара\n(скан с полки)"| P4_3
     DS_TASK -->|"task\n(PENDING)"| P4_3
-    P4_3 -->|"UPDATE task\nstatus = DONE,\nonchain_status =\nPENDING_ONCHAIN"| DS_TASK
+    P4_3 -->|"UPDATE task\nstatus = DONE,\noperator_id"| DS_TASK
     P4_3 -->|"UPDATE product\nstatus = ASSEMBLED"| DS_PROD
-    P4_3 -->|"INSERT event\n(aggregate_type=picking,\naggregate_id=product_id)"| DS_EVT
-    P4_3 -->|"UPDATE order status\n(ASSEMBLY_IN_PROGRESS\nили ASSEMBLED)"| DS_ORD
+    P4_3 -->|"без outbox — Pick-действие\nуйдёт в цепь при выгрузке\nкорзины в буфер"| OP
+    P4_3 -->|"UPDATE order status\n(ALLOCATED\nили ASSEMBLED)"| DS_ORD
     P4_3 -->|"товар подобран,\nпрогресс (3/5)"| OP
 ```
 
-**Особенность:** аллокация (4.1) **не создаёт** outbox events. Только подбор (4.3) пишет в блокчейн.
+**Особенность:** аллокация (4.1) и подбор (4.3) **не создают** outbox-строк. Подписанное Pick-действие пишется при выгрузке корзины в буфер магазина (скан SHIPPING_BUFFER: draft → подпись → submit).
 
 ---
 
@@ -327,11 +332,13 @@ flowchart TB
     P5_2 -->|"товар подтверждён\n(3/5)"| OP
 
     OP -->|"номер ТС,\n'Отгрузить'"| P5_3
-    DS_PROD -->|"все products\nзаказа"| P5_3
+    DS_PROD -->|"все products\nбуфера (или product_ids)"| P5_3
+    P5_3 -->|"draft: INSERT warehouse_actions\n(часть ≤2000 товаров)\n+ гейт: Pick каждого\nтовара COMMITTED"| DS_EVT
+    P5_3 -->|"passkey-подпись → submit"| OP
     P5_3 -->|"UPDATE products\nstatus = SHIPPED"| DS_PROD
-    P5_3 -->|"INSERT shippings\n(product_id, vehicle_number,\noperator_id)"| DS_SHIP
+    P5_3 -->|"INSERT shippings\n(product_id, dispatch_id,\noperator_id, action_id)"| DS_SHIP
     P5_3 -->|"UPDATE order\nstatus = SHIPPED"| DS_ORD
-    P5_3 -->|"INSERT N events\n(aggregate_type=shipping,\naggregate_id=product_id)"| DS_EVT
+    P5_3 -->|"submit: INSERT 1 outbox-строку на действие\n(aggregate_type=signed_action,\nevent_id=action_id)"| DS_EVT
     P5_3 -->|"заказ отгружен:\nN товаров"| OP
 ```
 
@@ -345,33 +352,35 @@ flowchart TB
 flowchart TB
     DS_EVT[("outbox_events")]
     DS_ONCHAIN[("onchain_events")]
+    DS_WA[("warehouse_actions\nkey_actions")]
 
     P6_1["6.1 CDC\n(Debezium)"]
     P6_2["6.2 Буферизация\n(Kafka)"]
-    P6_3["6.3 Batch + TX\n(Ledger Adapter)"]
+    P6_3["6.3 Окно → TX\n(Ledger Adapter)"]
 
-    BC(["BatchMappingWMS\n(блокчейн)"])
+    BC(["SignedMappingWMS /\nConsortiumRegistry\n(блокчейн)"])
 
-    DS_EVT -->|"WAL:\nINSERT event\n(event_id, aggregate_id,\naggregate_type)"| P6_1
-    P6_1 -->|"topic: wms.{type}.v1\nkey: product_id (UUID)\nheader.id: event_id"| P6_2
-    P6_2 -->|"batch: 10 msgs\nили timeout 100ms"| P6_3
-    DS_ONCHAIN -->|"проверка\nidempotency:\nevent_id уже есть?"| P6_3
+    DS_EVT -->|"WAL:\nINSERT строка действия\n(event_id = action_id,\naggregate_type=signed_action,\npayload = конверт)"| P6_1
+    P6_1 -->|"topic: wms.events.v1\nkey: action_id\nheaders: id, aggregate_type"| P6_2
+    P6_2 -->|"окно подписанных действий\n(порядок сохраняется)"| P6_3
+    DS_WA -->|"черновик действия:\nchallenge, itemIds,\ndetailsHash"| P6_3
+    DS_ONCHAIN -->|"идемпотентность:\naction_id уже есть?"| P6_3
     P6_3 -->|"INSERT\nstatus=PENDING"| DS_ONCHAIN
-    P6_3 -->|"UUID→uint256:\neventId = keccak256(event_id)\nitemId = keccak256(product_id)"| P6_3
-    P6_3 -->|"batchAccept / batchPutAway /\nbatchPick / batchShip\n(eventIds[], itemIds[])"| BC
+    P6_3 -->|"UUID→bytes16 / itemId =\nkeccak256(uuid); верификация\nWebAuthn-подписи (precompile 0x100)"| P6_3
+    P6_3 -->|"складские действия:\nSignedMappingWMS.applyActions\nключевые действия:\nConsortiumRegistry.applyKeyActions"| BC
     BC -->|"TX receipt\n(success / revert)"| P6_3
-    P6_3 -->|"UPDATE status =\nCOMMITTED,\ntx_hash = 0x..."| DS_ONCHAIN
+    P6_3 -->|"UPDATE status =\nCOMMITTED / FAILED\n(+ reject_reason)"| DS_ONCHAIN
 ```
 
 ---
 
 ## Сводка: какие данные создаёт каждый процесс
 
-| Процесс | Входные данные (от оператора) | Читает из хранилища | Пишет в хранилище | Outbox |
-|---------|------------------------------|-------------------|-------------------|--------|
+| Процесс | Входные данные (от оператора) | Читает из хранилища | Пишет в хранилище | Подписанные действия |
+|---------|------------------------------|-------------------|-------------------|---------------------|
 | 1. КПП | код TTN, коды грузомест | shipments, cargoplaces | shipments, cargoplaces, receiving_gate | — |
-| 2. Стол | код грузоместа, ШК коробки, ШК товара, QR, код буфера | cargoplaces, expected_skus, sku_barcodes, bins | cargoplaces, boxes, **products**, receiving_table, **outbox_events** | receiving |
-| 3. Раскладка | код буфера, QR товаров, код ячейки | products, bins | **products**, putaways, **outbox_events** | putaway |
-| 4. Сборка | order_id (менеджер), QR товара (оператор) | orders, products | **products**, assembly_tasks, orders, **outbox_events** | picking |
-| 5. Отгрузка | QR товара, номер ТС | products, orders | **products**, shippings, orders, **outbox_events** | shipping |
-| 6. Интеграция | outbox_events (CDC) | onchain_events (idempotency) | onchain_events | → blockchain |
+| 2. Стол | код грузоместа, ШК коробки, ШК товара, QR, код буфера, passkey | cargoplaces, expected_skus, sku_barcodes, bins | cargoplaces, boxes, **products**, receiving_table, **warehouse_actions + outbox_events** | Receive (draft → submit) |
+| 3. Раскладка | код буфера, QR товаров, код ячейки, passkey | products, bins | **products**, putaways, **warehouse_actions + outbox_events** | PutAway (draft → submit) |
+| 4. Сборка | order_id (менеджер), QR товара (оператор), passkey | orders, products | **products**, assembly_tasks, orders, **warehouse_actions + outbox_events** (только выгрузка в буфер) | Pick (draft → submit) |
+| 5. Отгрузка | QR буфера, QR водителя, passkey | products, orders, dispatches | **products**, shippings, orders, **warehouse_actions + outbox_events** | Ship (draft → submit) |
+| 6. Интеграция | outbox_events (CDC) | warehouse_actions, onchain_events | onchain_events | → blockchain |

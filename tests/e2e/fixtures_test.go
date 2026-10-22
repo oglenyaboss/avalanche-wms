@@ -173,13 +173,14 @@ func newOutboundFixture(t *testing.T, ctx context.Context, env *env) e2eFixture 
 			sql  string
 			args []any
 		}{
-			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id IN ` + prodSel + `)`, []any{cpCode}},
-			{`DELETE FROM public.outbox_events WHERE aggregate_id IN ` + prodSel, []any{cpCode}},
+			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel + `)`, []any{cpCode}},
+			{`DELETE FROM public.outbox_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel + `)`, []any{cpCode}},
 			{`DELETE FROM wms_ops.putaways WHERE product_id IN ` + prodSel, []any{cpCode}},
 			{`DELETE FROM wms_ops.shippings WHERE dispatch_id IN (SELECT dispatch_id FROM wms_inventory.outbound_dispatches WHERE dispatch_code=$1)`, []any{fx.DispatchCode}},
 			{`DELETE FROM wms_ops.assembly_tasks WHERE order_id IN (SELECT order_id FROM wms_inventory.orders WHERE external_order_no=$1)`, []any{fx.OrderNo}},
 			{`DELETE FROM wms_ops.receiving_table WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
 			{`DELETE FROM wms_ops.receiving_gate WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
+			{`DELETE FROM public.warehouse_actions WHERE item_ids && ARRAY` + prodSel, []any{cpCode}},
 			{`DELETE FROM wms_inventory.products WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
 			{`DELETE FROM wms_inventory.boxes WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
 			{`DELETE FROM wms_inventory.expected_cargoplace_skus WHERE cargoplace_id IN ` + cpSel, []any{cpCode}},
@@ -191,7 +192,7 @@ func newOutboundFixture(t *testing.T, ctx context.Context, env *env) e2eFixture 
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("newOutboundFixture cleanup (%s): %v", s.sql, err)
+				t.Errorf("newOutboundFixture cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})
@@ -341,25 +342,28 @@ func newMultiProductFixture(t *testing.T, ctx context.Context, env *env, destina
 	).Scan(&fx.DestinationID, &fx.ShippingBinID, &fx.OrderID, &fx.DispatchID)
 	require.NoError(t, err, "resolve multi-product fixture ids")
 
-	// Best-effort teardown in FK order: onchain + outbox + ops children keyed by
-	// product id, then products, then order/line/dispatch/cargoplace/shipment, then the
-	// SKU. Unlike newOutboundFixture, this also deletes the picking/shipping outbox rows
-	// and their onchain_events (keyed by aggregate_id = product_id / matching event_id)
-	// so neither accumulates across runs. Because these products are inserted STORED
-	// without prior receiving/putaway, their on-chain itemStatus is None, so the
-	// picking/shipping events they generate revert and land FAILED in onchain_events —
-	// which is exactly why those rows are cleaned up here.
+	// Best-effort teardown in FK order: the signed actions containing the products
+	// (their onchain_events and outbox rows), then the ops children keyed by
+	// product id or by those actions (one Pick action may span several fixtures'
+	// products, e.g. TestMultiOrder_AllocateAndShip), then products, then order/line/dispatch/cargoplace/shipment, then
+	// the SKU. Unlike newOutboundFixture, this also deletes the signed Pick/Ship
+	// actions containing the products, their outbox rows and their onchain_events
+	// rows, so neither accumulates across runs. Because these products are inserted
+	// STORED without prior receiving/putaway, their on-chain itemStatus is None, so
+	// the real Pick/Ship actions they generate are rejected on chain and land FAILED
+	// in onchain_events — which is exactly why those rows are cleaned up here.
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
 		stmts := []struct {
 			sql  string
 			args []any
 		}{
-			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT event_id FROM public.outbox_events WHERE aggregate_id = ANY($1::uuid[]))`, []any{productIDs}},
-			{`DELETE FROM public.outbox_events WHERE aggregate_id = ANY($1::uuid[])`, []any{productIDs}},
-			{`DELETE FROM wms_ops.shippings WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
-			{`DELETE FROM wms_ops.assembly_tasks WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
-			{`DELETE FROM wms_ops.putaways WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM public.onchain_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM public.outbox_events WHERE event_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM wms_ops.shippings WHERE product_id = ANY($1::uuid[]) OR action_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM wms_ops.assembly_tasks WHERE product_id = ANY($1::uuid[]) OR action_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM wms_ops.putaways WHERE product_id = ANY($1::uuid[]) OR action_id IN (SELECT action_id FROM public.warehouse_actions WHERE item_ids && $1::uuid[])`, []any{productIDs}},
+			{`DELETE FROM public.warehouse_actions WHERE item_ids && $1::uuid[]`, []any{productIDs}},
 			{`DELETE FROM wms_inventory.products WHERE product_id = ANY($1::uuid[])`, []any{productIDs}},
 			{`DELETE FROM wms_inventory.order_lines WHERE order_id IN (SELECT order_id FROM wms_inventory.orders WHERE external_order_no=$1)`, []any{orderNo}},
 			{`DELETE FROM wms_inventory.orders WHERE external_order_no=$1`, []any{orderNo}},
@@ -370,7 +374,7 @@ func newMultiProductFixture(t *testing.T, ctx context.Context, env *env, destina
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("newMultiProductFixture cleanup (%s): %v", s.sql, err)
+				t.Errorf("newMultiProductFixture cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})

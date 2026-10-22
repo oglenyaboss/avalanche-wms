@@ -22,3 +22,12 @@ description = "Sample JWTs in the OpenAPI spec — illustrative response payload
 paths = [
   '''docs/api/openapi\.yaml''',
 ]
+
+[[allowlists]]
+description = """
+P-256 test passkey in the signed-action test vectors (ADR-0001). Derived from a public
+seed string in script/SignedActionVectors.s.sol and registered only on test chains.
+"""
+paths = [
+  '''testdata/signed-actions/vectors\.v1\.json''',
+]

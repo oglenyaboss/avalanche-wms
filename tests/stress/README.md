@@ -18,14 +18,15 @@
 
 | Величина | Смысл |
 |---|---|
-| **committed переходов/с** (главная единица) | подтверждённые в блокчейне переходы состояния (`onchain_events.status='COMMITTED'`). Цель — **≥1500/с**. Итог берётся как **sustained** (стационарное окно, минус 20с прогрева), а не peak. |
-| backlog | `outbox_events` без строки в `onchain_events` — не убегает ли очередь |
+| **committed товаров/с** (главная единица) | товары подтверждённых (`COMMITTED`) подписанных действий: `sum(cardinality(warehouse_actions.item_ids))`, а не строки `onchain_events`. Цель — **≥1500/с**. **sustained** — как в прежнем замере (+20с прогрева … конец k6 вкл. teardown); рядом печатаются committed-items и generated-items rate за окно генерации и дренаж бэклога после его конца. |
+| backlog | `outbox_events` подписанных действий без `COMMITTED`/терминальной строки в `onchain_events` — не убегает ли очередь; строка одна на действие (а не на товар) → это **действия в бэклоге** |
 | CPU-split | потребление CPU по каждому контейнеру → где узкое место |
 | baseFee / gasUsedRatio | не входит ли цепь в ценовое удушение (должен держаться у пола 25 Gwei) |
-| WMS↔chain consistency + on-chain TRACE | `shipped(wms) == shipping COMMITTED(chain)`, реальные `ItemTransition` (не skip/Failed) |
+| WMS↔chain consistency + on-chain TRACE | `SHIPPED` товаров в WMS == товаров `COMMITTED` ship-действий (`action_type=4`); TRACE — список подписанных действий одного отгруженного товара (`action_type`, `tx_hash`, `status`) |
 
-Один товар = **4** перехода (receiving → putaway → picking → shipping), каждый пишется в цепь
-отдельным событием. Подробная методика и результаты — в
+Один товар проходит **4** перехода (receiving → putaway → picking → shipping), но в цепь они
+уходят внутри подписанных действий: одно действие = много товаров (`warehouse_actions.item_ids`),
+одна `outbox_events`-строка на действие. Подробная методика и результаты — в
 [`../../docs/load-testing/stress-load-tests-full-report.md`](../../docs/load-testing/stress-load-tests-full-report.md).
 
 ---
@@ -53,10 +54,10 @@ fixtures в `/tmp` — их готовят обёртки (ниже).
 | Скрипт | Назначение |
 |---|---|
 | **`profile-e2e-cpu.sh`** | **канон.** Сквозной committed/backlog + **per-container CPU-split**; окна sustained / лучшее-30с / peak. Кнобы: `N_ITEMS`, `SKU_COUNT`, `PER_CP`, `SHIP_EVERY`, `PACE_RPS`, `CPU_SAMPLE`. |
-| `run-throughput.sh` | Сквозной bench 09 с тюном pool/adapter, фоновым DB-семплером наклона, дренажом back-half, consistency + on-chain trace (без CPU-split). |
+| `run-throughput.sh` | Сквозной bench 09 с тюном pool/adapter, фоновым DB-семплером наклона, дренажом back-half, consistency + действия одного отгруженного товара (без CPU-split). |
 | `profile-front.sh` | Паузит цепь (`docker pause`) → чистый фронт-потолок WMS (как в проде, где фронт и цепь на разных хостах). |
 | `profile-e2e.sh` | Committed end-to-end, цепь ON: держит ли весь конвейер ~1500/с с плоским backlog. |
-| `bench08.sh` / `bench-sustained.sh` | Блокчейн-слой изолированно: стоп adapter → набить Kafka N×5000 событий → дренаж при `BATCH_SIZE` → наклон = sustained chain-rate. |
+| `bench08.sh` / `bench-sustained.sh` | Блокчейн-слой изолированно: стоп adapter → набить Kafka N×5000 товаров подписанными действиями теста 08 → дренаж при `BATCH_SIZE` → наклон = sustained chain-rate. Счёт в товарах (`warehouse_actions.item_ids`), bin UUID — динамически, нужны операторы в `.signed/operators.json`. |
 | `reset-chain.sh` | Пересоздать **только** Subnet-EVM с genesis `targetGas=2B`, сохранив postgres (тюнинг+данные) и kafka. |
 | `basefee-sampler.sh` | Лог baseFee + gasUsedRatio каждые 4с в `/tmp/basefee.log` (доказывает fee-market фикс). |
 
@@ -90,7 +91,7 @@ N_ITEMS=150000 ./tests/stress/profile-e2e-cpu.sh 70
 > пулом **10** → Postgres простаивает → получите ~**1439/с** вместо 1924. Пул в 30 — это
 > «главный рычаг масштаба» из отчёта. Проверка: `docker exec wms-service env | grep WMS_DB_MAX_CONNS`.
 
-Предпосылки: `k6` на хосте, `foundry`/`cast` (для on-chain trace), стек `stresstest`
+Предпосылки: `k6` на хосте, `foundry`/`cast` (для газа по tx), стек `stresstest`
 поднят, применён `setup/stress-throughput-seed.sql` (обёртки делают это сами).
 
 ---
@@ -103,10 +104,67 @@ CPU: PostgreSQL 6.0 ядра (узкое место), блокчейн 1.6 яд�
 
 ---
 
+## Подписанный прогон (#20)
+
+Сквозной bench идёт через SIGNED API: каждый Receive/PutAway/Pick/Ship — это
+`draft → программная P-256 WebAuthn-подпись → submit` (`tests/stress/lib/signer.js`,
+байты 1-в-1 с `tests/e2e/softauthn_test.go`). Плейновых эндпоинтов стадий больше нет.
+
+Предпосылки: стек `stresstest` поднят, применён OLTP-тюнинг postgres
+(`setup/apply-postgres-tune.sh`), WMS поднят с `WMS_DB_MAX_CONNS=30` (см. ловушки выше);
+на хосте есть k6 и `cast`. Операторы с активными ключами готовятся отдельным инструментом
+(пишет `tests/stress/.signed/operators.json`, каталог не коммитится):
+
+```bash
+cd tests/e2e && COMPOSE_PROJECT_NAME=stresstest go run ./cmd/stress-provision -operators 70
+```
+
+`stress-provision` по умолчанию пишет в `<корень репо>/tests/stress/.signed` независимо от cwd
+(`-out` переопределяет). `profile-e2e-cpu.sh`, `run-throughput.sh` и `profile-e2e.sh`
+завершаются с exit 1, если там меньше VUS операторов.
+
+Проверка подписанта без стека (векторы `testdata/signed-actions/vectors.v1.json`):
+
+```bash
+k6 run tests/stress/signer-selftest.js
+```
+
+Прогон (число операторов в `operators.json` должно быть ≥ VUS):
+
+```bash
+N_ITEMS=150000 ./tests/stress/profile-e2e-cpu.sh 70
+```
+
+«Переход» теперь — товар подтверждённого (`COMMITTED`) подписанного действия, а не отдельная
+строка `onchain_events`: одно действие покрывает много товаров (`warehouse_actions.item_ids`).
+Потери и отказы — в секции `=== 8. losses ===`: rejected (`FAILED` + `reject_reason`),
+failed без `reject_reason` (tx не прошла / ошибка отправки), still pending — меряется после
+дренажа (`DRAIN_TIMEOUT_S`, по умолчанию 300с), поэтому должен быть 0.
+Газ в секции `=== 9. gas per item ===` — сумма gasUsed всех `COMMITTED` tx прогона на товары
+только `COMMITTED`-действий; товары отклонённых действий в знаменатель не входят.
+
+Сырые результаты (полный stdout + `e2e-live.log`, `e2e-cpu.log`, `e2e-k6.log`) складываются в
+`tests/stress/results/<UTC yyyymmdd-hhmmss>-<git sha>/`; каталог коммитится.
+
+---
+
 ## Функциональный набор (`01`–`08`)
 
 Пороговый набор: каждый тест бьёт отдельный эндпоинт/стадию и проверяет латентность и
 успешность под нагрузкой. Прогоняется целиком через `make stress` (см. ниже).
+
+Тесты `05`–`08` ходят в подписанный API: финальный вызов стадии — это пара
+`draft → P-256 WebAuthn-подпись → submit` (`lib/signedflow.js`). Поэтому им нужны
+операторы с ACTIVE-ключами из `tests/stress/.signed/operators.json` (один оператор на VU;
+сидовые `operator`/`stress-op-*` ключей не имеют). `make stress` их **не** готовит:
+
+```bash
+# 1. Стек с цепью уже поднят (subnet-node1/contract-deploy — профили test и stress)
+# 2. Операторы с активными ключами (с хоста, стек поднят):
+cd tests/e2e && go run ./cmd/stress-provision -operators 100
+# 3. Сюита (run-all.sh пропустит 05–08, если операторов < 100)
+make stress
+```
 
 | Файл | Описание | Executor | VUs | Итерации | Нужен seed? |
 |------|----------|----------|-----|----------|-------------|
@@ -114,10 +172,16 @@ CPU: PostgreSQL 6.0 ядра (узкое место), блокчейн 1.6 яд�
 | `02-health.js` | Стресс GET /health, до 200 VUs | ramping-vus | 200 | ∞ | Нет |
 | `03-auth.js` | Нагрузка на /auth/login + /auth/refresh | ramping-vus | 50+30 | ∞ | Нет |
 | `04-receiving-gate.js` | КПП-приёмка (scan-ttn → scan-cp × N-1 → accept) | shared-iterations | 50 | 2000 | **Да** |
-| `05-receiving-table.js` | Приёмка на столе (scan-cp → scan-box → … → close-cp) | shared-iterations | 60 | 2000 | **Да** |
-| `06-assembly.js` | Сборка заказов (allocate → tasks → pick → ship-buffer) | ramping-vus | 40 | ∞ | **Да** |
-| `07-full-flow.js` | Полный цикл receiving → putaway → assembly → shipping | shared-iterations | 30 | 2000 | **Да** |
-| `08-blockchain-tps.js` | Blockchain TPS: 5000 putaway-событий → outbox → pipeline | shared-iterations | 100 | 5000 | **Да** |
+| `05-receiving-table.js` | Приёмка на столе (scan-cp → scan-box → … → close-cp, подписанный close-cp) | shared-iterations | 60 | 2000 | **Да** |
+| `06-assembly.js` | Сборка заказов (allocate → tasks → pick → подписанный ship-buffer) | ramping-vus | 40 | ∞ | **Да** |
+| `07-full-flow.js` | Полный цикл receiving → putaway → assembly → shipping (4 подписанных перехода) | shared-iterations | 30 | 2000 | **Да** |
+| `08-blockchain-tps.js` | Blockchain TPS: 5000 подписанных putaway-действий → outbox → pipeline | shared-iterations | 100 | 5000 | **Да** |
+
+Тесты `06` и `08` готовят свои товары в `setup()` через подписанный receiving/putaway
+(`lib/bootstrap.js`): только что принятый товар имеет on-chain `Receive` (`Accepted`),
+и его `PutAway`/`Pick` — реальные переходы FSM, а не `WrongItemStatus`.
+Пул заказов каждого теста изолирован своим магазином (`STRESS-SHOP-06` / `STRESS-SHOP-07`),
+поэтому `allocate` не задевает dev-заказ `ORD-2026-0501` (`SHOP-5`) и чужие фикстуры.
 
 ### Запуск всех тестов одной командой (рекомендуется)
 
@@ -131,14 +195,15 @@ make stress-logs
 
 Команда выполняет:
 1. Сборку образа `k6-stress` (grafana/k6 + postgresql-client)
-2. Запуск всего стека (postgres, kafka, wms, debezium, …)
+2. Запуск всего стека (postgres, kafka, wms, debezium, …, цепь: профили `test` и `stress`)
 3. Ожидание готовности PostgreSQL и WMS
 4. Очистку предыдущих stress-данных (`stress-cleanup.sql`)
 5. Засев данных (`stress-seed.sql`)
-6. Генерацию JSON-файлов UUID грузомест и продуктов для SharedArray
+6. Генерацию JSON-файлов UUID грузомест для SharedArray
 7. Разрешение UUID ячеек/рейсов из БД
-8. Последовательный запуск тестов 01–08
-9. Мониторинг blockchain pipeline (+60 с после теста 08)
+8. Проверку операторов с ключами — без них 05–08 пропускаются
+9. Последовательный запуск тестов 01–08
+10. Мониторинг blockchain pipeline (+60 с после теста 08)
 
 Тест считается **выполненным**, если exit code контейнера равен нулю:
 ```bash
@@ -173,14 +238,14 @@ k6 run -e RECEIVING_BIN_ID=$RECEIVING_BIN_ID \
        -e "DISPATCH_CODE=$DISPATCH_CODE_07" \
        tests/stress/07-full-flow.js
 
-# Тест blockchain TPS (нужен seed + UUID продуктов)
+# Тест blockchain TPS (нужен seed + UUID грузомест; товары создаёт setup())
 docker exec -i postgres_db psql -U root -d wms_blockchain_db \
   < tests/stress/setup/stress-seed.sql
-# Генерация /tmp/stress-tps-products.json:
+# Генерация /tmp/stress-tps-cps.json:
 docker exec postgres_db psql -U root -d wms_blockchain_db \
-  -tAc "SELECT COALESCE(json_agg(product_id::text ORDER BY qr_code),'[]') \
-        FROM wms_inventory.products WHERE qr_code LIKE 'STRESS-TPS-QR-%'" \
-  | tr -d '[:space:]' > /tmp/stress-tps-products.json
+  -tAc "SELECT COALESCE(json_agg(cargoplace_id::text ORDER BY cargoplace_code),'[]') \
+        FROM wms_inventory.cargoplaces WHERE cargoplace_code LIKE 'STRESS-TPS-CP-%'" \
+  | tr -d '[:space:]' > /tmp/stress-tps-cps.json
 k6 run -e "WMS_URL=http://localhost:8080" \
        -e "RECEIVING_BIN_ID=<uuid-BUFFER-01>" \
        -e "STORAGE_BIN_ID=<uuid-A-01-01>" \
@@ -251,18 +316,23 @@ CONTRACT_ADDR=0xYourContractAddress
 ### Blockchain TPS: двухуровневое измерение (тест 08)
 
 ```
-k6 → WMS API → Postgres + outbox_events   ← синхронно (k6 измеряет event/s)
+k6 → WMS API → Postgres (warehouse_actions + outbox)   ← синхронно (k6 и run-all.sh считают товары)
                       ↓ (асинхронно)
 Debezium → Kafka → ledger-adapter → Subnet-EVM → onchain_events
-                      ↑ run-all.sh измеряет COMMITTED rate через +60 с после теста
+                      ↑ run-all.sh измеряет COMMITTED items через +60 с после теста
 ```
+
+Единица измерения — **товары**, а не строки outbox: одно подписанное действие пишет одну
+outbox-строку на много товаров (`warehouse_actions.item_ids`). В тесте 08 одно действие =
+один товар, поэтому число действий = число товаров.
 
 | Слой | Метрика | Где измеряется |
 |------|---------|----------------|
-| WMS event rate | `delta(outbox_events) / test_duration` | `run-all.sh` (psql) |
-| Blockchain commit rate | `delta(onchain_events WHERE status='COMMITTED') / elapsed` | `run-all.sh` (psql, +60 с) |
-| WMS p95 latency | `http_req_duration{step:scan_storage_bin}` p95 < 500 мс | k6 threshold |
-| Успешность | `outbox_events_generated` count ≥ 4750 (≥95% из 5000) | k6 Counter threshold |
+| WMS item rate | `delta(sum(cardinality(item_ids)) WHERE submitted_at IS NOT NULL) / test_duration` | `run-all.sh` (psql), «товаров/с» |
+| Blockchain commit rate | `delta(sum(cardinality(item_ids)) JOIN onchain_events ON event_id=action_id WHERE status='COMMITTED') / elapsed` | `run-all.sh` (psql, +60 с), «товаров/с» |
+| Backlog | `outbox_events` без строки в `onchain_events` по `event_id` (события) | `run-all.sh` (psql) |
+| WMS p95 latency | `http_req_duration{step:scan_storage_bin}` p95 < 500 мс (draft+submit) | k6 threshold |
+| Успешность | `items_placed` count ≥ 4750 (≥95% из 5000 товаров) | k6 Counter threshold |
 
 Теоретический потолок blockchain pipeline при дефолте: `batch_size=10`, `batch_timeout=100 мс`
 → ~100 батчей/с → ~1000 событий/с при одном подписанте. Конвейер (`PIPELINE_WINDOW`,
@@ -275,11 +345,16 @@ Debezium → Kafka → ledger-adapter → Subnet-EVM → onchain_events
 | TTN поставки | `STRESS-TTN-*` | 2000 | 04 |
 | КПП-грузоместа | `STRESS-CP-*` | 6000 (3 на TTN) | 04 |
 | Стол-грузоместа | `STRESS-TABLE-CP-*` | 2000 | 05 |
+| ASM-грузоместа (товары создаёт setup) | `STRESS-ASM-CP-*` | 100 (×10 товаров) | 06 |
+| NEW-заказы STRESS-SHOP-06 | `STRESS-ORD-*` | 1000 | 06 |
 | FLOW-грузоместа | `STRESS-FLOW-CP-*` | 2000 | 07 |
-| STORED-продукты (SHOP-7) | `STRESS-SKU-*` | 1000 продуктов | 06 |
-| NEW-заказы SHOP-7 | `STRESS-ORD-*` | 1000 | 06 |
-| NEW-заказы SHOP-5 | `STRESS-FLOW-ORD-*` | 1000 | 07 |
-| RECEIVED-продукты (TPS) | `STRESS-TPS-QR-*` | 5000 | 08 |
+| NEW-заказы STRESS-SHOP-07 | `STRESS-FLOW-ORD-*` | 2000 | 07 |
+| TPS-грузоместа (товары создаёт setup) | `STRESS-TPS-CP-*` | 500 (×10 товаров) | 08 |
+
+Пул `06`/`08` — грузоместа в `RECEIVED_AT_GATE`: товары создаёт `setup()` теста через
+receiving table и подписанные `close-cargoplace`/`scan-storage-bin` (`06` ещё и ставит их
+на склад). Прямой `INSERT` в `products` оставлял бы их на контракте в `Status.None` -
+и `PutAway`/`Pick` для них отклоняются.
 
 Все паттерны `STRESS-*` покрываются `stress-cleanup.sql` — очистка полностью сбрасывает пулы.
 
@@ -296,6 +371,6 @@ Debezium → Kafka → ledger-adapter → Subnet-EVM → onchain_events
 | Receiving gate p95 | < 250 мс |
 | Full flow (receiving+putaway+assembly+shipping) | p95 < 1500–500 мс по шагу |
 | Putaway scan-storage-bin p95 (TPS) | < 500 мс |
-| `outbox_events_generated` (тест 08) | count ≥ 4750 (≥95% из 5000) |
-| WMS event rate (тест 08) | > 500 событий/с |
+| `items_placed` (тест 08) | count ≥ 4750 (≥95% из 5000 товаров) |
+| WMS item rate (тест 08) | > 500 товаров/с |
 | Blockchain commit rate (после теста 08, +60 с) | определяется конфигом ledger-adapter |

@@ -10,8 +10,9 @@ import {
 } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
 import type { IconSvgElement } from '@hugeicons/react'
-import { Link } from 'react-router'
+import { Link, Navigate } from 'react-router'
 
+import { useSessionStore } from '@/entities/session'
 import { routes } from '@/shared/config'
 
 type QuickAction = {
@@ -67,6 +68,12 @@ const quickActions: QuickAction[] = [
 ]
 
 export function HomePage() {
+  const role = useSessionStore((state) => state.user?.role)
+
+  if (role === 'AUDITOR') {
+    return <Navigate to={routes.audit} replace />
+  }
+
   return (
     <div className="mx-auto w-full max-w-6xl space-y-8">
       <section className="relative overflow-hidden rounded-2xl bg-primary px-8 py-10 text-primary-foreground shadow-card">

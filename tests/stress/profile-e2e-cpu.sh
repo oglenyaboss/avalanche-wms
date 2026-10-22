@@ -1,13 +1,15 @@
 #!/bin/bash
-# profile-e2e-cpu.sh — instrumented clean e2e: committed/backlog table + PER-CONTAINER CPU split.
+# profile-e2e-cpu.sh — instrumented clean e2e: committed-items/backlog table + PER-CONTAINER CPU split.
 # Goal: see EXACTLY where the 10 cores go during a co-resident run, so we pick the right lever
 # (front scan-overhead vs chain vs kafka/debezium vs k6-host tax) to push sustained committed→1500.
+# Run goes through the SIGNED API (draft → P-256 software signature → submit); the metric unit
+# is item transitions of COMMITTED signed actions (see section 8 for per-action losses).
 #
 # Usage: ./profile-e2e-cpu.sh [VUS]   env: SKU_COUNT=70 N_ITEMS=24000
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
 export PATH="$HOME/.foundry/bin:$PATH"
-export COMPOSE_PROJECT_NAME=stresstest
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-stresstest}"
 
 VUS="${1:-70}"; SKU_COUNT="${SKU_COUNT:-70}"; N_ITEMS="${N_ITEMS:-24000}"
 PER_CP="${PER_CP:-10}"                       # товаров на грузоместо (реалистичная паллета)
@@ -20,6 +22,22 @@ QR="STRESS-QR-TPUT-%"
 PSQL(){ docker exec postgres_db psql -U root -d wms_blockchain_db -tAc "$1" 2>/dev/null | tr -d '[:space:]'; }
 RAW(){  docker exec postgres_db psql -U root -d wms_blockchain_db -tAc "$1" 2>/dev/null; }
 CONTAINERS="postgres_db wms-service kafka debezium-connect ledger-adapter subnet-node1"
+
+# Сырые результаты прогона: весь stdout + логи семплеров и k6 (коммитятся).
+OUT="tests/stress/results/$(date -u +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)"
+mkdir -p "$OUT"
+exec > >(tee "$OUT/summary.txt") 2>&1
+
+# Операторы с активными ключами — prerequisite подписанного прогона (#20).
+OPS_FILE="tests/stress/.signed/operators.json"
+if [ ! -s "$OPS_FILE" ]; then
+  echo "нет $OPS_FILE — run: cd tests/e2e && go run ./cmd/stress-provision -operators $VUS" >&2
+  exit 1
+fi
+if [ "$(grep -o '"username"' "$OPS_FILE" | wc -l)" -lt "$VUS" ]; then
+  echo "в $OPS_FILE меньше $VUS операторов — run: cd tests/e2e && go run ./cmd/stress-provision -operators $VUS" >&2
+  exit 1
+fi
 
 echo "######## E2E+CPU — VUS=$VUS SKU=$SKU_COUNT ITEMS=$N_ITEMS PER_CP=$PER_CP CP=$N_CP adapter=$BATCH_SIZE/$BATCH_TIMEOUT/$PIPELINE_WINDOW ########"
 
@@ -57,19 +75,19 @@ RAW "SELECT COALESCE(json_agg(j ORDER BY code),'[]') FROM (
   WHERE d.code LIKE 'SHOP-T%') sub" > /tmp/stress-tput-dests.json
 echo "  RECV=$RECV STOR=$STOR | dests: $(grep -o destinationId /tmp/stress-tput-dests.json | wc -l | tr -d ' ')"
 
-echo "=== 3. baseline ==="
-OC_BASE=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='COMMITTED'")
-OB_BASE=$(PSQL "SELECT count(*) FROM public.outbox_events")
-echo "  committed_base=$OC_BASE outbox_base=$OB_BASE"
+echo "=== 3. baseline (item transitions) ==="
+OC_BASE=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED'")
+GEN_BASE=$(PSQL "SELECT COALESCE(sum(cardinality(item_ids)),0) FROM public.warehouse_actions WHERE submitted_at IS NOT NULL")
+echo "  committed_items_base=$OC_BASE generated_items_base=$GEN_BASE"
 
-echo "=== 4. run + committed sampler (4s) + CPU sampler (2s) ==="
+echo "=== 4. run + committed-items sampler (4s) + CPU sampler (2s) ==="
 : > /tmp/e2e-live.log; : > /tmp/e2e-cpu.log
-# committed/backlog sampler
+# committed items / generated items / backlog sampler (единица — переходы товаров)
 ( for i in $(seq 1 400); do
     ts=$(date +%s)
-    comm=$(PSQL "SELECT count(*) FROM public.onchain_events WHERE status='COMMITTED'")
-    outb=$(PSQL "SELECT count(*) FROM public.outbox_events")
-    echo "$ts,$((comm-OC_BASE)),$((outb-OB_BASE)),$((outb-OB_BASE-(comm-OC_BASE)))" >> /tmp/e2e-live.log
+    comm=$(PSQL "SELECT COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED'")
+    gen=$(PSQL "SELECT COALESCE(sum(cardinality(item_ids)),0) FROM public.warehouse_actions WHERE submitted_at IS NOT NULL")
+    echo "$ts,$((comm-OC_BASE)),$((gen-GEN_BASE)),$((gen-GEN_BASE-(comm-OC_BASE)))" >> /tmp/e2e-live.log
     sleep 4
   done ) & SLPID=$!
 # CPU sampler: per-container docker stats + k6 host cpu (optional — CPU_SAMPLE=0 to skip for a lean run)
@@ -88,35 +106,73 @@ RUN_START=$(date +%s)
 k6 run --no-usage-report --quiet \
   -e VUS="$VUS" -e ITERS="$ITERS" -e MAX_DURATION="$MAX_DURATION" \
   -e PICK_BATCH="$PICK_BATCH" -e ALLOC_EVERY="$ALLOC_EVERY" -e THINK_MS=0 \
-  -e SKU_COUNT="$SKU_COUNT" -e PRODUCTS_PER_CP="$PER_CP" -e SHIP_EVERY="${SHIP_EVERY:-4}" -e OPERATOR_COUNT="$VUS" \
+  -e SKU_COUNT="$SKU_COUNT" -e PRODUCTS_PER_CP="$PER_CP" -e SHIP_EVERY="${SHIP_EVERY:-4}" \
   -e PACE_RPS="${PACE_RPS:-0}" -e PACE_DURATION="${PACE_DURATION:-150s}" \
   -e RECEIVING_BIN_ID="$RECV" -e STORAGE_BIN_ID="$STOR" \
   tests/stress/09-throughput.js > /tmp/e2e-k6.log 2>&1
 RUN_END=$(date +%s); WALL=$((RUN_END-RUN_START))
 echo "  k6 wall: ${WALL}s"
-grep -iE "tput_items_stored|tput_items_picked|iterations\.\.|http_req_failed|teardown:" /tmp/e2e-k6.log | head -8
-{ kill $SLPID $CPUPID; } 2>/dev/null
+grep -iE "tput_items_stored|tput_items_picked|tput_items_shipped|iterations\.\.|http_req_failed|teardown:" /tmp/e2e-k6.log | head -8
+# CPU-сплит считается по окну k6 — CPU-семплер останавливаем здесь. Живой семплер
+# (committed/generated/backlog) крутим дальше, пока дренируется хвост: без строк ПОСЛЕ
+# конца генерации секция 6 не отличит конец генерации от конца лога.
+kill $CPUPID 2>/dev/null
 
-echo "=== 5. committed table ==="
-awk -F, 'NR==1{t0=$1} { rel=$1-t0; printf "  +%-3ss  committed=%-7s generated=%-7s backlog=%-7s\n", rel, $2, $3, $4 }' /tmp/e2e-live.log
+# Дренаж: ждём, пока ни одно действие, отправленное с RUN_START, не осталось в
+# PENDING/SENT и ни у одного нет строки в onchain_events (иначе потери в секции 8 — врём).
+DRAIN_TIMEOUT_S="${DRAIN_TIMEOUT_S:-300}"
+echo "  дренаж хвоста (poll 5s, таймаут ${DRAIN_TIMEOUT_S}s)…"
+DRAIN_START=$(date +%s); DRAIN_SECS=0; DRAIN_PENDING=0
+while :; do
+  DRAIN_PENDING=$(PSQL "SELECT count(*) FROM public.warehouse_actions wa LEFT JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE wa.submitted_at IS NOT NULL AND wa.created_at >= to_timestamp($RUN_START) AND (oe.event_id IS NULL OR oe.status IN ('PENDING','SENT'))")
+  DRAIN_SECS=$(( $(date +%s) - DRAIN_START ))
+  if [ "${DRAIN_PENDING:-1}" -le 0 ]; then echo "  drain: ok за ${DRAIN_SECS}s"; break; fi
+  if [ "$DRAIN_SECS" -ge "$DRAIN_TIMEOUT_S" ]; then echo "  drain: timeout, pending=$DRAIN_PENDING"; break; fi
+  sleep 5
+done
+DRAIN_DONE_TS=$(date +%s)
+kill $SLPID 2>/dev/null
 
-echo "=== 6. committed-rate during run ==="
+echo "=== 5. committed items table ==="
+awk -F, 'NR==1{t0=$1} { rel=$1-t0; printf "  +%-3ss  committed_items=%-9s generated_items=%-9s backlog=%-7s\n", rel, $2, $3, $4 }' /tmp/e2e-live.log
+
+echo "=== 6. committed-items rate during run ==="
 # (a) полное окно (с рампой) — как раньше, для сопоставимости
 awk -F, -v rs="$RUN_START" -v wall="$WALL" '
   $1<=rs+wall { if(first=="" && $2>0){first=$2; ft=$1} last=$2; lt=$1 }
-  END{ if(lt>ft && first!="") printf "  committed-rate (всё окно, вкл. прогрев): %.0f /s (%d→%d за %dс)\n",(last-first)/(lt-ft),first,last,lt-ft }' /tmp/e2e-live.log
+  END{ if(lt>ft && first!="") printf "  committed-items rate (всё окно, вкл. прогрев): %.0f /s (%d→%d за %dс)\n",(last-first)/(lt-ft),first,last,lt-ft }' /tmp/e2e-live.log
 # (b) УСТОЙЧИВОЕ окно: пропускаем первые WARMUP с (чейн заполняет pipeline-окно ~15с),
-#     конец = конец генерации (rel<=WALL). Это и есть честный sustained committed.
+#     конец = конец k6 (rel<=WALL). Прежнее определение — для сопоставимости.
 WARMUP="${WARMUP:-20}"
 awk -F, -v rs="$RUN_START" -v wall="$WALL" -v wu="$WARMUP" '
   { rel=$1-rs }
   rel>=wu && rel<=wall { if(first==""){first=$2; ft=$1} last=$2; lt=$1 }
-  END{ if(lt>ft) printf "  committed-rate (sustained, после +%dс прогрева): %.0f /s (%d→%d за %dс)\n",wu,(last-first)/(lt-ft),first,last,lt-ft }' /tmp/e2e-live.log
+  END{ if(lt>ft) printf "  committed-items rate (sustained как в прежнем замере, +%dс … конец k6 вкл. teardown): %.0f /s (%d→%d за %dс)\n",wu,(last-first)/(lt-ft),first,last,lt-ft }' /tmp/e2e-live.log
 # (c) лучшее непрерывное 30с-окно (скользящее) — для «видно ≥1500»
 awk -F, -v rs="$RUN_START" -v wall="$WALL" '
   $1<=rs+wall { ts[n]=$1; cm[n]=$2; n++ }
-  END{ best=0; for(i=0;i<n;i++){ for(j=i+1;j<n;j++){ if(ts[j]-ts[i]>=28 && ts[j]-ts[i]<=34){ r=(cm[j]-cm[i])/(ts[j]-ts[i]); if(r>best)best=r } } } if(best>0) printf "  committed-rate (лучшее ~30с-окно): %.0f /s\n",best }' /tmp/e2e-live.log
-awk -F, 'NR>1{ if(p!=""){ d=$2-p; dt=$1-pt; if(dt>0){r=d/dt; if(r>mx)mx=r} } p=$2; pt=$1 } END{ printf "  peak committed-rate (одно окно): %.0f /s\n", mx }' /tmp/e2e-live.log
+  END{ best=0; for(i=0;i<n;i++){ for(j=i+1;j<n;j++){ if(ts[j]-ts[i]>=28 && ts[j]-ts[i]<=34){ r=(cm[j]-cm[i])/(ts[j]-ts[i]); if(r>best)best=r } } } if(best>0) printf "  committed-items rate (лучшее ~30с-окно): %.0f /s\n",best }' /tmp/e2e-live.log
+awk -F, 'NR>1{ if(p!=""){ d=$2-p; dt=$1-pt; if(dt>0){r=d/dt; if(r>mx)mx=r} } p=$2; pt=$1 } END{ printf "  peak committed-items rate (одно окно): %.0f /s\n", mx }' /tmp/e2e-live.log
+# (d) конец генерации = первая строка семплера, после которой `generated` уже не растёт.
+#     Ставки за окно (+WARMUP … конец генерации) и дренаж бэклога после него — тот же лог.
+if [ -s /tmp/e2e-live.log ]; then
+  read -r GEN_END_TS GEN_END_ROW LIVE_ROWS <<< "$(awk -F, 'NR>1{ if($3>prev){ge=$1; gr=NR} prev=$3 } END{ if(ge==""){ge=$1; gr=NR} print ge+0, gr+0, NR+0 }' /tmp/e2e-live.log)"
+  if [ "$GEN_END_ROW" -ge "$LIVE_ROWS" ]; then
+    echo "  конец генерации: не наблюдался — generated ещё рос на последней строке лога (+$((GEN_END_TS-RUN_START))с), окно генерации = лог целиком"
+  else
+    echo "  конец генерации: +$((GEN_END_TS-RUN_START))с (строка семплера $GEN_END_ROW из $LIVE_ROWS, generated после неё не растёт)"
+  fi
+  awk -F, -v rs="$RUN_START" -v gends="$GEN_END_TS" -v wu="$WARMUP" '
+    { rel=$1-rs }
+    $1<=gends && rel>=wu { if(first==""){first=$2; ft=$1} last=$2; lt=$1 }
+    END{ if(lt>ft) printf "  committed-items rate за окно генерации (+%dс … конец генерации): %.0f /s (%d→%d за %dс)\n",wu,(last-first)/(lt-ft),first,last,lt-ft }' /tmp/e2e-live.log
+  awk -F, -v rs="$RUN_START" -v gends="$GEN_END_TS" -v wu="$WARMUP" '
+    { rel=$1-rs }
+    $1<=gends && rel>=wu { if(first==""){first=$3; ft=$1} last=$3; lt=$1 }
+    END{ if(lt>ft) printf "  generated-items rate за то же окно: %.0f /s (%d→%d за %dс)\n",(last-first)/(lt-ft),first,last,lt-ft }' /tmp/e2e-live.log
+  DRAIN_AFTER_GEN=$(( DRAIN_DONE_TS - GEN_END_TS )); [ "$DRAIN_AFTER_GEN" -lt 0 ] && DRAIN_AFTER_GEN=0
+  echo "  дренаж бэклога после конца генерации: ${DRAIN_AFTER_GEN} с (последний backlog=$(awk -F, 'END{print $4}' /tmp/e2e-live.log) товаров)"
+fi
 
 echo "=== 7. CPU split (avg over steady window, skip first 20s ramp) — % of one core; box=1000% ==="
 awk -F';' -v rs="$RUN_START" -v wall="$WALL" '
@@ -132,4 +188,61 @@ awk -F';' -v rs="$RUN_START" -v wall="$WALL" '
     printf "  %-18s %6.0f%%  (%.1f cores)  [box=1000%%]\n","TOTAL",total,total/100
     printf "  samples=%d over steady window\n", n
   }' /tmp/e2e-cpu.log
+
+echo "=== 8. losses ==="
+echo "  окно: warehouse_actions.created_at >= to_timestamp($RUN_START)"
+ACTIONS_SUBMITTED=$(PSQL "SELECT count(*) FROM public.warehouse_actions WHERE submitted_at IS NOT NULL AND created_at >= to_timestamp($RUN_START)")
+ACTIONS_COMMITTED=$(PSQL "SELECT count(*) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED' AND wa.created_at >= to_timestamp($RUN_START)")
+ACTIONS_REJECTED=$(PSQL "SELECT count(*) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='FAILED' AND oe.reject_reason IS NOT NULL AND wa.created_at >= to_timestamp($RUN_START)")
+ACTIONS_FAILED=$(PSQL "SELECT count(*) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='FAILED' AND oe.reject_reason IS NULL AND wa.created_at >= to_timestamp($RUN_START)")
+ACTIONS_PENDING=$(PSQL "SELECT count(*) FROM public.warehouse_actions wa LEFT JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE wa.submitted_at IS NOT NULL AND wa.created_at >= to_timestamp($RUN_START) AND (oe.event_id IS NULL OR oe.status IN ('PENDING','SENT'))")
+echo "  submitted: $ACTIONS_SUBMITTED | COMMITTED: $ACTIONS_COMMITTED | rejected (reject_reason): $ACTIONS_REJECTED | failed без reject_reason (tx не прошла / ошибка отправки): $ACTIONS_FAILED | still pending: $ACTIONS_PENDING"
+echo "  items committed по типам действий:"
+RAW "SELECT wa.action_type, count(*), COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.warehouse_actions wa JOIN public.onchain_events oe ON oe.event_id = wa.action_id WHERE oe.status='COMMITTED' AND wa.created_at >= to_timestamp($RUN_START) GROUP BY wa.action_type ORDER BY wa.action_type" \
+  | awk -F'|' '{ name=($1==1?"receive":$1==2?"putaway":$1==3?"pick":$1==4?"ship":"?"); printf "    %s (type %s): actions=%s items=%s\n", name, $1, $2, $3 }'
+
+echo "=== 9. gas per item ==="
+if ! command -v cast >/dev/null 2>&1; then
+  echo "  cast не найден (foundry) — секция пропущена"
+else
+  # RPC — как в run-throughput.sh/reset-chain.sh: URL из shared-тома (его пишет subnet-init),
+  # хост-адрес вместо subnet-node1 (в образе adapter distroless — без cat/shell).
+  RPC_VOL="${COMPOSE_PROJECT_NAME}_shared_state"
+  RPC="${RPC_URL:-$(docker run --rm -v "${RPC_VOL}:/s" busybox cat /s/rpc_url.txt 2>/dev/null | tr -d '[:space:]' | sed 's#subnet-node1:9650#localhost:9650#')}"
+  if [ -z "$RPC" ]; then
+    echo "  RPC не определён (RPC_URL или shared_state/rpc_url.txt) — секция пропущена"
+  else
+    # Все COMMITTED-действия прогона, сгруппированные по tx (один tx несёт много действий),
+    # и их товары — знаменатель gas/item. Не COMMITTED сюда не попадает.
+    declare -A TX_ITEMS=() TX_ACTS=(); TX_ORDER=()
+    ITEMS_TOTAL=0
+    while IFS='|' read -r tx acts items; do
+      [ -z "$tx" ] && continue
+      TX_ITEMS[$tx]=${items:-0}; TX_ACTS[$tx]=${acts:-0}; TX_ORDER+=("$tx")
+      ITEMS_TOTAL=$(( ITEMS_TOTAL + ${items:-0} ))
+    done < <(RAW "SELECT oe.tx_hash, count(*), COALESCE(sum(cardinality(wa.item_ids)),0) FROM public.onchain_events oe JOIN public.warehouse_actions wa ON wa.action_id = oe.event_id WHERE oe.status='COMMITTED' AND oe.tx_hash IS NOT NULL AND wa.created_at >= to_timestamp($RUN_START) GROUP BY oe.tx_hash ORDER BY oe.tx_hash")
+    if [ "${#TX_ORDER[@]}" -eq 0 ]; then
+      echo "  нет COMMITTED tx за прогон"
+    else
+      GAS_TOTAL=0; GAS_TXS=0; GAS_MISSING=0; SAMPLE=0
+      for tx in "${TX_ORDER[@]}"; do
+        gas=$(cast receipt "$tx" gasUsed --rpc-url "$RPC" 2>/dev/null | tr -d '[:space:]')
+        if [ -z "$gas" ]; then GAS_MISSING=$((GAS_MISSING+1)); continue; fi
+        GAS_TOTAL=$(( GAS_TOTAL + gas )); GAS_TXS=$((GAS_TXS+1))
+        if [ "$SAMPLE" -lt 10 ]; then
+          printf "  tx %s…: gas=%s actions=%s items=%s gas/item=%.0f\n" "${tx:0:18}" "$gas" "${TX_ACTS[$tx]}" "${TX_ITEMS[$tx]}" "$(awk -v g="$gas" -v i="${TX_ITEMS[$tx]}" 'BEGIN{printf "%.0f", (i>0?g/i:0)}')"
+          SAMPLE=$((SAMPLE+1))
+        fi
+      done
+      REJECTED_IN_TXS=$(PSQL "SELECT count(*) FROM public.onchain_events oe JOIN public.warehouse_actions wa ON wa.action_id = oe.event_id WHERE oe.status='FAILED' AND oe.reject_reason IS NOT NULL AND oe.tx_hash IS NOT NULL AND wa.created_at >= to_timestamp($RUN_START) AND oe.tx_hash IN (SELECT DISTINCT oe2.tx_hash FROM public.onchain_events oe2 JOIN public.warehouse_actions wa2 ON wa2.action_id = oe2.event_id WHERE oe2.status='COMMITTED' AND oe2.tx_hash IS NOT NULL AND wa2.created_at >= to_timestamp($RUN_START))")
+      printf "  txs=%d gas=%d items=%d gas/item=%.0f\n" "$GAS_TXS" "$GAS_TOTAL" "$ITEMS_TOTAL" "$(awk -v g="$GAS_TOTAL" -v i="$ITEMS_TOTAL" 'BEGIN{printf "%.0f", (i>0?g/i:0)}')"
+      echo "  отклонено действий в этих tx: ${REJECTED_IN_TXS:-0} (их товары не в знаменателе)"
+      if [ "$GAS_MISSING" -gt 0 ]; then echo "  gasUsed недоступен для $GAS_MISSING tx (RPC=$RPC) — в total не вошли"; fi
+    fi
+  fi
+fi
+
+echo "=== 10. raw results ==="
+cp /tmp/e2e-live.log /tmp/e2e-cpu.log /tmp/e2e-k6.log "$OUT/" 2>/dev/null
+echo "  RAW RESULTS: $OUT (summary.txt, e2e-live.log, e2e-cpu.log, e2e-k6.log)"
 echo "######## DONE ########"

@@ -1,7 +1,9 @@
 .PHONY: help up down build logs lint test tidy vendor init migrate seed e2e-test-outbound \
-        stress stress-logs stress-smoke stress-health stress-auth stress-receiving stress-full
+        stress stress-logs stress-smoke stress-health stress-auth stress-receiving stress-full \
+        kms-up kms-down kms-logs registry-cli
 
-COMPOSE := docker compose
+COMPOSE ?= docker compose
+COMPOSE_KMS := docker compose -f docker-compose.yaml -f docker-compose.kms.yaml
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -55,9 +57,9 @@ lint: lint-wms lint-ledger ## Lint all Go code
 test: test-wms test-ledger ## Run all tests
 
 e2e-test-outbound: ## Run full outbound WMS API -> DB -> Kafka -> chain e2e test
-	# RPC_URL не задаём: TestMain резолвит динамический Subnet-EVM RPC
-	# (/ext/bc/<blockchainID>/rpc) из тома shared_state.
-	cd tests/e2e && go test -tags=e2e -count=1 -timeout=15m ./...
+	# RPC_URL снимаем (include .env ниже экспортирует его во все цели): TestMain
+	# резолвит динамический Subnet-EVM RPC (/ext/bc/<blockchainID>/rpc) из тома shared_state.
+	cd tests/e2e && env -u RPC_URL go test -tags=e2e -count=1 -timeout=40m ./...
 
 tidy: tidy-wms tidy-ledger ## Tidy all go.mod
 
@@ -91,9 +93,9 @@ endif
 .PHONY: register-connector connector-status delete-connector
 
 register-connector:
-	@curl -X POST http://localhost:8083/connectors \
-  		-H "Content-Type: application/json" \
-  		-d @deploy/debezium/connectors/postgres-connector.json
+	@CONNECT_URL=http://localhost:8083 \
+		CONNECTOR_JSON=deploy/debezium/connectors/postgres-connector.json \
+		sh deploy/debezium/register-connector.sh
 
 connector-status:
 	@curl http://localhost:8083/connectors/outbox-connector/status
@@ -101,16 +103,36 @@ connector-status:
 delete-connector:
 	@curl -X DELETE http://localhost:8083/connectors/outbox-connector
 
-stress: ## Run all stress tests 01–07 in Docker (seeds DB automatically)
+stress: ## Run all stress tests 01–08 in Docker (seeds DB; provision operators first: cd tests/e2e && go run ./cmd/stress-provision -operators 100)
 	$(COMPOSE) --profile stress build k6
 	$(COMPOSE) --profile stress up -d
 	@echo ""
 	@echo "Stress tests running in background."
+	@echo "Tests 05–08 need operators with active keys — provision them first"
+	@echo "(make stress does not provision): cd tests/e2e && go run ./cmd/stress-provision -operators 100"
 	@echo "Follow progress : make stress-logs"
 	@echo "Stop container  : docker compose --profile stress stop k6"
 
 stress-logs: ## Tail k6 stress test output
 	$(COMPOSE) logs -f k6
+
+# ── KMS (issue #7: ключ адаптера во внешнем Web3Signer) ───
+kms-up: ## Start stack with adapter signing via external KMS (Web3Signer)
+	$(COMPOSE_KMS) --profile test up -d --build
+	@echo ""
+	@echo "KMS stack running: ledger-adapter signs via web3signer."
+	@echo "Follow logs  : make kms-logs"
+	@echo "NOTE: стеки репо монопольны (container_name глобальны) — сначала погасите"
+	@echo "      стеки других worktree-ов (make down там)."
+
+kms-down: ## Stop the KMS stack (keys volume survives)
+	$(COMPOSE_KMS) --profile test down
+
+kms-logs: ## Tail ledger-adapter + web3signer logs
+	$(COMPOSE_KMS) logs -f ledger-adapter web3signer
+
+registry-cli: ## CLI владельца консорциума: make registry-cli ARGS="list"
+	$(COMPOSE) run --rm --no-deps --entrypoint /registry-cli -e OWNER_KEY_FILE=/shared/deployer_key.txt -v "$(CURDIR):/work:ro" -w /work ledger-adapter $(ARGS)
 
 stress-smoke: ## Smoke test (1 VU, local k6 required)
 	k6 run tests/stress/01-smoke.js

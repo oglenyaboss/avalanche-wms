@@ -61,10 +61,6 @@ type scanBufferRequest struct {
 	BufferBinID  string `json:"buffer_bin_id"`
 }
 
-type closeCargoplaceRequest struct {
-	CargoplaceID string `json:"cargoplace_id"`
-}
-
 type envelope struct {
 	Success bool       `json:"success"`
 	Data    any        `json:"data"`
@@ -90,7 +86,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/table/scan-qr", h.ScanQR).Methods(http.MethodPost)
 	router.HandleFunc("/table/close-box", h.CloseBox).Methods(http.MethodPost)
 	router.HandleFunc("/table/scan-buffer", h.ScanBuffer).Methods(http.MethodPost)
-	router.HandleFunc("/table/close-cargoplace", h.CloseCargoplace).Methods(http.MethodPost)
+	router.HandleFunc("/table/close-cargoplace/draft", h.DraftCloseCargoplace).Methods(http.MethodPost)
+	router.HandleFunc("/table/close-cargoplace/submit", h.SubmitCloseCargoplace).Methods(http.MethodPost)
 }
 
 // ScanTTN processes the scanning of a TTN code, updating shipment status and returning shipment details.
@@ -365,36 +362,6 @@ func (h *Handler) ScanBuffer(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, http.StatusOK, result)
 }
 
-// CloseCargoplace finalizes the receiving process for a cargoplace,
-// returning the received-vs-expected summary and closing the cargoplace.
-func (h *Handler) CloseCargoplace(w http.ResponseWriter, r *http.Request) {
-	operatorID, ok := httputil.RequireOperator(w, r)
-	if !ok {
-		return
-	}
-
-	var req closeCargoplaceRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Невалидный JSON в теле запроса")
-		return
-	}
-
-	cargoplaceID, err := uuid.Parse(req.CargoplaceID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "cargoplace_id должен быть UUID")
-		return
-	}
-
-	result, err := h.svc.CloseCargoplace(r.Context(), operatorID, cargoplaceID)
-	if err != nil {
-		status, code, message := mapServiceError(err)
-		writeError(w, status, code, message)
-		return
-	}
-
-	writeSuccess(w, http.StatusOK, result)
-}
-
 // mapServiceError maps internal service errors to appropriate HTTP status codes and API error responses.
 func mapServiceError(err error) (status int, code, message string) {
 	switch {
@@ -416,6 +383,10 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "CARGOPLACE_NOT_RECEIVED_AT_GATE", "Грузоместо не в статусе RECEIVED_AT_GATE"
 	case errors.Is(err, ErrCargoplaceNotInProgress):
 		return http.StatusConflict, "CARGOPLACE_NOT_IN_PROGRESS", "Грузоместо не в статусе TABLE_IN_PROGRESS"
+	case errors.Is(err, ErrCargoplaceEmpty):
+		return http.StatusConflict, "CARGOPLACE_EMPTY", "В грузоместе нет принятых товаров для подтверждения"
+	case errors.Is(err, ErrDraftStale):
+		return http.StatusConflict, "DRAFT_STALE", "Состав грузоместа изменился, подтвердите закрытие заново"
 	case errors.Is(err, ErrBoxNotFound):
 		return http.StatusNotFound, "BOX_NOT_FOUND", "Коробка не найдена"
 	case errors.Is(err, ErrBoxNotOpen):

@@ -25,6 +25,8 @@ func TestShipping_DoubleShip_Conflict(t *testing.T) {
 
 	const productCount = 2
 	token := operatorToken(t, env)
+	// #14: the unload is a signed action, so the picking operator is a signed one.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", productCount, productCount)
 
 	// Allocate and pick all products.
@@ -37,18 +39,19 @@ func TestShipping_DoubleShip_Conflict(t *testing.T) {
 	orderProductIDs := productIDsForOrder(t, ctx, env, fx.OrderID)
 	require.Len(t, orderProductIDs, productCount)
 	for _, pid := range orderProductIDs {
-		postJSON[pickData](t, env, token, "/assembly/pick", map[string]string{
+		postJSON[pickData](t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, nil)
 	}
 
-	// Place into shipping buffer.
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	// Unload the basket into the shipping buffer.
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 	require.Equal(t, productCount, placed.ProductsPlaced)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
+
+	// Fixture shortcut: these products never get a committed picking event on
+	// chain (pre-STORED fixture), so prime the strict ship gate (#15).
+	markPickingConfirmed(t, ctx, env, parseProductIDs(t, orderProductIDs))
 
 	// Scan buffer and driver to bring dispatch to AT_GATE.
 	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
@@ -62,13 +65,8 @@ func TestShipping_DoubleShip_Conflict(t *testing.T) {
 
 	p1 := orderProductIDs[0]
 
-	// Ship only P1 (buffer_remaining=1, dispatch stays AT_GATE).
-	var firstShip shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   []string{p1},
-	}, &firstShip)
+	// Ship only P1 as a signed spot action (buffer_remaining=1, dispatch stays AT_GATE).
+	firstShip, _ := shipSigned(t, env, op, fx.ShippingBinID.String(), fx.DispatchID.String(), parseProductIDs(t, []string{p1}))
 	require.Equal(t, 1, firstShip.ProductsShipped)
 	require.Equal(t, 1, firstShip.BufferRemaining)
 
@@ -76,12 +74,8 @@ func TestShipping_DoubleShip_Conflict(t *testing.T) {
 	require.NoError(t, err)
 	requireProductStatus(t, ctx, env, p1Parsed, "SHIPPED")
 
-	// Try to ship P1 again -> 409 PRODUCT_NOT_IN_BUFFER.
-	status, code, _ := postExpectError(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   []string{p1},
-	})
+	// Try to ship P1 again -> the draft guard refuses with 409 PRODUCT_NOT_IN_BUFFER.
+	status, code := draftShipRaw(t, env, op.token, fx.ShippingBinID.String(), fx.DispatchID.String(), []string{p1})
 	require.Equal(t, http.StatusConflict, status)
 	require.Equal(t, "PRODUCT_NOT_IN_BUFFER", code)
 }
@@ -144,9 +138,11 @@ func TestShipping_ScanDriver_AlreadyDeparted(t *testing.T) {
 	require.NotNil(t, env)
 
 	token := operatorToken(t, env)
+	// #14: the unload is a signed action, so the picking operator is a signed one.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 1, 1)
 
-	// Full flow: allocate -> pick -> scan-shipping-buffer -> scan-buffer ->
+	// Full flow: allocate -> pick -> signed unload -> scan-buffer ->
 	// scan-driver -> ship (all products -> dispatch DEPARTED).
 	postJSON[allocateData](t, env, token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
@@ -155,14 +151,15 @@ func TestShipping_ScanDriver_AlreadyDeparted(t *testing.T) {
 	orderProductIDs := productIDsForOrder(t, ctx, env, fx.OrderID)
 	require.Len(t, orderProductIDs, 1)
 	for _, pid := range orderProductIDs {
-		postJSON[pickData](t, env, token, "/assembly/pick", map[string]string{
+		postJSON[pickData](t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": pid,
 		}, nil)
 	}
 
-	postJSON[scanShippingBufferData](t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, nil)
+	unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
+	// Fixture shortcut: the product has no committed picking on chain (pre-STORED
+	// fixture), so prime the strict ship gate (#15).
+	markPickingConfirmed(t, ctx, env, parseProductIDs(t, orderProductIDs))
 
 	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
@@ -172,12 +169,7 @@ func TestShipping_ScanDriver_AlreadyDeparted(t *testing.T) {
 		"dispatch_code": fx.DispatchCode,
 	}, nil)
 
-	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   orderProductIDs,
-	}, &shipped)
+	shipped, _ := shipSigned(t, env, op, fx.ShippingBinID.String(), fx.DispatchID.String(), parseProductIDs(t, orderProductIDs))
 	require.True(t, shipped.DispatchDeparted)
 	requireDispatchStatus(t, ctx, env, fx.DispatchID, "DEPARTED")
 
@@ -259,17 +251,14 @@ func TestShipping_DestinationMismatch(t *testing.T) {
 		}
 		for _, s := range stmts {
 			if _, err := env.db.Exec(cleanupCtx, s.sql, s.args...); err != nil {
-				t.Logf("DestinationMismatch cleanup (%s): %v", s.sql, err)
+				t.Errorf("DestinationMismatch cleanup (%s): %v", s.sql, err)
 			}
 		}
 	})
 
-	// Ship with SHOP-7's buffer but the second dispatch -> 409 DESTINATION_MISMATCH.
-	status, code, _ := postExpectError(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": shipBinID.String(),
-		"dispatch_id":   secondDispatchID.String(),
-		"product_ids":   []string{},
-	})
+	// Draft a ship with SHOP-7's buffer but the second dispatch -> the draft guard
+	// refuses with 409 DESTINATION_MISMATCH.
+	status, code := draftShipRaw(t, env, token, shipBinID.String(), secondDispatchID.String(), []string{})
 	require.Equal(t, http.StatusConflict, status)
 	require.Equal(t, "DESTINATION_MISMATCH", code)
 }

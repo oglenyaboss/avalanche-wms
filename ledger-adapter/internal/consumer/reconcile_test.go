@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 
+	"ledger-adapter/internal/chain"
 	"ledger-adapter/internal/store"
 )
 
@@ -19,21 +21,45 @@ func newReconcilerT(ch *stubChain, st *stubStore) *Reconciler {
 }
 
 // TestReconciler_MinedTx_MarksCommitted is the core N1 fix: a stuck row whose tx has
-// actually mined successfully reconciles forward to COMMITTED.
+// actually mined successfully reconciles forward to COMMITTED (исход подписанного
+// действия разбирается резолвером).
 func TestReconciler_MinedTx_MarksCommitted(t *testing.T) {
 	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
 	st := newStubStore()
 	id := uuid.New()
 	st.reconcilable = []store.ReconcileRow{{EventID: id, TxHash: "0xmined"}}
+	r := newReconcilerT(ch, st).WithWarehouseActions(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		id: {Applied: true},
+	}})
 
-	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+	if err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if !st.committed[id] {
 		t.Errorf("a mined stuck row must reconcile to COMMITTED")
 	}
 	if len(ch.calls) != 0 {
-		t.Errorf("reconcile must NEVER resubmit (BatchCall), got %d", len(ch.calls))
+		t.Errorf("reconcile must NEVER resubmit, got %d chain calls", len(ch.calls))
+	}
+}
+
+// TestReconciler_MinedTx_NoResolvers_LeavesRows: успешная tx без подключённых
+// резолверов не может быть разобрана — applyActionOutcomes возвращает ошибку,
+// она изолируется внутри reconcileOnce, строки остаются SENT для следующего
+// tick'а (после рестарта с адресами контрактов).
+func TestReconciler_MinedTx_NoResolvers_LeavesRows(t *testing.T) {
+	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
+	st := newStubStore()
+	id := uuid.New()
+	st.reconcilable = []store.ReconcileRow{{EventID: id, TxHash: "0xmined"}}
+
+	// Текущий контракт изоляции ошибок: per-tx ошибка логируется, reconcileOnce
+	// возвращает nil (sweep не останавливается).
+	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+		t.Fatalf("resolver-missing error must be isolated, not propagated: %v", err)
+	}
+	if len(st.committed) != 0 || len(st.failed) != 0 {
+		t.Errorf("rows must stay SENT, got committed=%v failed=%v", st.committed, st.failed)
 	}
 }
 
@@ -80,8 +106,12 @@ func TestReconciler_GroupsByTxHash_OneCheckPerTx(t *testing.T) {
 		{EventID: a, TxHash: "0xbatch"},
 		{EventID: b, TxHash: "0xbatch"},
 	}
+	r := newReconcilerT(ch, st).WithWarehouseActions(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		a: {Applied: true},
+		b: {Applied: true},
+	}})
 
-	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+	if err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if ch.receiptCalls != 1 {
@@ -108,8 +138,11 @@ func TestReconciler_PerTxErrorIsolation(t *testing.T) {
 		{EventID: good, TxHash: "0xgood"},
 		{EventID: bad, TxHash: "0xbad"},
 	}
+	r := newReconcilerT(ch, st).WithWarehouseActions(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		good: {Applied: true},
+	}})
 
-	if err := newReconcilerT(ch, st).reconcileOnce(context.Background()); err != nil {
+	if err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("per-tx error must be isolated, not propagated from reconcileOnce: %v", err)
 	}
 	if !st.committed[good] {
@@ -151,5 +184,119 @@ func TestReconciler_Run_StopsOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not stop within 2s of ctx cancel")
+	}
+}
+
+// TestReconciler_SignedAction_RejectedReasonRecorded: stuck signed_action-строка
+// с успешным receipt'ом разбирается резолвером — отклонённое действие получает
+// FAILED + reject_reason (MarkRejected), а не безусловный COMMITTED.
+func TestReconciler_SignedAction_RejectedReasonRecorded(t *testing.T) {
+	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
+	st := newStubStore()
+	applied, rejected := uuid.New(), uuid.New()
+	st.reconcilable = []store.ReconcileRow{
+		{EventID: applied, TxHash: "0xactions"},
+		{EventID: rejected, TxHash: "0xactions"},
+	}
+	r := newReconcilerT(ch, st).WithRegistry(&stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{
+		applied:  {Applied: true},
+		rejected: {Reason: 6},
+	}})
+
+	if err := r.reconcileOnce(context.Background()); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if !st.committed[applied] {
+		t.Errorf("applied action must reconcile to COMMITTED")
+	}
+	if st.rejected[rejected] != 6 {
+		t.Errorf("rejected action must record reason 6, got %d", st.rejected[rejected])
+	}
+	if st.committed[rejected] {
+		t.Errorf("rejected action must NOT be committed")
+	}
+	if ch.receiptCalls != 1 {
+		t.Errorf("one receipt check per tx, got %d", ch.receiptCalls)
+	}
+}
+
+// TestReconciler_ResolverError_LeavesRows: ошибка резолвера не терминальна —
+// sweep изолирует её, строки остаются для следующего tick'а.
+func TestReconciler_ResolverError_LeavesRows(t *testing.T) {
+	ch := &stubChain{receipt: &types.Receipt{Status: 1}}
+	st := newStubStore()
+	id := uuid.New()
+	st.reconcilable = []store.ReconcileRow{
+		{EventID: id, TxHash: "0xactions"},
+	}
+	r := newReconcilerT(ch, st).WithRegistry(&stubResolver{err: errors.New("rpc down")})
+
+	// reconcileOnce изолирует ошибку по tx и возвращает nil (логирует).
+	if err := r.reconcileOnce(context.Background()); err != nil {
+		t.Fatalf("resolver error must be isolated: %v", err)
+	}
+	if len(st.committed) != 0 || len(st.rejected) != 0 || len(st.failed) != 0 {
+		t.Errorf("rows must stay untouched, got committed=%v rejected=%v failed=%v", st.committed, st.rejected, st.failed)
+	}
+}
+
+// TestResolveActionOutcomes_LogsFromSecondResolver: reconcile знает только
+// aggregate_type 'signed_action', поэтому исход берётся из логов того резолвера,
+// чей контракт отправил tx — здесь второго в порядке опроса.
+func TestResolveActionOutcomes_LogsFromSecondResolver(t *testing.T) {
+	id := uuid.New()
+	warehouse := &stubResolver{}
+	registry := &stubResolver{outcomes: map[uuid.UUID]chain.ActionOutcome{id: {Applied: true}}}
+
+	outcomes, err := resolveActionOutcomes(context.Background(), []ActionResolver{warehouse, registry}, &types.Receipt{Status: 1}, []uuid.UUID{id})
+	if err != nil {
+		t.Fatalf("resolveActionOutcomes: %v", err)
+	}
+	if !outcomes[id].Applied {
+		t.Errorf("outcome = %+v, want Applied from second resolver's logs", outcomes[id])
+	}
+}
+
+// TestResolveActionOutcomes_StateFallback: логов в receipt'е нет — исход
+// восстанавливается по actionState; первый резолвер не знает действие (None),
+// второй знает.
+func TestResolveActionOutcomes_StateFallback(t *testing.T) {
+	id := uuid.New()
+	warehouse := &stubResolver{}
+	registry := &stubResolver{states: map[uuid.UUID]chain.ActionOutcome{id: {Reason: 12}}}
+
+	outcomes, err := resolveActionOutcomes(context.Background(), []ActionResolver{warehouse, registry}, &types.Receipt{}, []uuid.UUID{id})
+	if err != nil {
+		t.Fatalf("resolveActionOutcomes: %v", err)
+	}
+	if outcomes[id] != (chain.ActionOutcome{Reason: 12}) {
+		t.Errorf("outcome = %+v, want Reason 12 from second resolver's StateOutcome", outcomes[id])
+	}
+}
+
+// TestResolveActionOutcomes_AllNone_Error: ни один контракт не знает действие —
+// ошибка, строки остаются SENT для следующего reconcile.
+func TestResolveActionOutcomes_AllNone_Error(t *testing.T) {
+	id := uuid.New()
+	resolvers := []ActionResolver{&stubResolver{}, &stubResolver{}}
+
+	outcomes, err := resolveActionOutcomes(context.Background(), resolvers, &types.Receipt{}, []uuid.UUID{id})
+	if err == nil {
+		t.Fatal("expected error when no resolver knows the action")
+	}
+	if !strings.Contains(err.Error(), "no on-chain outcome for action "+id.String()) {
+		t.Errorf("err = %v, want no-outcome for %s", err, id)
+	}
+	if outcomes != nil {
+		t.Errorf("outcomes on error = %v, want nil", outcomes)
+	}
+}
+
+// TestResolveActionOutcomes_EmptyResolvers_Error: без контрактов-адресатов исходы
+// не собрать — громкая ошибка вместо panic на nil-интерфейсе.
+func TestResolveActionOutcomes_EmptyResolvers_Error(t *testing.T) {
+	_, err := resolveActionOutcomes(context.Background(), nil, &types.Receipt{}, []uuid.UUID{uuid.New()})
+	if err == nil || !strings.Contains(err.Error(), "no on-chain outcome") {
+		t.Fatalf("err = %v, want no-on-chain-outcome error", err)
 	}
 }

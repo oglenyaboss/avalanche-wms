@@ -8,6 +8,13 @@
 // flow через Go wallet SDK ключом ewoq (локальная подпись):
 // CreateSubnet -> AddSubnetValidator -> CreateChain. Etna fee-state НЕ упирается в
 // deadlock на avalanchego v1.14.0 (поэтому это и заменяет старый C-Chain-костыль).
+//
+// subnetID = txID CreateSubnetTx, а он зависит от того, какой UTXO ewoq кошелёк
+// потратит на комиссию. С 2026-06-09 у ewoq два разблокированных UTXO, и кошелёк
+// перебирает их в случайном порядке (maps.Values): ID выходил то 2KDqup…, то 2W9boA….
+// Поэтому CreateSubnetTx собирается с MinIssuanceTime = startTime genesis: UTXO с
+// locktime 2026-06-09 кошелёк считает заблокированным, тратит единственный оставшийся,
+// и ID всегда 2W9boA….
 package main
 
 import (
@@ -25,15 +32,19 @@ import (
 	"github.com/ava-labs/avalanchego/vms/platformvm/txs"
 	"github.com/ava-labs/avalanchego/vms/secp256k1fx"
 	"github.com/ava-labs/avalanchego/wallet/subnet/primary"
+	"github.com/ava-labs/avalanchego/wallet/subnet/primary/common"
 )
 
 const (
 	wantChainIDHex = "0x1869f" // 99999, из chain-genesis.json
 	healthTimeout  = 180 * time.Second
 	chainTimeout   = 120 * time.Second
-	// End валидатора сабнета должен быть <= End валидатора primary-сети (2027-06-02 в
-	// закоммиченном network-genesis.json). Буфер 1 час ниже него.
-	validatorEnd = uint64(1811958568 - 3600)
+	// startTime в network-genesis.json (2026-06-02).
+	genesisStartTime = uint64(1780422568)
+	// End валидатора сабнета должен быть <= End валидатора primary-сети: startTime +
+	// initialStakeDuration в network-genesis.json = 2036-05-30. Буфер 1 час ниже него.
+	// Срок стейка больше года требует max-stake-duration в node-config.json.
+	validatorEnd = uint64(2095782568 - 3600)
 )
 
 func main() {
@@ -119,7 +130,7 @@ func createChain(ctx context.Context, cfg config) (string, error) {
 	createSubnetTx, err := pWallet.IssueCreateSubnetTx(&secp256k1fx.OutputOwners{
 		Threshold: 1,
 		Addrs:     []ids.ShortID{key.Address()},
-	})
+	}, common.WithMinIssuanceTime(genesisStartTime))
 	if err != nil {
 		return "", fmt.Errorf("create subnet: %w", err)
 	}

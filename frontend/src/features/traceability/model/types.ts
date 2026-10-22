@@ -30,13 +30,3 @@ export interface ProductTimeline {
   product: ProductHeader
   steps: TimelineStep[]
 }
-
-export type TxProofStatus = 'success' | 'failed' | 'pending'
-
-export interface TxProof {
-  found: boolean
-  status: TxProofStatus
-  blockNumber: number
-  confirmations: number
-  gasUsed: number
-}

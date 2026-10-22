@@ -4,6 +4,8 @@ lowercaseOutputName: true
 lowercaseOutputLabelNames: true
 
 rules:
-  - pattern: "kafka.connect<type=connect-worker-metrics><>running-task-count"
+  - pattern: "kafka.connect<type=connect-worker-metrics, connector=(.+)><>connector-running-task-count"
     name: debezium_running_task_count
+    labels:
+      connector: "$1"
     type: GAUGE

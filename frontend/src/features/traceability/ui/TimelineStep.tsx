@@ -5,7 +5,6 @@ import type { TimelineStep as Step } from '../model/types'
 interface TimelineStepProps {
   step: Step
   isLast: boolean
-  onSelectHash: (hash: string) => void
 }
 
 const CHAIN_TEXT: Record<string, string> = {
@@ -15,7 +14,7 @@ const CHAIN_TEXT: Record<string, string> = {
   failed: 'ошибка',
 }
 
-export function TimelineStep({ step, isLast, onSelectHash }: TimelineStepProps) {
+export function TimelineStep({ step, isLast }: TimelineStepProps) {
   const color = STATUS_COLOR[step.chainStatus]
   return (
     <li className="relative flex gap-4 pb-6">
@@ -37,13 +36,9 @@ export function TimelineStep({ step, isLast, onSelectHash }: TimelineStepProps) 
         <div className="flex items-center gap-2 text-xs">
           <span style={{ color }}>{CHAIN_TEXT[step.chainStatus] ?? step.chainStatus}</span>
           {step.txHash ? (
-            <button
-              type="button"
-              onClick={() => onSelectHash(step.txHash as string)}
-              className="font-mono text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-            >
+            <span className="font-mono text-muted-foreground">
               {truncateHash(step.txHash, 8, 6)}
-            </button>
+            </span>
           ) : (
             <span className="text-muted-foreground">— ожидает записи в сеть</span>
           )}

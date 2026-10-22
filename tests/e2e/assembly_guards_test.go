@@ -32,12 +32,15 @@ func TestAssembly_CartIsolation(t *testing.T) {
 	// Two products, one order requiring both.
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 2, 2)
 
-	op1Token := operatorToken(t, env)
+	// #14: operator1 performs picks AND the unload, so its basket (assembly_tasks
+	// keyed by operator_id) belongs to a signed operator; operator2 stays a plain
+	// operator — its draft must hit the cart guard before any signer lookup.
+	op1 := newSignedOperator(t, ctx, env)
 	op2Token := operatorToken(t, env)
 
 	// Allocate the destination (either operator can do this).
 	var allocated allocateData
-	postJSON(t, env, op1Token, "/assembly/allocate", map[string]string{
+	postJSON(t, env, op1.token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
 	}, &allocated)
 	require.GreaterOrEqual(t, allocated.AllocatedOrders, 1)
@@ -51,32 +54,27 @@ func TestAssembly_CartIsolation(t *testing.T) {
 
 	// Step 1: operator1 picks P1.
 	var picked1 pickData
-	postJSON(t, env, op1Token, "/assembly/pick", map[string]string{
+	postJSON(t, env, op1.token, "/assembly/pick", map[string]string{
 		"product_id": p1,
 	}, &picked1)
 	require.Equal(t, p1, picked1.ProductID)
 	require.Equal(t, 1, picked1.CartSize)
 
-	// Step 2: operator2 tries scan-shipping-buffer -> 409 CART_EMPTY.
-	status, code, _ := postExpectError(t, env, op2Token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	})
+	// Step 2: operator2 drafts the unload -> 409 CART_EMPTY (guard fires on the draft).
+	status, code := draftUnloadToShippingBufferRaw(t, env, op2Token, fx.ShippingBinID.String())
 	require.Equal(t, http.StatusConflict, status)
 	require.Equal(t, "CART_EMPTY", code)
 
 	// Step 3: operator1 picks P2 (cart grows to 2).
 	var picked2 pickData
-	postJSON(t, env, op1Token, "/assembly/pick", map[string]string{
+	postJSON(t, env, op1.token, "/assembly/pick", map[string]string{
 		"product_id": p2,
 	}, &picked2)
 	require.Equal(t, p2, picked2.ProductID)
 	require.Equal(t, 2, picked2.CartSize)
 
-	// Step 4: operator1 scan-shipping-buffer -> success.
-	var placed scanShippingBufferData
-	postJSON(t, env, op1Token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	// Step 4: operator1 unloads the basket into the shipping buffer -> success.
+	placed := unloadToShippingBufferSigned(t, env, op1, fx.ShippingBinID.String())
 	require.Equal(t, 2, placed.ProductsPlaced)
 	require.GreaterOrEqual(t, placed.OrdersAssembled, 1)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")

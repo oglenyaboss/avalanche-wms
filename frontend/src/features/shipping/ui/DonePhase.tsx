@@ -1,4 +1,5 @@
 import type { DispatchInfo, ShipResult } from '@/entities/shipping'
+import { OperationChainStatus } from '@/entities/signed-action'
 import { Button, Card, CardContent } from '@/shared/ui'
 
 import { CheckCircleIcon } from './icons'
@@ -54,6 +55,9 @@ export function DonePhase({ dispatch, result, onReset }: DonePhaseProps) {
           />
         </CardContent>
       </Card>
+
+      {/* Chain verdict of the signed ship operation. */}
+      <OperationChainStatus operationId={result.operationId} />
 
       <Button type="button" className="w-full" onClick={onReset}>
         Новая отгрузка

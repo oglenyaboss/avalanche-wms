@@ -4,16 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 
 	"wms/internal/domain"
-	"wms/internal/ledger"
+	"wms/internal/signedops"
 )
 
 type Service struct {
-	repo putawayRepository
+	repo   putawayRepository
+	ops    operationStore
+	signer signerSource
 }
 
 type putawayRepository interface {
@@ -23,16 +24,19 @@ type putawayRepository interface {
 	ListProductsByBufferBin(ctx context.Context, bufferBinID uuid.UUID) ([]*ProductBufferItem, error)
 	GetProductByID(ctx context.Context, productID uuid.UUID) (*domain.Product, error)
 	GetProductsByIDForUpdate(ctx context.Context, productID uuid.UUID) (*domain.Product, error)
+	GetCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID) (string, error)
 	GetSKUByProductID(ctx context.Context, productID uuid.UUID) (*domain.SKU, error)
 	UpdateProductStorage(ctx context.Context, productID, binID uuid.UUID) error
 	InsertPutaway(ctx context.Context, params *InsertPutawayParams) error
-	InsertOutboxEvents(ctx context.Context, params *OutboxEventsParams) error
+	LockOperation(ctx context.Context, operationID, createdBy uuid.UUID) (*signedops.Operation, error)
+	LockSigner(ctx context.Context, credentialID []byte) error
+	WriteActions(ctx context.Context, op *signedops.Operation, payloads [][]byte) error
 	CheckChainStatus(ctx context.Context, productIDs []uuid.UUID, aggregateType string) error
 	CountReceivedInBuffer(ctx context.Context, bufferBinID uuid.UUID) (int, error)
 }
 
-func NewService(repo putawayRepository) *Service {
-	return &Service{repo: repo}
+func NewService(repo putawayRepository, ops operationStore, signer signerSource) *Service {
+	return &Service{repo: repo, ops: ops, signer: signer}
 }
 
 func (s *Service) GetBufferProducts(ctx context.Context, operatorID, bufferBinID uuid.UUID) (*ScanBufferResponse, error) {
@@ -115,95 +119,5 @@ func (s *Service) AddToPutawayCart(ctx context.Context, operatorID, productID, b
 		SKUName:   sku.Name,
 		QRCode:    product.QRCode,
 		CartSize:  cartSize,
-	}, nil
-}
-
-func (s *Service) PlaceProductsToStorageBin(ctx context.Context, operatorID uuid.UUID, productsIDs []uuid.UUID, storageBinID uuid.UUID) (*ScanStorageBinResponse, error) {
-	if operatorID == uuid.Nil || storageBinID == uuid.Nil || len(productsIDs) == 0 {
-		return nil, fmt.Errorf("putaway.Service.PlaceProductsToStorageBin: %w", ErrInvalidInput)
-	}
-
-	// #45: gate on the previous FSM stage. Reject placement if any product's receiving
-	// event is FAILED on-chain — the WMS must not advance a product whose prior stage
-	// diverged from the ledger. Runs before the transaction (read-only pre-check).
-	if err := s.repo.CheckChainStatus(ctx, productsIDs, ledger.AggregateReceiving); err != nil {
-		return nil, fmt.Errorf("putaway.Service.PlaceProductsToStorageBin: %w", err)
-	}
-
-	var storageBin *domain.Bin
-	placedCount := 0
-	occurredAt := time.Now().UTC()
-
-	err := s.repo.WithTx(ctx, func(txRepo putawayRepository) error {
-		var err error
-		storageBin, err = txRepo.GetStorageBinByID(ctx, storageBinID)
-		if err != nil {
-			return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin: %w", err)
-		}
-
-		verifiedBuffers := make(map[uuid.UUID]struct{})
-		eventIDs := make([]uuid.UUID, 0, len(productsIDs))
-
-		for _, productID := range productsIDs {
-			product, err := txRepo.GetProductsByIDForUpdate(ctx, productID)
-			if err != nil {
-				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin get product %s: %w", productID, err)
-			}
-			if product.BinID == nil {
-				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin product %s: %w", productID, ErrProductNotInBuffer)
-			}
-			fromBinID := *product.BinID
-
-			if _, ok := verifiedBuffers[fromBinID]; !ok {
-				if _, err := txRepo.GetBufferBinByID(ctx, fromBinID); err != nil {
-					if errors.Is(err, ErrBufferBinNotFound) {
-						return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin product %s: %w", productID, ErrProductNotInBuffer)
-					}
-					return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin verify buffer for product %s: %w", productID, err)
-				}
-				verifiedBuffers[fromBinID] = struct{}{}
-			}
-
-			if err := txRepo.UpdateProductStorage(ctx, productID, storageBinID); err != nil {
-				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin update product %s: %w", productID, err)
-			}
-
-			eventID := uuid.New()
-			eventIDs = append(eventIDs, eventID)
-
-			if err := txRepo.InsertPutaway(ctx, &InsertPutawayParams{
-				EventID:    eventID,
-				ProductID:  productID,
-				FromBinID:  fromBinID,
-				BinID:      storageBinID,
-				OperatorID: operatorID,
-				OccurredAt: occurredAt,
-			}); err != nil {
-				return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin insert putaway: %w", err)
-			}
-
-			placedCount++
-		}
-
-		if err := txRepo.InsertOutboxEvents(ctx, &OutboxEventsParams{
-			EventIDs:     eventIDs,
-			ProductIDs:   productsIDs,
-			StorageBinID: storageBinID,
-		}); err != nil {
-			return fmt.Errorf("putaway.Service.PlaceProductsToStorageBin insert outbox events: %w", err)
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &ScanStorageBinResponse{
-		StorageBinID:        storageBin.BinID.String(),
-		StorageBinCode:      storageBin.Code,
-		ProductsPlaced:      placedCount,
-		OutboxEventsCreated: placedCount,
 	}, nil
 }

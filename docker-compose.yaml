@@ -18,6 +18,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env or environment}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-168h}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      WEBAUTHN_RP_ORIGINS: ${WEBAUTHN_RP_ORIGINS:-http://localhost:5173}
     ports:
       - "8081:8080"
     depends_on:
@@ -230,7 +232,7 @@ services:
     image: prom/prometheus:latest
     container_name: prometheus
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml
     command:
@@ -267,20 +269,16 @@ services:
       - app_network
 
   kafka-jmx-exporter:
-    image: sscaling/jmx-prometheus-exporter
+    build: ./deploy/jmx
     container_name: kafka-jmx-exporter
-    environment:
-      SERVICE_PORT: 5556
     volumes:
       - ./deploy/jmx/kafka-jmx-config.yaml:/opt/jmx_exporter/config.yml
     networks:
       - app_network
 
   debezium-jmx-exporter:
-    image: sscaling/jmx-prometheus-exporter
+    build: ./deploy/jmx
     container_name: debezium-jmx-exporter
-    environment:
-      SERVICE_PORT: 5556
     volumes:
       - ./deploy/jmx/debezium-jmx-config.yaml:/opt/jmx_exporter/config.yml
     networks:
@@ -291,8 +289,12 @@ services:
       context: ./ledger-adapter
       dockerfile: Dockerfile
     container_name: ledger-adapter
+    # Зависшая в пайплайне tx — фатальная ошибка: адаптер выходит и восстанавливается
+    # рестартом (reconcile подтягивает домайненные tx). Без политики он просто умирает.
+    restart: on-failure
     ports:
-      - "8085:8085"
+      # только loopback: HTTP-эндпоинты адаптера без аутентификации.
+      - "127.0.0.1:8085:8085"
     environment:
       PORT: 8085
       KAFKA_BROKERS: kafka:9092
@@ -317,6 +319,7 @@ services:
       # test-profile overrides via shared volume (silently ignored if files absent)
       RPC_URL_FILE: /shared/rpc_url.txt
       CONTRACT_ADDR_FILE: /shared/contract_addr.txt
+      REGISTRY_ADDR_FILE: /shared/registry_addr.txt
       PRIVATE_KEY_FILE: /shared/deployer_key.txt
     volumes:
       - shared_state:/shared:ro

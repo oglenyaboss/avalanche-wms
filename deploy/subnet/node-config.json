@@ -13,5 +13,7 @@
   "plugin-dir": "/plugins",
   "track-subnets": "2W9boARgCWL25z6pMFNtkCfNA5v28VGg9PmBgUJfuKndEdhrvw",
   "data-dir": "/data",
-  "log-level": "info"
+  "log-level": "info",
+  "max-stake-duration": "87600h",
+  "stake-minting-period": "87600h"
 }

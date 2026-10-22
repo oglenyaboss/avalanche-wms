@@ -41,6 +41,13 @@ func TestMapServiceError(t *testing.T) {
 			wantStatus: http.StatusConflict,
 			wantCode:   "DESTINATION_MISMATCH",
 		},
+		{
+			// #14: состав подписанного черновика разошёлся с корзиной между draft и submit.
+			name:       "ErrDraftStale maps to 409 DRAFT_STALE",
+			err:        ErrDraftStale,
+			wantStatus: http.StatusConflict,
+			wantCode:   "DRAFT_STALE",
+		},
 	}
 
 	for _, tt := range tests {

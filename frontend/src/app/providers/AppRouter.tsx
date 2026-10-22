@@ -3,10 +3,13 @@
 import { GuestOnlyRoute } from '@/app/providers/GuestOnlyRoute'
 import { ProtectedRoute } from '@/app/providers/ProtectedRoute'
 import { AnalyticsPage } from '@/pages/analytics'
+import { AuditPage } from '@/pages/audit'
 import { AssemblyPage } from '@/pages/assembly'
 import { HomePage } from '@/pages/home'
 import { LoginPage } from '@/pages/login'
+import { MyKeyPage } from '@/pages/my-key'
 import { NotFoundPage } from '@/pages/not-found'
+import { OrgKeysPage } from '@/pages/org-keys'
 import { PutawayPage } from '@/pages/putaway'
 import { ReceivingGatePage } from '@/pages/receiving-gate'
 import { ReceivingTablePage } from '@/pages/receiving-table'
@@ -62,6 +65,18 @@ const router = createBrowserRouter([
           {
             path: routes.trace,
             element: <TracePage />,
+          },
+          {
+            path: routes.audit,
+            element: <AuditPage />,
+          },
+          {
+            path: routes.myKey,
+            element: <MyKeyPage />,
+          },
+          {
+            path: routes.orgKeys,
+            element: <OrgKeysPage />,
           },
         ],
       },

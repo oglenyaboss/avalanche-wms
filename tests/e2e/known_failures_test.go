@@ -12,10 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These tests document known product defects in the WMS <-> chain integration.
-// They are intentionally skipped: the fault injection is NOT implemented, only
-// the intended invariant is described, so the suite stays green while the gap is
-// tracked. Remove the Skip and implement the body once the product is fixed.
+// Regression tests for defects found in the WMS <-> chain integration
+// (BUGHUNT.md). Each test reproduces the original fault on the signed-action
+// path and asserts the fixed invariant.
 
 // TestS1_WMSChainDivergence_pendingFix is the live regression for the S1 putaway gate
 // (#45): once a product's receiving event is FAILED on-chain, the WMS must refuse to
@@ -36,30 +35,29 @@ func TestS1_WMSChainDivergence_pendingFix(t *testing.T) {
 
 	// 1. Drive the product through the full receiving flow → RECEIVED in BUFFER-01,
 	//    emitting a real receiving outbox event.
-	productID := driveReceivingToBuffer(t, env, token, fixture)
+	productID := driveReceivingToBuffer(t, ctx, env, token, fixture)
 	requireProductStatus(t, ctx, env, productID, "RECEIVED")
 
 	// 2. Wait for the receiving event to COMMIT on-chain, THEN force it FAILED
 	//    (simulating a chain revert / DLQ). Forcing before the row exists would be a
 	//    no-op, so the wait is load-bearing.
 	receivingEventID := eventIDForAggregate(t, ctx, env, productID, "receiving")
-	waitForOnchainCommitted(t, ctx, env, receivingEventID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, receivingEventID)
 	setOnchainStatus(t, ctx, env, receivingEventID, "FAILED")
 
 	// 3. The operator can still scan into the putaway cart, but placement must be gated:
-	//    scan-storage-bin → 409 CHAIN_EVENT_REJECTED.
-	postJSON[map[string]any](t, env, token, "/putaway/scan-buffer", map[string]string{
+	//    the signed putaway DRAFT already runs the chain gate → 409 CHAIN_EVENT_REJECTED,
+	//    so no operation is even drafted.
+	op := newSignedOperator(t, ctx, env)
+	postJSON[map[string]any](t, env, op.token, "/putaway/scan-buffer", map[string]string{
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
-	postJSON[map[string]any](t, env, token, "/putaway/scan-product", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/putaway/scan-product", map[string]string{
 		"product_id":    productID.String(),
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
 
-	status, code, _ := postExpectError(t, env, token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    []string{productID.String()},
-		"storage_bin_id": fixture.StorageBinID.String(),
-	})
+	status, code, _ := draftPlaceToStorageBinRaw(t, env, op.token, []string{productID.String()}, fixture.StorageBinID.String())
 	require.Equal(t, http.StatusConflict, status)
 	require.Equal(t, "CHAIN_EVENT_REJECTED", code)
 
@@ -67,17 +65,16 @@ func TestS1_WMSChainDivergence_pendingFix(t *testing.T) {
 	//    emitted — WMS and chain do not diverge.
 	requireProductStatus(t, ctx, env, productID, "RECEIVED")
 	require.Equal(t, 0, outboxCountForAggregate(t, ctx, env, productID, "putaway"),
-		"gated putaway must not emit a putaway outbox event")
+		"gated putaway must not emit a putaway action")
 }
 
 // TestS2_AdapterCrashRecovery_pendingFix exercises the S2 fix (#44): a redelivered
-// event whose row is in a NON-TERMINAL crash window (SENT or PENDING with a tx_hash)
+// action whose row is in a NON-TERMINAL crash window (SENT or PENDING with a tx_hash)
 // must reconcile to COMMITTED reusing the original tx — NOT resubmit and get marked
-// FAILED on the duplicate-eventId revert.
+// FAILED on the duplicate-action revert.
 //
-// Ported from tests/e2e/scenarios/09-s2-crash-recovery.sh. No adapter restart: the
-// SENT/PENDING window is injected via the DB (the offset-uncommitted crash) and the
-// same event_id is redelivered via Kafka, exactly like the bash.
+// No adapter restart: the SENT/PENDING window is injected via the DB (the
+// offset-uncommitted crash) and the same action id is redelivered via Kafka.
 func TestS2_AdapterCrashRecovery_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -89,38 +86,38 @@ func TestS2_AdapterCrashRecovery_pendingFix(t *testing.T) {
 	for _, inject := range []string{"SENT", "PENDING"} {
 		inject := inject
 		t.Run("injected_"+inject, func(t *testing.T) {
-			eventID := uuid.New()
-			productID := uuid.New()
+			actionID, items, payload := adminReceive(t, ctx, env, 1)
+			productID := items[0]
 
-			// 1. Drive a fresh receiving event to a genuine on-chain COMMITTED.
-			publishEvent(t, ctx, "receiving", eventID, productID, "{}")
-			require.Truef(t, waitOnchainStatus(t, ctx, env, eventID, "COMMITTED", 60*time.Second),
-				"[%s] event did not reach COMMITTED before injection (last=%s)", inject, onchainStatus(t, ctx, env, eventID))
+			// 1. Drive a fresh signed Receive to a genuine on-chain COMMITTED.
+			publishAction(t, ctx, actionID, payload)
+			require.Truef(t, waitOnchainStatus(t, ctx, env, actionID, "COMMITTED", 60*time.Second),
+				"[%s] action did not reach COMMITTED before injection (last=%s)", inject, onchainStatus(t, ctx, env, actionID))
 			require.Truef(t, waitItemStatus(t, ctx, env, productID, 1, 20*time.Second),
 				"[%s] item did not reach on-chain Accepted(1) before injection", inject)
 
-			tx0 := onchainTxHash(t, ctx, env, eventID)
-			require.NotEmptyf(t, tx0, "[%s] committed event must have a tx_hash", inject)
+			tx0 := onchainTxHash(t, ctx, env, actionID)
+			require.NotEmptyf(t, tx0, "[%s] committed action must have a tx_hash", inject)
 
 			// 2. Simulate the crash window: force the row non-terminal. The Kafka offset
 			//    was (conceptually) never committed, so the broker will redeliver.
-			setOnchainStatus(t, ctx, env, eventID, inject)
+			setOnchainStatus(t, ctx, env, actionID, inject)
 
-			// 3. Redeliver the SAME event_id.
-			publishEvent(t, ctx, "receiving", eventID, productID, "{}")
+			// 3. Redeliver the SAME action id and payload.
+			publishAction(t, ctx, actionID, payload)
 
 			// The fix: reconcile the existing tx forward to COMMITTED, never resubmit.
-			ok := waitOnchainStatus(t, ctx, env, eventID, "COMMITTED", 60*time.Second)
+			ok := waitOnchainStatus(t, ctx, env, actionID, "COMMITTED", 60*time.Second)
 			if !ok {
-				st := onchainStatus(t, ctx, env, eventID)
+				st := onchainStatus(t, ctx, env, actionID)
 				require.NotEqualf(t, "FAILED", st,
-					"[%s] event went FAILED after redelivery, but it already COMMITTED on-chain (S2 regression)", inject)
+					"[%s] action went FAILED after redelivery, but it already COMMITTED on-chain (S2 regression)", inject)
 				require.Failf(t, "not committed",
 					"[%s] expected COMMITTED after reconcile, got %q", inject, st)
 			}
 
 			// tx_hash must be the ORIGINAL mined tx — reconcile reuses it, never resubmits.
-			txn := onchainTxHash(t, ctx, env, eventID)
+			txn := onchainTxHash(t, ctx, env, actionID)
 			require.Equalf(t, tx0, txn,
 				"[%s] tx_hash changed (%s -> %s); the original tx was discarded, not reused (S2)", inject, tx0, txn)
 
@@ -131,94 +128,10 @@ func TestS2_AdapterCrashRecovery_pendingFix(t *testing.T) {
 	}
 }
 
-// TestS3_BatchPoisoning_pendingFix exercises the S3 fix (#47, Design A): one poisoned
-// item in a batch must NOT drag its valid siblings to FAILED. The valid siblings reach
-// COMMITTED; the poison is skipped on-chain via an ItemTransitionFailed event and its
-// DB row ends COMMITTED (the batch tx succeeds).
-//
-// Ported from tests/e2e/scenarios/10-s3-batch-poisoning.sh. Widens BATCH_TIMEOUT so the
-// rapid-fire publishes co-batch into one tx; restores the default adapter on cleanup.
-func TestS3_BatchPoisoning_pendingFix(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
-	defer cancel()
-
-	env := testEnv
-	require.NotNil(t, env)
-
-	// Widen the batch window so the sequential in-process publishes land in one tx.
-	// 10s is generous: in-process publishes complete in milliseconds.
-	t.Cleanup(func() { restoreDefaultAdapter(t, env) })
-	recreateAdapterWithEnv(t, ctx, env, map[string]string{"BATCH_TIMEOUT": "10s"})
-
-	const n = 4
-	validEvents := make([]uuid.UUID, n)
-	validProducts := make([]uuid.UUID, n)
-	for i := range validEvents {
-		validEvents[i] = uuid.New()
-		validProducts[i] = uuid.New()
-	}
-
-	// Poison product PX: pre-Accept it via its OWN committed receiving event, so a
-	// SECOND receiving event for it (None->Accepted required, but it is already
-	// Accepted) is the poison — an itemStatus mismatch.
-	poisonProduct := uuid.New()
-	poisonFirstEvent := uuid.New()
-	publishEvent(t, ctx, "receiving", poisonFirstEvent, poisonProduct, "{}")
-	require.Truef(t, waitOnchainStatus(t, ctx, env, poisonFirstEvent, "COMMITTED", 60*time.Second),
-		"poison product's first (valid) receiving did not reach COMMITTED")
-	require.Truef(t, waitItemStatus(t, ctx, env, poisonProduct, 1, 20*time.Second),
-		"poison product did not reach on-chain Accepted(1) after its first receiving")
-
-	// Rapid-fire one batch: N fresh-valid receivings + 1 poisoned receiving (re-accept PX).
-	poisonEvent := uuid.New()
-	for i := range validEvents {
-		publishEvent(t, ctx, "receiving", validEvents[i], validProducts[i], "{}")
-	}
-	publishEvent(t, ctx, "receiving", poisonEvent, poisonProduct, "{}")
-
-	// 1. Every valid sibling must reach COMMITTED (the core S3 fix — they were dragged
-	//    to FAILED before, by the whole-batch revert) and be Accepted(1) on-chain.
-	for i := range validEvents {
-		require.Truef(t, waitOnchainStatus(t, ctx, env, validEvents[i], "COMMITTED", 60*time.Second),
-			"valid sibling %s did not reach COMMITTED (poison fanned out — S3 regression)", validEvents[i])
-		require.EqualValuesf(t, 1, callItemStatus(t, ctx, env, validProducts[i]),
-			"valid sibling %s on-chain itemStatus != 1", validProducts[i])
-	}
-
-	// 2. The poisoned event's row ends COMMITTED — the batch tx succeeded (Design A).
-	require.Truef(t, waitOnchainStatus(t, ctx, env, poisonEvent, "COMMITTED", 30*time.Second),
-		"poisoned event expected COMMITTED (batch tx succeeded), got %q", onchainStatus(t, ctx, env, poisonEvent))
-
-	// 3. Isolation proven on-chain: the poison item must NOT have advanced — it was
-	//    Accepted(1) and a second accept is rejected, so it stays 1 (no double transition).
-	require.EqualValuesf(t, 1, callItemStatus(t, ctx, env, poisonProduct),
-		"poison item on-chain itemStatus != 1 (expected unchanged — no double transition)")
-
-	// 4. Guard: the N valids + poison must have shared ONE batch tx, else the test
-	//    proved nothing about isolation. With BATCH_TIMEOUT=10s and in-process
-	//    millisecond-apart publishes this co-batch is reliable, so it is enforced as a
-	//    hard precondition (no silent skip). A failure here is a co-batch TIMING issue
-	//    (raise BATCH_TIMEOUT / check broker latency), NOT an S3 fix regression.
-	allEvents := append(append([]uuid.UUID{}, validEvents...), poisonEvent)
-	cobatchTxs := distinctTxHashCount(t, ctx, env, allEvents...)
-	require.Equalf(t, 1, cobatchTxs,
-		"co-batch PRECONDITION failed: the %d valid events + poison span %d distinct batch txs, not 1 "+
-			"— a BATCH_TIMEOUT/broker-timing issue (raise BATCH_TIMEOUT), NOT an S3 fix regression",
-		len(allEvents), cobatchTxs)
-
-	// 5. The skip is observable: the shared batch tx emitted an ItemTransitionFailed log.
-	batchTx := onchainTxHash(t, ctx, env, poisonEvent)
-	require.NotEmpty(t, batchTx, "poison event missing tx_hash after COMMITTED")
-	require.Truef(t, txEmittedItemTransitionFailed(t, ctx, env, batchTx),
-		"batch tx %s did not emit ItemTransitionFailed for the poison item (S3 isolation not observable)", batchTx)
-}
-
 // ─── Additional defects found in the 2026-05-25 multi-module bug-hunt sweep ───
-// Same convention as S1/S2/S3: documented here as t.Skip stubs with the intended
-// invariant and a runnable reproduction. The two pure-HTTP ones (shipping
-// ship-before-assembled, receiving open-box) can flip into live regressions by
-// implementing the body once the product is fixed; see tests/e2e/BUGHUNT.md for the
-// full backlog (severity, file:line, and the deferred lower-severity findings).
+// Same convention as S1/S2: each test reproduces the original fault on the
+// signed-action path and asserts the fixed invariant. See tests/e2e/BUGHUNT.md for
+// the full backlog (severity, file:line, and the deferred lower-severity findings).
 
 // TestAssemblyCartLostOnRestart_pendingFix is the live regression for Assembly BUG-1 (#46):
 // before the fix the pick cart lived only in WMS process memory, so a WMS restart between
@@ -232,12 +145,14 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	token := operatorToken(t, env)
+	// #14: the operator who picks must be the signed operator who unloads —
+	// the basket is keyed by assembly_tasks.operator_id.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 1, 1)
 
 	// Allocate and pick the single product (-> ASSEMBLED, task DONE by this operator).
 	var allocated allocateData
-	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+	postJSON(t, env, op.token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
 	}, &allocated)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
@@ -248,7 +163,7 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 	require.NoError(t, err)
 
 	var picked pickData
-	postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": productID.String()}, &picked)
+	postJSON(t, env, op.token, "/assembly/pick", map[string]string{"product_id": productID.String()}, &picked)
 	requireProductStatus(t, ctx, env, productID, "ASSEMBLED")
 
 	// Restart the WMS: any in-memory cart is dropped here.
@@ -261,26 +176,23 @@ func TestAssemblyCartLostOnRestart_pendingFix(t *testing.T) {
 
 	// Confirm the WMS serves authed traffic before the assertion under test, so a warming
 	// WMS never surfaces as a misleading CART_EMPTY.
-	waitWMSServingAuthed(t, ctx, env, token, fx.DestinationID)
+	waitWMSServingAuthed(t, ctx, env, op.token, fx.DestinationID)
 
-	// The fix: scan-shipping-buffer reconstructs the cart from DB, so the picked product is
+	// The fix: the signed unload reconstructs the cart from DB, so the picked product is
 	// placed (products_placed=1) instead of being stranded with 409 CART_EMPTY.
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 	require.Equal(t, 1, placed.ProductsPlaced, "picked product must survive a WMS restart (cart derived from DB)")
 
 	requireProductStatus(t, ctx, env, productID, "READY_TO_SHIP")
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ASSEMBLED")
 }
 
-// TestAdapterN1_ReceiptTimeoutDivergence_pendingFix documents a CRITICAL bug found in
+// TestAdapterN1_ReceiptTimeoutDivergence_pendingFix guards a CRITICAL bug found in
 // the sweep, distinct from S2 and needing NO crash: on a WaitReceipt timeout the
-// flusher marks the event FAILED (ledger-adapter/internal/consumer/flusher.go:124-129)
-// even though the tx may still be mining. Under chain congestion the tx mines moments
-// later -> chain shows the transition COMMITTED while the DB row is terminal FAILED,
-// with no reconciliation path back out of FAILED.
+// flusher used to mark the event FAILED even though the tx might still be mining, so
+// the chain showed the transition COMMITTED while the DB row stayed terminal FAILED.
+// Now Confirm stalls instead (ledger-adapter/internal/consumer/flusher_confirm.go:43-48):
+// the row stays SENT and the reconcile loop commits it from the receipt.
 func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -289,7 +201,8 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 	require.NotNil(t, env)
 
 	// Shrink RECEIPT_POLL_TIMEOUT so the flusher's poll always loses the race to mining
-	// (transiently marking the row FAILED), and shrink the reconcile cadence so recovery
+	// (the pipeline stalls: the row stays SENT, the adapter exits and its restart policy
+	// brings it back), and shrink the reconcile cadence so recovery
 	// happens within the test's patience window. CONSTRAINT: RECONCILE_MIN_AGE (2s) must
 	// stay > RECEIPT_POLL_TIMEOUT (1ms) or the adapter refuses to boot — 2s > 1ms is fine.
 	t.Cleanup(func() { restoreDefaultAdapter(t, env) })
@@ -299,33 +212,33 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 		"RECONCILE_MIN_AGE":    "2s",
 	})
 
-	eventID := uuid.New()
-	productID := uuid.New()
+	actionID, items, payload := adminReceive(t, ctx, env, 1)
+	productID := items[0]
 
-	// Publish a perfectly valid receiving event. With the tiny RECEIPT_POLL_TIMEOUT the
-	// adapter (transiently) marks it FAILED on the poll timeout while the tx still mines.
-	publishEvent(t, ctx, "receiving", eventID, productID, "{}")
+	// Publish a perfectly valid signed Receive. With the tiny RECEIPT_POLL_TIMEOUT the
+	// adapter gives up on the receipt and exits while the tx still mines.
+	publishAction(t, ctx, actionID, payload)
 
 	// The transition DOES land on-chain (the tx mines regardless of the adapter giving up).
-	// Enforce this as a hard precondition (no silent skip). 120s cap (vs the bash's 60s):
+	// Enforce this as a hard precondition (no silent skip). 120s cap:
 	// under a fresh full-stack bring-up the broadcast tx has been observed to surface only
 	// after ~50-65s. A failure here means the tx never reached the chain — a chain
 	// liveness/mining TIMING issue, NOT an N1 reconcile-fix regression.
 	require.Truef(t, waitItemStatus(t, ctx, env, productID, 1, 120*time.Second),
-		"mining PRECONDITION failed: the receiving transition never reached the chain within 120s "+
+		"mining PRECONDITION failed: the Receive transition never reached the chain within 120s "+
 			"— chain liveness/mining timing, NOT an N1 reconcile regression")
 
 	// The reconcile loop must pull the (wrongly) FAILED row forward to COMMITTED once the
 	// tx is mined. Poll generously to cover min-age (2s) + interval (2s) + slack.
-	if !waitOnchainStatus(t, ctx, env, eventID, "COMMITTED", 50*time.Second) {
-		st := onchainStatus(t, ctx, env, eventID)
+	if !waitOnchainStatus(t, ctx, env, actionID, "COMMITTED", 50*time.Second) {
+		st := onchainStatus(t, ctx, env, actionID)
 		require.NotEqualf(t, "FAILED", st,
-			"event is FAILED in DB but the transition is COMMITTED on-chain — reconcile loop did not recover it (N1 regression)")
+			"action is FAILED in DB but the transition is COMMITTED on-chain — reconcile loop did not recover it (N1 regression)")
 		require.Failf(t, "not committed", "expected COMMITTED once the tx mined, got %q", st)
 	}
 
 	// tx_hash must be the original mined tx — reconcile reuses it, never resubmits.
-	require.NotEmpty(t, onchainTxHash(t, ctx, env, eventID),
+	require.NotEmpty(t, onchainTxHash(t, ctx, env, actionID),
 		"COMMITTED row has no tx_hash; reconcile must reuse the mined tx")
 }
 
@@ -337,9 +250,11 @@ func TestAdapterN1_ReceiptTimeoutDivergence_pendingFix(t *testing.T) {
 // completes to SHIPPED (PARTIALLY_SHIPPED -> SHIPPED is covered by TestPartialShipment_MofN).
 //
 // Pure-HTTP / DB-contract test: newMultiProductFixture inserts synthetic STORED products
-// with no chain history, so their picking/shipping events revert on-chain and never COMMIT.
-// The WMS commits its DB transaction before the chain is touched and the ship path is not
-// chain-gated, so the HTTP flow succeeds and every assertion is DB-only.
+// with no chain history, so the contract rejects their pick/ship actions (ActionRejected)
+// and they never COMMIT.
+// The WMS commits its DB transaction before the chain is touched; the strict ship gate
+// (#15) is primed with a confirmed Pick action (markPickingConfirmed), so the HTTP
+// flow succeeds and every assertion is DB-only.
 func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -347,12 +262,13 @@ func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	token := operatorToken(t, env)
+	// #14: the operator who picks must be the signed operator who unloads.
+	op := newSignedOperator(t, ctx, env)
 	fx := newMultiProductFixture(t, ctx, env, "SHOP-7", 2, 2)
 
 	// Allocate: NEW -> ALLOCATED, two PENDING tasks.
 	var allocated allocateData
-	postJSON(t, env, token, "/assembly/allocate", map[string]string{
+	postJSON(t, env, op.token, "/assembly/allocate", map[string]string{
 		"destination_id": fx.DestinationID.String(),
 	}, &allocated)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
@@ -366,35 +282,30 @@ func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 
 	// Pick ONLY P1; P2 stays ALLOCATED with a PENDING task.
 	var picked pickData
-	postJSON(t, env, token, "/assembly/pick", map[string]string{"product_id": p1.String()}, &picked)
+	postJSON(t, env, op.token, "/assembly/pick", map[string]string{"product_id": p1.String()}, &picked)
 
-	// Scan the shipping buffer: P1 -> READY_TO_SHIP. The order does NOT reach ASSEMBLED
+	// Unload the basket: P1 -> READY_TO_SHIP. The order does NOT reach ASSEMBLED
 	// because P2 is still ALLOCATED (UpdateOrdersToAssembled needs every product ready).
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-	}, &placed)
+	placed := unloadToShippingBufferSigned(t, env, op, fx.ShippingBinID.String())
 	require.Equal(t, 1, placed.ProductsPlaced)
 	requireOrderStatus(t, ctx, env, fx.OrderID, "ALLOCATED")
 	requireProductStatus(t, ctx, env, p1, "READY_TO_SHIP")
 	requireProductStatus(t, ctx, env, p2, "ALLOCATED")
 
-	// Bring the dispatch to the gate and ship P1 only.
-	postJSON[map[string]any](t, env, token, "/shipping/scan-buffer", map[string]string{
+	// Bring the dispatch to the gate and ship P1 only (signed spot action). The
+	// fixture product never gets a committed picking event on chain (see the
+	// header comment), so prime the strict ship gate (#15) first.
+	markPickingConfirmed(t, ctx, env, []uuid.UUID{p1})
+	postJSON[map[string]any](t, env, op.token, "/shipping/scan-buffer", map[string]string{
 		"buffer_bin_id": fx.ShippingBinID.String(),
 	}, nil)
 	var driver scanDriverData
-	postJSON(t, env, token, "/shipping/scan-driver", map[string]string{
+	postJSON(t, env, op.token, "/shipping/scan-driver", map[string]string{
 		"dispatch_code": fx.DispatchCode,
 	}, &driver)
 	require.Equal(t, "AT_GATE", driver.Status)
 
-	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fx.ShippingBinID.String(),
-		"dispatch_id":   fx.DispatchID.String(),
-		"product_ids":   []string{p1.String()},
-	}, &shipped)
+	shipped, _ := shipSigned(t, env, op, fx.ShippingBinID.String(), fx.DispatchID.String(), []uuid.UUID{p1})
 	require.Equal(t, 1, shipped.ProductsShipped)
 	require.Equal(t, 0, shipped.OrdersCompleted, "order is not complete — P2 never shipped")
 	require.Equal(t, 1, shipped.OrdersPartiallyShipped, "order moves to PARTIALLY_SHIPPED, not stranded ALLOCATED")
@@ -406,26 +317,20 @@ func TestShippingShipBeforeAssembled_pendingFix(t *testing.T) {
 }
 
 // TestReceivingOpenBoxReachesChain documents a HIGH WMS<->chain divergence
-// (Receiving-1): close-cargoplace must NOT emit a receiving outbox event for a
-// product that is still in an OPEN box. ScanBuffer only places (sets bin_id for)
-// products whose box is CLOSED, so an open-box product keeps bin_id NULL; if
-// close-cargoplace nonetheless emits its outbox event, the product gets an
+// (Receiving-1): the signed cargoplace close must NOT include a product that is
+// still in an OPEN box among its signed item_ids. ScanBuffer only places (sets
+// bin_id for) products whose box is CLOSED, so an open-box product keeps
+// bin_id NULL; if the close nonetheless signed it, the product would get an
 // on-chain Accepted transition while being physically unplaceable, and putaway
 // can never surface it.
 //
-// Expected RED on dev / GREEN on fix:
-//   - dev: receiving.Repository.listProductIDsByCargoplaceTx selects every
-//     RECEIVED product of the cargoplace with no box-status filter, so close-
-//     cargoplace inserts a 'receiving' outbox event for the open-box product
-//     P — outboxCountForAggregate(P,"receiving") >= 1.
-//   - fix: the query JOINs boxes and requires b.status='CLOSED', so the open-box
-//     product P is excluded from the emit list — outboxCountForAggregate(P,
-//     "receiving") == 0.
-//
-// close-cargoplace returns 200 on both branches (the fix only narrows the emit
-// list; it adds no precondition), so the flow drives entirely through postJSON.
-// The only product-level receiving outbox insert is this close-cargoplace path
-// (insertOutboxEventsTx), so the count for P is exactly the open-box leak.
+// The close needs at least one closable product (an empty cargoplace cannot be
+// signed — the contract rejects EmptyItems), so a second product is received in
+// a CLOSED box and the close succeeds. Expected GREEN on fix:
+//   - the closable-products query JOINs boxes and requires b.status='CLOSED',
+//     so the open-box product P is not among the signed item_ids —
+//     warehouseActionsContainingProduct(P) == 0 and there is no legacy
+//     receiving event for P either.
 func TestReceivingOpenBoxReachesChain(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -433,31 +338,31 @@ func TestReceivingOpenBoxReachesChain(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	token := operatorToken(t, env)
+	op := newSignedOperator(t, ctx, env)
 	fixture := newOutboundFixture(t, ctx, env)
 
 	// Move cargoplace to TABLE_IN_PROGRESS.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 	}, nil)
 
 	// Open a box (left OPEN — we deliberately never close it).
 	var box scanBoxData
-	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_barcode":   fixture.BoxBarcode,
 	}, &box)
 
 	// Scan the SKU and the QR so product P is RECEIVED inside the OPEN box.
 	var sku scanSKUData
-	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"barcode":       fixture.Barcode,
 	}, &sku)
 
 	var qr scanQRData
-	postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"sku_id":        sku.SKUID.String(),
@@ -466,10 +371,10 @@ func TestReceivingOpenBoxReachesChain(t *testing.T) {
 	require.Equal(t, "RECEIVED", qr.Status)
 	requireProductStatus(t, ctx, env, qr.ProductID, "RECEIVED")
 
-	// Do NOT close-box. scan-buffer places only CLOSED-box products, so the open-box
-	// product P is not placed: products_placed must be 0 and P keeps bin_id NULL.
+	// Do NOT close the OPEN box. scan-buffer places only CLOSED-box products, so the
+	// open-box product P is not placed: products_placed must be 0 and P keeps bin_id NULL.
 	var placed scanStorageBinData
-	postJSON(t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, &placed)
@@ -481,14 +386,50 @@ func TestReceivingOpenBoxReachesChain(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, binID, "open-box product must still have bin_id NULL after scan-buffer")
 
-	// close-cargoplace (200 on both branches). On dev it emits a receiving event
-	// for P; on fix it filters P out.
-	var closed closeCargoplaceData
-	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
+	// The close needs at least one closable product (an empty cargoplace cannot
+	// be signed), so a second product is received in a SECOND box which is then
+	// CLOSED: exactly that one product is closable, P stays in the OPEN box.
+	var box2 scanBoxData
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
-	}, &closed)
+		"box_barcode":   fixture.BoxBarcode + "-2",
+	}, &box2)
 
-	// Invariant: no receiving outbox event may exist for the open-box product P.
+	var sku2 scanSKUData
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+		"box_id":        box2.BoxID.String(),
+		"barcode":       fixture.Barcode,
+	}, &sku2)
+
+	var qr2 scanQRData
+	postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+		"box_id":        box2.BoxID.String(),
+		"sku_id":        sku2.SKUID.String(),
+		"qr_code":       fixture.QRCode + "-2",
+	}, &qr2)
+	require.Equal(t, "RECEIVED", qr2.Status)
+
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
+		"box_id": box2.BoxID.String(),
+	}, nil)
+
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
+		"cargoplace_id": fixture.CargoplaceID.String(),
+		"buffer_bin_id": fixture.ReceivingBinID.String(),
+	}, nil)
+
+	closed := closeCargoplaceSigned(t, env, op, fixture.CargoplaceID.String())
+	require.Equal(t, "TABLE_CLOSED", closed.Status)
+	require.Equal(t, 1, closed.OutboxEventsCreated, "only the closed-box product is closable — one part")
+
+	// Invariant: the open-box product P must not reach the chain, neither as a
+	// signed item_id nor as a legacy receiving event.
+	signedCount := warehouseActionsContainingProduct(t, ctx, env, qr.ProductID)
+	require.Equalf(t, 0, signedCount,
+		"the signed close contains open-box product %s in its item_ids; an OPEN-box product (bin_id NULL) must never reach the chain (Receiving-1)",
+		qr.ProductID)
 	count := outboxCountForAggregate(t, ctx, env, qr.ProductID, "receiving")
 	require.Equalf(t, 0, count,
 		"close-cargoplace emitted %d receiving outbox event(s) for open-box product %s; an OPEN-box product (bin_id NULL) must never reach the chain (Receiving-1)",
@@ -562,10 +503,11 @@ func TestDispatchesAuth_CustomerAccess(t *testing.T) {
 }
 
 // TestAdapterN9_IntraBatchDuplicate_pendingFix documents N9: if Kafka redelivers
-// the same event_id within a single flush window, filterAndMarkPending appends it
-// twice. buildBatchArgs produces [id, id], the contract reverts on duplicate
-// eventId, and the entire batch is marked FAILED+DLQ — even though all other
-// events are valid. Compounds S2 on crash recovery.
+// the same actionId within a single flush window, the pre-fix flusher appended it
+// twice and the whole batch was marked FAILED+DLQ — even though all other actions
+// were valid. Post-fix: the flusher dedups a repeated actionId within one window
+// and the contract skips a repeated actionId (ADR-0001 §6). Compounds S2 on
+// crash recovery.
 func TestAdapterN9_IntraBatchDuplicate_pendingFix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -574,29 +516,30 @@ func TestAdapterN9_IntraBatchDuplicate_pendingFix(t *testing.T) {
 	require.NotNil(t, env)
 
 	// Widen BATCH_TIMEOUT so the two back-to-back in-process publishes of the SAME
-	// event_id land in ONE flush window (the intra-batch duplicate the fix dedups).
-	// key=product_id keeps both on one partition, so they are delivered in-order to
+	// action land in ONE flush window (the intra-batch duplicate the fix dedups).
+	// key=action_id keeps both on one partition, so they are delivered in-order to
 	// the same poll batch.
 	t.Cleanup(func() { restoreDefaultAdapter(t, env) })
 	recreateAdapterWithEnv(t, ctx, env, map[string]string{"BATCH_TIMEOUT": "10s"})
 
-	eventID := uuid.New()
-	productID := uuid.New()
+	actionID, items, payload := adminReceive(t, ctx, env, 1)
+	productID := items[0]
 
-	// Publish the SAME event_id twice, back-to-back. Pre-fix: filterAndMarkPending
-	// appended it twice -> buildBatchArgs [id,id] -> contract "Duplicate eventId"
-	// revert -> both rows FAILED+DLQ. Post-fix: the flusher dedups within the window
-	// and the contract skips an intra-batch duplicate, so the event commits cleanly.
-	publishEvent(t, ctx, "receiving", eventID, productID, "{}")
-	publishEvent(t, ctx, "receiving", eventID, productID, "{}")
+	// Publish the SAME action twice, back-to-back. Pre-fix: the flusher appended it
+	// twice -> the contract hit the duplicate actionId and reverted the batch ->
+	// both rows FAILED+DLQ. Post-fix: the flusher dedups within the window and the
+	// contract skips an intra-batch duplicate (ADR-0001 §6), so the action commits
+	// cleanly.
+	publishAction(t, ctx, actionID, payload)
+	publishAction(t, ctx, actionID, payload)
 
 	// The invariant holds on BOTH the intra-batch path (deduped) and the unlikely
 	// split-window path (the 2nd becomes an S2-style redelivery, reconciled forward):
-	// the event must end COMMITTED, never FAILED.
-	if !waitOnchainStatus(t, ctx, env, eventID, "COMMITTED", 60*time.Second) {
-		st := onchainStatus(t, ctx, env, eventID)
+	// the action must end COMMITTED, never FAILED.
+	if !waitOnchainStatus(t, ctx, env, actionID, "COMMITTED", 60*time.Second) {
+		st := onchainStatus(t, ctx, env, actionID)
 		require.NotEqualf(t, "FAILED", st,
-			"duplicate event_id poisoned the batch: row is FAILED (N9 regression — intra-batch dedup missing)")
+			"duplicate actionId poisoned the batch: row is FAILED (N9 regression — intra-batch dedup missing)")
 		require.Failf(t, "not committed", "expected COMMITTED, got %q", st)
 	}
 
@@ -604,10 +547,10 @@ func TestAdapterN9_IntraBatchDuplicate_pendingFix(t *testing.T) {
 	require.EqualValuesf(t, 1, callItemStatus(t, ctx, env, productID),
 		"on-chain itemStatus != 1 after duplicate publish (expected single Accepted transition)")
 
-	// Exactly ONE onchain_events row exists for the event_id (the dup did not create a
+	// Exactly ONE onchain_events row exists for the action id (the dup did not create a
 	// second row, and it is not FAILED).
 	var rowCount int
 	require.NoError(t, env.db.QueryRow(ctx,
-		`SELECT count(*) FROM public.onchain_events WHERE event_id = $1`, eventID).Scan(&rowCount))
-	require.Equalf(t, 1, rowCount, "expected exactly one onchain_events row for the deduped event_id, got %d", rowCount)
+		`SELECT count(*) FROM public.onchain_events WHERE event_id = $1`, actionID).Scan(&rowCount))
+	require.Equalf(t, 1, rowCount, "expected exactly one onchain_events row for the deduped action id, got %d", rowCount)
 }

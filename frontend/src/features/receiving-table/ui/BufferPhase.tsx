@@ -11,6 +11,7 @@ interface BufferPhaseProps {
   cargoplace: ActiveCargoplace
   bufferPlaced: number | null
   summary: CloseCargoplaceSummary | null
+  operationId: string | null
   onScanBuffer: (value: string) => Promise<void> | void
   onCloseCargoplace: () => void
   onFinish: () => void
@@ -25,6 +26,7 @@ export function BufferPhase({
   cargoplace,
   bufferPlaced,
   summary,
+  operationId,
   onScanBuffer,
   onCloseCargoplace,
   onFinish,
@@ -37,7 +39,7 @@ export function BufferPhase({
     return (
       <section className="flex flex-col gap-6">
         <ContextSummary cargoplaceCode={cargoplace.cargoplaceCode} />
-        <CargoplaceSummary summary={summary} />
+        <CargoplaceSummary summary={summary} operationId={operationId} />
         <div>
           <Button type="button" onClick={onFinish}>
             Понятно

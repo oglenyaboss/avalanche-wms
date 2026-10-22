@@ -46,7 +46,7 @@ info:
     - Модель данных: `../data-model/entity-lifecycle.md`, `../data-model/er-diagram.md`,
       `../db/Database_ru_v2.md`
     - Интеграция с блокчейном: `../integration/blockchain-mapping.md`,
-      `../integration/data-contract.md`, `../integration/batch-mapping-approach.md`
+      `../integration/data-contract.md`
     - Архитектура: `../architecture/system-overview.md`, `../CONVENTIONS.md`, `../MR_GUIDE.md`
 
 servers:
@@ -840,17 +840,19 @@ paths:
         '500':
           $ref: '#/components/responses/JSONInternal'
 
-  /receiving/table/close-cargoplace:
+  /receiving/table/close-cargoplace/draft:
     post:
       tags: [Receiving]
-      summary: Завершить обработку грузоместа (создаёт outbox-события)
+      summary: Черновик подписанного закрытия грузоместа
       description: |
-        RBAC: только `OPERATOR`. Переводит грузоместо в `TABLE_CLOSED` и создаёт по
-        одному `outbox_events` на каждый `RECEIVED` товар в `CLOSED` коробках
-        (`aggregate_type=receiving`, `event_type=wms.receiving.v1`). Идемпотентность —
-        через guard статуса: повтор → `409 CARGOPLACE_NOT_IN_PROGRESS`.
-        См. `../integration/blockchain-mapping.md`.
-      operationId: receivingCloseCargoplace
+        RBAC: только `OPERATOR`. Сверяет ожидаемые SKU с реально принятыми товарами,
+        сортирует товары грузоместа по `itemId` и режет операцию на части по ≤ 2000
+        товаров (ADR-0001 §10). Пишет только черновик — по строке `warehouse_actions` на
+        часть (`action_id`, соль, `details_hash`, `challenge`). Ответ — то, что подписывает
+        passkey оператора (WebAuthn P-256, `user_verification: required`); подписи
+        отправляются в `POST /receiving/table/close-cargoplace/submit`. Состояние операции
+        в цепи — `GET /signed-actions/operations/{operation_id}`.
+      operationId: receivingCloseCargoplaceDraft
       requestBody:
         required: true
         content:
@@ -861,7 +863,7 @@ paths:
               cargoplace_id: 22222222-2222-2222-2222-222222222222
       responses:
         '200':
-          description: Грузоместо закрыто, outbox-события созданы.
+          description: Черновик создан — `operation_id` и части с `challenge`.
           content:
             application/json:
               schema:
@@ -869,22 +871,25 @@ paths:
                   - $ref: '#/components/schemas/SuccessEnvelope'
                   - properties:
                       data:
-                        $ref: '#/components/schemas/CloseCargoplaceResult'
+                        $ref: '#/components/schemas/SignedActionDraft'
               example:
                 success: true
                 data:
-                  cargoplace_id: 22222222-2222-2222-2222-222222222222
-                  status: TABLE_CLOSED
-                  summary:
-                    products_received: 18
-                    products_expected: 20
-                    shortage: 2
-                    shortage_by_sku:
-                      - sku_name: Ноутбук Lenovo X1
-                        expected: 5
-                        received: 3
-                        shortage: 2
-                  outbox_events_created: 18
+                  operation_id: 01929c5e-6f00-7000-8000-000000001001
+                  action_type: 1
+                  signer_key_id: 0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b
+                  rp_id: localhost
+                  allow_credentials:
+                    - type: public-key
+                      id: pQECAyYgASFYIB
+                  user_verification: required
+                  timeout: 60000
+                  parts:
+                    - action_id: 01929c5e-6f00-7000-8000-000000001002
+                      item_ids:
+                        - 55555555-5555-5555-5555-555555555555
+                      details_hash: 0x3d2a91c4e8b7f6a5d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c
+                      challenge: 3q2-7wY0bXk9tR4sP1nM6vL8zJ5hG2fD0cA
                 error: null
         '400':
           $ref: '#/components/responses/JSONBadRequest'
@@ -899,7 +904,88 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
-          description: '`CARGOPLACE_NOT_IN_PROGRESS` — грузоместо не в TABLE_IN_PROGRESS (в т.ч. повторный вызов).'
+          description: '`CARGOPLACE_NOT_IN_PROGRESS` — грузоместо не в `TABLE_IN_PROGRESS`; `SIGNER_KEY_NOT_ACTIVE` — у оператора нет активного в реестре passkey.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /receiving/table/close-cargoplace/submit:
+    post:
+      tags: [Receiving]
+      summary: Принять подписи частей и закрыть грузоместо
+      description: |
+        RBAC: только `OPERATOR`. Проверяет WebAuthn-подписи всех частей и в одной
+        транзакции переводит грузоместо в `TABLE_CLOSED`, пишет лог `receiving_table` и
+        **по одной строке `outbox_events` на каждую часть** (`aggregate_type=signed_action`,
+        `event_type=wms.action.v1`, `event_id = action_id`, `payload` — конверт действия).
+        Debezium публикует их в топик `wms.events.v1`, Ledger Adapter вызывает
+        `SignedMappingWMS.applyActions`; FSM контракта ведётся на каждый товар
+        (None → Accepted). Идемпотентность — guard статуса: повтор →
+        `409 CARGOPLACE_NOT_IN_PROGRESS`.
+      operationId: receivingCloseCargoplaceSubmit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignedActionSubmitRequest'
+            example:
+              operation_id: 01929c5e-6f00-7000-8000-000000001001
+              assertions:
+                - action_id: 01929c5e-6f00-7000-8000-000000001002
+                  credential_id: pQECAyYgASFYIB
+                  authenticator_data: ZmxhZ3M
+                  client_data_json: eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0
+                  signature: MEUCIQD
+      responses:
+        '200':
+          description: Грузоместо закрыто, по строке outbox на каждую часть операции.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/CloseCargoplaceResult'
+              example:
+                success: true
+                data:
+                  cargoplace_id: 22222222-2222-2222-2222-222222222222
+                  operation_id: 01929c5e-6f00-7000-8000-000000001001
+                  status: TABLE_CLOSED
+                  summary:
+                    products_received: 18
+                    products_expected: 20
+                    shortage: 2
+                    shortage_by_sku:
+                      - sku_name: Ноутбук Lenovo X1
+                        expected: 5
+                        received: 3
+                        shortage: 2
+                  outbox_events_created: 1
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` (битый JSON, не-UUID) или `INVALID_ASSERTION` (подпись части не прошла проверку).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`OPERATION_NOT_FOUND` — операция не найдена или создана другим пользователем; `CARGOPLACE_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`OPERATION_ALREADY_SUBMITTED`, `CARGOPLACE_NOT_IN_PROGRESS` или `SIGNER_KEY_NOT_ACTIVE`.'
           content:
             application/json:
               schema:
@@ -907,7 +993,7 @@ paths:
               example:
                 success: false
                 data: null
-                error: { code: CARGOPLACE_NOT_IN_PROGRESS, message: Грузоместо не в обработке на столе }
+                error: { code: OPERATION_ALREADY_SUBMITTED, message: Операция уже отправлена }
         '500':
           $ref: '#/components/responses/JSONInternal'
 
@@ -1033,17 +1119,18 @@ paths:
         '500':
           $ref: '#/components/responses/JSONInternal'
 
-  /putaway/scan-storage-bin:
+  /putaway/scan-storage-bin/draft:
     post:
       tags: [Putaway]
-      summary: Разместить партию товаров в ячейке хранения
+      summary: Черновик подписанного размещения корзины в ячейке хранения
       description: |
-        RBAC: только `OPERATOR`. Единственный мутирующий эндпоинт раскладки.
-        Переводит товары `RECEIVED → STORED`, пишет `wms_ops.putaways` и outbox-события
-        (`aggregate_type=putaway`, `event_type=wms.putaway.v1`). Перед транзакцией —
-        chain-gate: `FAILED` on-chain receiving-событие → `409 CHAIN_EVENT_REJECTED`.
-        `product_ids` — непустой, максимум 200 элементов.
-      operationId: putawayScanStorageBin
+        RBAC: только `OPERATOR`. Chain-gate до записи черновика: `FAILED`
+        receiving-действие товара → `409 CHAIN_EVENT_REJECTED`. Сортирует товары по
+        `itemId`, режет операцию на части по ≤ 2000 товаров (ADR-0001 §10) и пишет
+        только черновик — по строке `warehouse_actions` на часть. `product_ids` —
+        непустой, максимум 200 элементов. Подписи частей отправляются в
+        `POST /putaway/scan-storage-bin/submit`.
+      operationId: putawayScanStorageBinDraft
       requestBody:
         required: true
         content:
@@ -1056,7 +1143,7 @@ paths:
               storage_bin_id: 77777777-7777-7777-7777-777777777777
       responses:
         '200':
-          description: Товары размещены.
+          description: Черновик создан — `operation_id` и части с `challenge`.
           content:
             application/json:
               schema:
@@ -1064,17 +1151,28 @@ paths:
                   - $ref: '#/components/schemas/SuccessEnvelope'
                   - properties:
                       data:
-                        $ref: '#/components/schemas/ScanStorageBinResponse'
+                        $ref: '#/components/schemas/SignedActionDraft'
               example:
                 success: true
                 data:
-                  storage_bin_id: 77777777-7777-7777-7777-777777777777
-                  storage_bin_code: M2-A-03
-                  products_placed: 3
-                  outbox_events_created: 3
+                  operation_id: 01929c5e-6f00-7000-8000-000000002001
+                  action_type: 2
+                  signer_key_id: 0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b
+                  rp_id: localhost
+                  allow_credentials:
+                    - type: public-key
+                      id: pQECAyYgASFYIB
+                  user_verification: required
+                  timeout: 60000
+                  parts:
+                    - action_id: 01929c5e-6f00-7000-8000-000000002002
+                      item_ids:
+                        - 55555555-5555-5555-5555-555555555555
+                      details_hash: 0x9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0
+                      challenge: 1aB2cD3eF4gH5iJ6kL7mN8oP9qR0sT
                 error: null
         '400':
-          description: '`INVALID_REQUEST` — битый JSON, пустой/слишком большой (>200) product_ids, не-UUID.'
+          description: '`INVALID_REQUEST` — битый JSON, пустой/слишком большой (>200) `product_ids`, не-UUID.'
           content:
             application/json:
               schema:
@@ -1091,14 +1189,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
-              example:
-                success: false
-                data: null
-                error: { code: STORAGE_BIN_NOT_FOUND, message: Ячейка хранения не найдена }
         '409':
           description: |
-            `PRODUCT_NOT_IN_BUFFER`, `PRODUCT_NOT_RECEIVED` или
-            `CHAIN_EVENT_REJECTED` (FAILED on-chain receiving-событие).
+            `PRODUCT_NOT_IN_BUFFER`, `PRODUCT_NOT_RECEIVED`, `CHAIN_EVENT_REJECTED`
+            (FAILED receiving-действие товара) или `SIGNER_KEY_NOT_ACTIVE`.
           content:
             application/json:
               schema:
@@ -1106,7 +1200,83 @@ paths:
               example:
                 success: false
                 data: null
-                error: { code: CHAIN_EVENT_REJECTED, message: Событие отклонено блокчейном }
+                error: { code: CHAIN_EVENT_REJECTED, message: 'Размещение отклонено: приёмка товара не подтверждена в блокчейне (FAILED)' }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /putaway/scan-storage-bin/submit:
+    post:
+      tags: [Putaway]
+      summary: Принять подписи частей и разместить товары в ячейке
+      description: |
+        RBAC: только `OPERATOR`. Проверяет подписи всех частей и в одной транзакции
+        переводит товары `RECEIVED → STORED`, пишет `wms_ops.putaways` (у строки —
+        `action_id` своей части) и **по строке `outbox_events` на каждую часть**
+        (`aggregate_type=signed_action`, `event_type=wms.action.v1`). Chain-gate
+        (`FAILED` receiving) повторяется на подписанном наборе, поэтому между
+        черновиком и submit возможен `409 CHAIN_EVENT_REJECTED`. Если состав корзины
+        изменился — `409 DRAFT_STALE`. `outbox_events_created` считает части-действия,
+        а не товары.
+      operationId: putawayScanStorageBinSubmit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignedActionSubmitRequest'
+            example:
+              operation_id: 01929c5e-6f00-7000-8000-000000002001
+              assertions:
+                - action_id: 01929c5e-6f00-7000-8000-000000002002
+                  credential_id: pQECAyYgASFYIB
+                  authenticator_data: ZmxhZ3M
+                  client_data_json: eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0
+                  signature: MEUCIQD
+      responses:
+        '200':
+          description: Товары размещены, по строке outbox на каждую часть операции.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanStorageBinResponse'
+              example:
+                success: true
+                data:
+                  storage_bin_id: 77777777-7777-7777-7777-777777777777
+                  storage_bin_code: M2-A-03
+                  products_placed: 3
+                  outbox_events_created: 1
+                  operation_id: 01929c5e-6f00-7000-8000-000000002001
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` (битый JSON, не-UUID) или `INVALID_ASSERTION` (подпись части не прошла проверку).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`OPERATION_NOT_FOUND`, `STORAGE_BIN_NOT_FOUND` или `PRODUCT_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: |
+            `OPERATION_ALREADY_SUBMITTED`, `DRAFT_STALE` (товар ушёл из буфера или сменил
+            статус), `PRODUCT_NOT_IN_BUFFER`, `PRODUCT_NOT_RECEIVED`,
+            `CHAIN_EVENT_REJECTED` или `SIGNER_KEY_NOT_ACTIVE`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/JSONInternal'
 
@@ -1267,8 +1437,9 @@ paths:
       tags: [Assembly]
       summary: Подобрать товар (зафиксировать пик)
       description: |
-        RBAC: только `OPERATOR`. Помечает задачу `DONE`, товар `ASSEMBLED`, пишет
-        outbox-событие (`aggregate_type=picking`, `event_type=wms.picking.v1`).
+        RBAC: только `OPERATOR`. Помечает задачу `DONE`, товар `ASSEMBLED`. **Outbox не
+        пишется**: Pick-действие уходит в цепь при выгрузке корзины в буфер отгрузки
+        (`POST /assembly/scan-shipping-buffer/submit`).
         Перед транзакцией — chain-gate по putaway-стадии: `FAILED` → `409 CHAIN_EVENT_REJECTED`.
         `cart_size` — кол-во ASSEMBLED товаров оператора с DONE-задачами.
       operationId: assemblyPick
@@ -1316,15 +1487,18 @@ paths:
         '500':
           $ref: '#/components/responses/JSONInternal'
 
-  /assembly/scan-shipping-buffer:
+  /assembly/scan-shipping-buffer/draft:
     post:
       tags: [Assembly]
-      summary: Переместить собранные товары в буфер отгрузки
+      summary: Черновик подписанной выгрузки корзины в буфер отгрузки
       description: |
-        RBAC: только `OPERATOR`. Переносит все `ASSEMBLED` товары оператора (с DONE-задачами)
-        в SHIPPING_BUFFER-ячейку (`READY_TO_SHIP`). Заказы, у которых все товары
-        `READY_TO_SHIP`, переводятся в `ASSEMBLED`.
-      operationId: assemblyScanShippingBuffer
+        RBAC: только `OPERATOR`. Читает корзину оператора (товары `ASSEMBLED` с
+        DONE-задачей под назначение буфера), сортирует их по `itemId`, режет операцию на
+        части по ≤ 2000 товаров (ADR-0001 §10) и пишет только черновик — по строке
+        `warehouse_actions` на часть. Ничего в товарах не меняет. Подписи частей
+        отправляются в `POST /assembly/scan-shipping-buffer/submit`: там товары переходят
+        в `READY_TO_SHIP`, а в цепь уходит Pick-действие (`PutAway → Picked`).
+      operationId: assemblyScanShippingBufferDraft
       requestBody:
         required: true
         content:
@@ -1335,7 +1509,7 @@ paths:
               buffer_bin_id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
       responses:
         '200':
-          description: Товары перемещены в буфер отгрузки.
+          description: Черновик создан — `operation_id` и части с `challenge`.
           content:
             application/json:
               schema:
@@ -1343,13 +1517,28 @@ paths:
                   - $ref: '#/components/schemas/SuccessEnvelope'
                   - properties:
                       data:
-                        $ref: '#/components/schemas/ScanShippingBufferResponse'
+                        $ref: '#/components/schemas/SignedActionDraft'
               example:
                 success: true
-                data: { buffer_bin_id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, products_placed: 4, orders_assembled: 1 }
+                data:
+                  operation_id: 01929c5e-6f00-7000-8000-000000003001
+                  action_type: 3
+                  signer_key_id: 0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b
+                  rp_id: localhost
+                  allow_credentials:
+                    - type: public-key
+                      id: pQECAyYgASFYIB
+                  user_verification: required
+                  timeout: 60000
+                  parts:
+                    - action_id: 01929c5e-6f00-7000-8000-000000003002
+                      item_ids:
+                        - 55555555-5555-5555-5555-555555555555
+                      details_hash: 0x4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b
+                      challenge: 0zY9xW8vU7tS6rQ5pO4nM3lK2jI1hG
                 error: null
         '400':
-          description: '`INVALID_REQUEST` или `BIN_NOT_SHIPPING_BUFFER` (section ≠ SHIPPING_BUFFER).'
+          description: '`INVALID_REQUEST` (битый JSON, не-UUID) или `BIN_NOT_SHIPPING_BUFFER` (ячейка не найдена или `section ≠ SHIPPING_BUFFER`).'
           content:
             application/json:
               schema:
@@ -1363,17 +1552,18 @@ paths:
         '403':
           $ref: '#/components/responses/JSONForbidden'
         '404':
-          description: '`DESTINATION_NOT_FOUND` — у SHIPPING_BUFFER-ячейки нет destination_id.'
+          description: '`DESTINATION_NOT_FOUND` — у SHIPPING_BUFFER-ячейки нет `destination_id`.'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
-          description: >-
-            `CART_EMPTY` — у оператора нет ASSEMBLED товаров для перемещения (корзина
-            пуста / уже размещено). `DESTINATION_MISMATCH` — оператор несёт собранные
-            товары, но отсканировал буфер ДРУГОГО магазина: ни один товар не перемещён
-            (защита от mis-delivery). См. `../flows/assembly-flow.md`.
+          description: |
+            `CART_EMPTY` — у оператора нет ASSEMBLED товаров для этого назначения.
+            `DESTINATION_MISMATCH` — оператор несёт товары, собранные под другой магазин,
+            и отсканировал чужой буфер: ни один товар не перемещён.
+            `SIGNER_KEY_NOT_ACTIVE` — у оператора нет активного в реестре passkey.
+            См. `../flows/assembly-flow.md`.
           content:
             application/json:
               schema:
@@ -1391,6 +1581,79 @@ paths:
                     success: false
                     data: null
                     error: { code: DESTINATION_MISMATCH, message: 'Буфер отгрузки другого магазина: собранные товары не для этого пункта назначения' }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /assembly/scan-shipping-buffer/submit:
+    post:
+      tags: [Assembly]
+      summary: Принять подписи частей и выгрузить корзину в буфер отгрузки
+      description: |
+        RBAC: только `OPERATOR`. Проверяет подписи всех частей и в одной транзакции
+        перемещает товары корзины в `SHIPPING_BUFFER` (`READY_TO_SHIP`), проставляет
+        задачам сборки `action_id` части и `unloaded_at`, переводит полностью собранные
+        заказы в `ASSEMBLED` и пишет **по строке `outbox_events` на каждую часть**
+        (`aggregate_type=signed_action`, `event_type=wms.action.v1`). В цепи это
+        Pick-действие: `SignedMappingWMS.applyActions`, FSM на каждый товар
+        `PutAway → Picked`. Подбор с полки (`/assembly/pick`) в цепь не пишет.
+      operationId: assemblyScanShippingBufferSubmit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignedActionSubmitRequest'
+            example:
+              operation_id: 01929c5e-6f00-7000-8000-000000003001
+              assertions:
+                - action_id: 01929c5e-6f00-7000-8000-000000003002
+                  credential_id: pQECAyYgASFYIB
+                  authenticator_data: ZmxhZ3M
+                  client_data_json: eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0
+                  signature: MEUCIQD
+      responses:
+        '200':
+          description: Товары в буфере отгрузки, по строке outbox на каждую часть операции.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ScanShippingBufferResponse'
+              example:
+                success: true
+                data:
+                  buffer_bin_id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+                  products_placed: 4
+                  orders_assembled: 1
+                  operation_id: 01929c5e-6f00-7000-8000-000000003001
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` (битый JSON, не-UUID), `INVALID_ASSERTION` (подпись части не прошла проверку) или `BIN_NOT_SHIPPING_BUFFER`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`OPERATION_NOT_FOUND` или `DESTINATION_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: |
+            `OPERATION_ALREADY_SUBMITTED`, `DRAFT_STALE` (состав корзины изменился после
+            подписи) или `SIGNER_KEY_NOT_ACTIVE`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/JSONInternal'
 
@@ -1898,20 +2161,21 @@ paths:
         '500':
           $ref: '#/components/responses/JSONInternal'
 
-  /shipping/ship:
+  /shipping/ship/draft:
     post:
       tags: [Shipping]
-      summary: Выполнить отгрузку
+      summary: Черновик подписанной отгрузки буфера на рейс
       description: |
-        RBAC: только `OPERATOR`. Помечает товары `SHIPPED`, пишет `wms_ops.shippings` и
-        outbox-события (`aggregate_type=shipping`, `event_type=wms.shipping.v1`),
-        продвигает статусы заказов, и переводит рейс в `DEPARTED`, если буферная зона
-        пункта назначения опустела. `product_ids` опционален: пусто/отсутствует →
-        **bulk-режим** (все READY_TO_SHIP в ячейке); непусто → **spot-режим** (ровно эти,
-        точное совпадение). Максимум 200 элементов.
-        Примечание: `buffer_remaining` считается по **всей зоне SHIPPING_BUFFER пункта
-        назначения**, а не по одной ячейке. Ship-gate по блокчейну отсутствует.
-      operationId: shippingShip
+        RBAC: только `OPERATOR`. `product_ids` опционален: пусто/отсутствует →
+        **bulk-режим** (все `READY_TO_SHIP` в ячейке); непусто → **spot-режим** (ровно
+        эти товары), максимум 200 элементов. Проверяет `section=SHIPPING_BUFFER`,
+        совпадение `destination_id` буфера и рейса, `AT_GATE`, наличие товаров и chain-gate
+        сборки: пока Pick-действие товара не `COMMITTED` в цепи →
+        `409 PICKING_NOT_CONFIRMED`. Затем сортирует товары по `itemId`, режет операцию
+        на части по ≤ 2000 товаров (ADR-0001 §10) и пишет только черновик — по строке
+        `warehouse_actions` на часть. Подписи частей отправляются в
+        `POST /shipping/ship/submit`.
+      operationId: shippingShipDraft
       requestBody:
         required: true
         content:
@@ -1925,7 +2189,7 @@ paths:
                 - 55555555-5555-5555-5555-555555555555
       responses:
         '200':
-          description: Отгрузка выполнена.
+          description: Черновик создан — `operation_id` и части с `challenge`.
           content:
             application/json:
               schema:
@@ -1933,34 +2197,28 @@ paths:
                   - $ref: '#/components/schemas/SuccessEnvelope'
                   - properties:
                       data:
-                        $ref: '#/components/schemas/ShipResponse'
-              examples:
-                full:
-                  summary: Полная отгрузка, рейс отбыл
-                  value:
-                    success: true
-                    data:
-                      products_shipped: 3
-                      outbox_events_created: 3
-                      orders_completed: 1
-                      orders_partially_shipped: 0
-                      dispatch_departed: true
-                      buffer_remaining: 0
-                    error: null
-                partial:
-                  summary: Частичная отгрузка
-                  value:
-                    success: true
-                    data:
-                      products_shipped: 2
-                      outbox_events_created: 2
-                      orders_completed: 0
-                      orders_partially_shipped: 1
-                      dispatch_departed: false
-                      buffer_remaining: 1
-                    error: null
+                        $ref: '#/components/schemas/SignedActionDraft'
+              example:
+                success: true
+                data:
+                  operation_id: 01929c5e-6f00-7000-8000-000000004001
+                  action_type: 4
+                  signer_key_id: 0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b
+                  rp_id: localhost
+                  allow_credentials:
+                    - type: public-key
+                      id: pQECAyYgASFYIB
+                  user_verification: required
+                  timeout: 60000
+                  parts:
+                    - action_id: 01929c5e-6f00-7000-8000-000000004002
+                      item_ids:
+                        - 55555555-5555-5555-5555-555555555555
+                      details_hash: 0x7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d
+                      challenge: 5hG2fD0cA9bE8dF7gH6iJ5kL4mN3oP
+                error: null
         '400':
-          description: '`INVALID_REQUEST` — невалидные UUID, >200 product_ids, nil-значения.'
+          description: '`INVALID_REQUEST` — невалидные UUID, >200 `product_ids`; `BIN_NOT_SHIPPING_BUFFER` (section ≠ SHIPPING_BUFFER).'
           content:
             application/json:
               schema:
@@ -1980,8 +2238,9 @@ paths:
             `DISPATCH_ALREADY_DEPARTED`, `DISPATCH_CANCELLED`, `DESTINATION_MISMATCH`
             (destination буфера ≠ destination рейса), `DISPATCH_NOT_AT_GATE`,
             `BUFFER_EMPTY` (bulk-режим, в ячейке нет READY_TO_SHIP) или
-            `PRODUCT_NOT_IN_BUFFER` (spot-режим, несовпадение по товарам).
-            Также `BIN_NOT_SHIPPING_BUFFER` (section≠SHIPPING_BUFFER) отдаётся как 400.
+            `PRODUCT_NOT_IN_BUFFER` (spot-режим, несовпадение по товарам),
+            `PICKING_NOT_CONFIRMED` (Pick-действие товара ещё не COMMITTED в цепи) или
+            `SIGNER_KEY_NOT_ACTIVE`.
           content:
             application/json:
               schema:
@@ -1997,6 +2256,108 @@ paths:
                     success: false
                     data: null
                     error: { code: DESTINATION_MISMATCH, message: Пункт назначения буфера не совпадает с рейсом }
+                pickingNotConfirmed:
+                  value:
+                    success: false
+                    data: null
+                    error: { code: PICKING_NOT_CONFIRMED, message: 'Сборка части товаров (2 шт.) ещё не подтверждена в цепи. Повторите отгрузку чуть позже' }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /shipping/ship/submit:
+    post:
+      tags: [Shipping]
+      summary: Принять подписи частей и отгрузить товары
+      description: |
+        RBAC: только `OPERATOR`. Проверяет подписи всех частей и в одной транзакции
+        помечает товары `SHIPPED`, пишет `wms_ops.shippings` (у строки — `action_id`
+        своей части), продвигает заказы в `SHIPPED` / `PARTIALLY_SHIPPED`, переводит рейс
+        в `DEPARTED`, если зона `SHIPPING_BUFFER` пункта назначения опустела, и пишет
+        **по строке `outbox_events` на каждую часть** (`aggregate_type=signed_action`,
+        `event_type=wms.action.v1`). В цепи это Ship-действие:
+        `SignedMappingWMS.applyActions`, FSM на каждый товар `Picked → Shipped` —
+        финальный переход. Chain-gate сборки перепроверяется на подписанном наборе
+        (`409 PICKING_NOT_CONFIRMED`), состав черновика — тоже (`409 DRAFT_STALE`).
+        `buffer_remaining` считается по **всей зоне SHIPPING_BUFFER пункта назначения**,
+        а не по одной ячейке.
+      operationId: shippingShipSubmit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignedActionSubmitRequest'
+            example:
+              operation_id: 01929c5e-6f00-7000-8000-000000004001
+              assertions:
+                - action_id: 01929c5e-6f00-7000-8000-000000004002
+                  credential_id: pQECAyYgASFYIB
+                  authenticator_data: ZmxhZ3M
+                  client_data_json: eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0
+                  signature: MEUCIQD
+      responses:
+        '200':
+          description: Отгрузка выполнена, по строке outbox на каждую часть операции.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ShipResponse'
+              examples:
+                full:
+                  summary: Полная отгрузка, рейс отбыл
+                  value:
+                    success: true
+                    data:
+                      products_shipped: 3
+                      outbox_events_created: 1
+                      orders_completed: 1
+                      orders_partially_shipped: 0
+                      dispatch_departed: true
+                      buffer_remaining: 0
+                      operation_id: 01929c5e-6f00-7000-8000-000000004001
+                    error: null
+                partial:
+                  summary: Частичная отгрузка
+                  value:
+                    success: true
+                    data:
+                      products_shipped: 2
+                      outbox_events_created: 1
+                      orders_completed: 0
+                      orders_partially_shipped: 1
+                      dispatch_departed: false
+                      buffer_remaining: 1
+                      operation_id: 01929c5e-6f00-7000-8000-000000004001
+                    error: null
+        '400':
+          description: '`INVALID_REQUEST` (битый JSON, не-UUID), `INVALID_ASSERTION` (подпись части не прошла проверку) или `BIN_NOT_SHIPPING_BUFFER`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`OPERATION_NOT_FOUND`, `BIN_NOT_FOUND` или `DISPATCH_NOT_FOUND`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: |
+            `OPERATION_ALREADY_SUBMITTED`, `DRAFT_STALE` (товар ушёл из буфера),
+            `PICKING_NOT_CONFIRMED`, `DISPATCH_ALREADY_DEPARTED`, `DISPATCH_CANCELLED`,
+            `DESTINATION_MISMATCH`, `DISPATCH_NOT_AT_GATE` или `SIGNER_KEY_NOT_ACTIVE`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/JSONInternal'
 
@@ -2769,17 +3130,22 @@ components:
           type: integer
     CloseCargoplaceResult:
       type: object
-      required: [cargoplace_id, status, summary, outbox_events_created]
+      required: [cargoplace_id, operation_id, status, summary, outbox_events_created]
       properties:
         cargoplace_id:
           type: string
           format: uuid
+        operation_id:
+          type: string
+          format: uuid
+          description: Идентификатор подписанной операции для опроса статуса в цепи.
         status:
           $ref: '#/components/schemas/CargoplaceStatus'
         summary:
           $ref: '#/components/schemas/CloseCargoplaceSummary'
         outbox_events_created:
           type: integer
+          description: Количество частей-действий операции, записанных в outbox (не товаров).
 
     # ── Putaway DTO ──────────────────────────────────────────────────────────
     PutawayScanBufferRequest:
@@ -2860,7 +3226,7 @@ components:
           format: uuid
     ScanStorageBinResponse:
       type: object
-      required: [storage_bin_id, storage_bin_code, products_placed, outbox_events_created]
+      required: [storage_bin_id, storage_bin_code, products_placed, outbox_events_created, operation_id]
       properties:
         storage_bin_id:
           type: string
@@ -2871,6 +3237,11 @@ components:
           type: integer
         outbox_events_created:
           type: integer
+          description: Количество частей-действий операции, записанных в outbox (не товаров).
+        operation_id:
+          type: string
+          format: uuid
+          description: Идентификатор подписанной операции для опроса статуса в цепи.
 
     # ── Assembly DTO ─────────────────────────────────────────────────────────
     AllocateRequest:
@@ -2970,7 +3341,7 @@ components:
           format: uuid
     ScanShippingBufferResponse:
       type: object
-      required: [buffer_bin_id, products_placed, orders_assembled]
+      required: [buffer_bin_id, products_placed, orders_assembled, operation_id]
       properties:
         buffer_bin_id:
           type: string
@@ -2979,6 +3350,10 @@ components:
           type: integer
         orders_assembled:
           type: integer
+        operation_id:
+          type: string
+          format: uuid
+          description: Идентификатор подписанной Pick-операции для опроса статуса в цепи.
 
     # ── Dispatches DTO ───────────────────────────────────────────────────────
     NewDispatchQuery:
@@ -3113,11 +3488,13 @@ components:
         - orders_partially_shipped
         - dispatch_departed
         - buffer_remaining
+        - operation_id
       properties:
         products_shipped:
           type: integer
         outbox_events_created:
           type: integer
+          description: Количество частей-действий операции, записанных в outbox (не товаров).
         orders_completed:
           type: integer
         orders_partially_shipped:
@@ -3126,3 +3503,112 @@ components:
           type: boolean
         buffer_remaining:
           type: integer
+        operation_id:
+          type: string
+          format: uuid
+          description: Идентификатор подписанной операции для опроса статуса в цепи.
+
+    # ── Подписанные действия (ADR-0001) ──────────────────────────────────────
+    SignedActionDraft:
+      type: object
+      description: |
+        Черновик подписанной складской операции (`signedops.DraftView`): одна часть на
+        каждые ≤ 2000 товаров (ADR-0001 §10). Подписывается passkey оператора.
+      required:
+        - operation_id
+        - action_type
+        - signer_key_id
+        - rp_id
+        - allow_credentials
+        - user_verification
+        - timeout
+        - parts
+      properties:
+        operation_id:
+          type: string
+          format: uuid
+        action_type:
+          type: integer
+          description: '1 Receive, 2 PutAway, 3 Pick, 4 Ship (коды SignedAction.Type).'
+          enum: [1, 2, 3, 4]
+        signer_key_id:
+          type: string
+          description: keyId = keccak256(qx||qy), 0x-hex 32 байта.
+        rp_id:
+          type: string
+          description: Relying Party ID для WebAuthn (из конфигурации WMS).
+        allow_credentials:
+          type: array
+          items:
+            type: object
+            required: [type, id]
+            properties:
+              type:
+                type: string
+                const: public-key
+              id:
+                type: string
+                description: WebAuthn credential id в base64url без паддинга.
+        user_verification:
+          type: string
+          const: required
+        timeout:
+          type: integer
+          example: 60000
+        parts:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignedActionPart'
+    SignedActionPart:
+      type: object
+      required: [action_id, item_ids, details_hash, challenge]
+      properties:
+        action_id:
+          type: string
+          format: uuid
+        item_ids:
+          type: array
+          description: UUID товаров части в порядке возрастания itemId.
+          items:
+            type: string
+            format: uuid
+        details_hash:
+          type: string
+          description: keccak256 деталей действия (ADR-0001 §4), 0x-hex 32 байта.
+        challenge:
+          type: string
+          description: 32 байта challenge в base64url без паддинга — их подписывает passkey.
+    SignedActionSubmitRequest:
+      type: object
+      description: |
+        Тело submit-запроса (`signedops.SubmitRequest`): по одному WebAuthn-assertion на
+        каждую часть черновика.
+      additionalProperties: false
+      required: [operation_id, assertions]
+      properties:
+        operation_id:
+          type: string
+          format: uuid
+        assertions:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [action_id, credential_id, authenticator_data, client_data_json, signature]
+            properties:
+              action_id:
+                type: string
+                format: uuid
+              credential_id:
+                type: string
+                description: base64url без паддинга.
+              authenticator_data:
+                type: string
+                description: base64url без паддинга.
+              client_data_json:
+                type: string
+                description: base64url без паддинга; challenge и type ищутся позиционно.
+              signature:
+                type: string
+                description: base64url без паддинга, ASN.1 DER; бэкенд нормализует s к нижней половине.

@@ -2,9 +2,6 @@ package assembly
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -21,6 +18,10 @@ import (
 type Repository struct {
 	db *pgxpool.Pool
 	q  dbTX
+	// tx заполнен только у tx-репозитория из WithTx: tx-методы (LockOperatorBasket,
+	// LockOperation, LockSigner, WriteActions) делегируют в подписанный механизм
+	// с транзакцией вызываемого.
+	tx pgx.Tx
 }
 
 type dbTX interface {
@@ -52,7 +53,7 @@ func (r *Repository) WithTx(ctx context.Context, fn func(assemblyRepository) err
 		}
 	}()
 
-	if err := fn(&Repository{db: r.db, q: tx}); err != nil {
+	if err := fn(&Repository{db: r.db, q: tx, tx: tx}); err != nil {
 		return err
 	}
 
@@ -95,28 +96,31 @@ func (r *Repository) GetOrdersByDestinationForUpdate(ctx context.Context, destin
 	return orders, nil
 }
 
-// GetOrderLinesByOrderID возвращает строки заказа
-// (по id заказа возвращает все товары (идентификаторы sku_id) и их количество (quantity))
-func (r *Repository) GetOrderLinesByOrderID(ctx context.Context, orderID uuid.UUID) ([]domain.OrderLine, error) {
+// GetOrderLinesByOrderIDs возвращает строки нескольких заказов одним запросом
+// (по id заказов возвращает все товары (идентификаторы sku_id) и их количество (quantity))
+func (r *Repository) GetOrderLinesByOrderIDs(ctx context.Context, orderIDs []uuid.UUID) (map[uuid.UUID][]domain.OrderLine, error) {
 	const query = `
-		SELECT id, sku_id, qty
+		SELECT id, order_id, sku_id, qty
 		FROM wms_inventory.order_lines
-		WHERE order_id = $1`
+		WHERE order_id = ANY($1)
+		ORDER BY order_id, id`
 
-	rows, err := r.q.Query(ctx, query, orderID)
+	rows, err := r.q.Query(ctx, query, orderIDs)
 	if err != nil {
-		return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderID query: %w", err)
+		return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderIDs query: %w", err)
 	}
 	defer rows.Close()
 
-	lines := make([]domain.OrderLine, 0)
+	lines := make(map[uuid.UUID][]domain.OrderLine, len(orderIDs))
 	for rows.Next() {
 		var l domain.OrderLine
-		if err := rows.Scan(&l.ID, &l.SKUID, &l.Qty); err != nil {
-			return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderID scan: %w", err)
+		if err := rows.Scan(&l.ID, &l.OrderID, &l.SKUID, &l.Qty); err != nil {
+			return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderIDs scan: %w", err)
 		}
-		l.OrderID = orderID
-		lines = append(lines, l)
+		lines[l.OrderID] = append(lines[l.OrderID], l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("assembly.Repository.GetOrderLinesByOrderIDs rows: %w", err)
 	}
 	return lines, nil
 }
@@ -339,24 +343,6 @@ func (r *Repository) SetProductAssembled(ctx context.Context, productID uuid.UUI
 	return nil
 }
 
-// InsertPickOutboxEvent создает outbox событие для pick, используя event_id из assembly_task
-func (r *Repository) InsertPickOutboxEvent(ctx context.Context, productID, eventID uuid.UUID) error {
-	payloadHash, err := payloadHashForPick(productID)
-	if err != nil {
-		return fmt.Errorf("assembly.Repository.InsertPickOutboxEvent build hash: %w", err)
-	}
-
-	const query = `
-		INSERT INTO public.outbox_events (event_id, aggregate_id, aggregate_type, event_type, payload_hash)
-		VALUES ($1, $2, $4::text, 'wms.picking.v1', $3)`
-
-	_, err = r.q.Exec(ctx, query, eventID, productID, payloadHash, ledger.AggregatePicking)
-	if err != nil {
-		return fmt.Errorf("assembly.Repository.InsertPickOutboxEvent exec: %w", err)
-	}
-	return nil
-}
-
 // GetTasks возвращает список задач для сборщика
 func (r *Repository) GetTasks(ctx context.Context, destinationID, operatorID uuid.UUID, status string) ([]TaskItem, error) {
 	baseQuery := `
@@ -402,27 +388,6 @@ func (r *Repository) GetTasks(ctx context.Context, destinationID, operatorID uui
 	return tasks, nil
 }
 
-// payloadHashForPick создает детерминированный хеш для outbox события
-func payloadHashForPick(productID uuid.UUID) (string, error) {
-	payload := struct {
-		ProductID     uuid.UUID `json:"product_id"`
-		AggregateType string    `json:"aggregate_type"`
-		EventType     string    `json:"event_type"`
-	}{
-		ProductID:     productID,
-		AggregateType: ledger.AggregatePicking,
-		EventType:     "wms.picking.v1",
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("assembly.payloadHashForPick marshal: %w", err)
-	}
-
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
-}
-
 // GetShippingBufferBinByID возвращает ячейку буфера отгрузки по ID
 func (r *Repository) GetShippingBufferBinByID(ctx context.Context, bufferBinID uuid.UUID) (*domain.Bin, error) {
 	const query = `
@@ -442,59 +407,6 @@ func (r *Repository) GetShippingBufferBinByID(ctx context.Context, bufferBinID u
 		return nil, fmt.Errorf("assembly.Repository.GetShippingBufferBinByID scan: %w", err)
 	}
 	return &bin, nil
-}
-
-// MoveOperatorAssembledToBuffer atomically moves every product the operator has picked
-// (product ASSEMBLED + its assembly_task DONE) for the buffer bin's destination into the
-// shipping buffer bin, returning the affected product ids and the distinct order ids.
-//
-// Issue #46: the set to move is DERIVED from DB state (assembly_tasks JOIN products), not
-// an in-memory cart, so a WMS restart cannot strand picked products. The derived SELECT is
-// folded into the UPDATE so the decision and the move are one atomic statement (no
-// read-then-write race). The destination predicate replaces the old ValidateCartDestination
-// check: products picked for other destinations are simply not moved (so one operator can
-// stage several destinations independently), and an empty result means "nothing to place".
-func (r *Repository) MoveOperatorAssembledToBuffer(ctx context.Context, operatorID, bufferBinID, destinationID uuid.UUID) (productIDs, orderIDs []uuid.UUID, err error) {
-	const query = `
-		UPDATE wms_inventory.products p
-		SET status = 'READY_TO_SHIP', bin_id = $2, updated_at = NOW()
-		FROM wms_ops.assembly_tasks t
-		WHERE t.product_id = p.product_id
-		  AND t.operator_id = $1
-		  AND t.status = 'DONE'
-		  AND t.destination_id = $3
-		  AND p.status = 'ASSEMBLED'
-		RETURNING p.product_id, p.order_id`
-
-	rows, err := r.q.Query(ctx, query, operatorID, bufferBinID, destinationID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("assembly.Repository.MoveOperatorAssembledToBuffer query: %w", err)
-	}
-	defer rows.Close()
-
-	seenOrder := make(map[uuid.UUID]struct{})
-	for rows.Next() {
-		var productID uuid.UUID
-		// products.order_id is nullable (ON DELETE SET NULL), so scan into a pointer:
-		// decoding a SQL NULL into a non-pointer uuid.UUID would error and 500 the call.
-		var orderID *uuid.UUID
-		if err := rows.Scan(&productID, &orderID); err != nil {
-			return nil, nil, fmt.Errorf("assembly.Repository.MoveOperatorAssembledToBuffer scan: %w", err)
-		}
-		productIDs = append(productIDs, productID)
-		// A product whose order was deleted mid-flow still moves to the buffer, but there
-		// is no order to promote (matches the old GetOrderIDsByProductIDs IS NOT NULL filter).
-		if orderID != nil {
-			if _, ok := seenOrder[*orderID]; !ok {
-				seenOrder[*orderID] = struct{}{}
-				orderIDs = append(orderIDs, *orderID)
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("assembly.Repository.MoveOperatorAssembledToBuffer rows: %w", err)
-	}
-	return productIDs, orderIDs, nil
 }
 
 // UpdateOrdersToAssembled обновляет статусы заказов, у которых все товары в READY_TO_SHIP
@@ -521,18 +433,18 @@ func (r *Repository) UpdateOrdersToAssembled(ctx context.Context, orderIDs []uui
 }
 
 // CountAssembledByOperator counts the products the operator has picked but not yet moved
-// to a shipping buffer (product ASSEMBLED + its assembly_task DONE). DB-derived replacement
+// to a shipping buffer (product ASSEMBLED + its assembly_task DONE, not yet unloaded — action_id IS NULL). DB-derived replacement
 // for the old in-memory cart counter (issue #46): the pick-cart size, reconstructed from
 // DB state so it survives a WMS restart. COUNT(DISTINCT product_id): a product can
 // accumulate more than one DONE task after re-allocation (the 0009 unique index only
 // covers PENDING), which would otherwise double-count the cart vs. the products that
-// MoveOperatorAssembledToBuffer actually moves.
+// the operator basket query (ListOperatorBasket/LockOperatorBasket) actually unloads.
 func (r *Repository) CountAssembledByOperator(ctx context.Context, operatorID uuid.UUID) (int, error) {
 	const query = `
 		SELECT count(DISTINCT p.product_id)
 		FROM wms_inventory.products p
 		JOIN wms_ops.assembly_tasks t ON t.product_id = p.product_id
-		WHERE t.operator_id = $1 AND p.status = 'ASSEMBLED' AND t.status = 'DONE'`
+		WHERE t.operator_id = $1 AND t.status = 'DONE' AND t.action_id IS NULL AND p.status = 'ASSEMBLED'`
 
 	var count int
 	if err := r.q.QueryRow(ctx, query, operatorID).Scan(&count); err != nil {

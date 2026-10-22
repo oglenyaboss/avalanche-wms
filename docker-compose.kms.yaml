@@ -1,0 +1,108 @@
+# KMS-профиль (issue #7 «Ключ адаптера во внешнем KMS»): override поверх
+# docker-compose.yaml. Поднимает ConsenSys Web3Signer как внешний KMS и
+# переключает ledger-adapter в SIGNER_MODE=kms — приватник адаптера живёт
+# только в Web3Signer, в процесс адаптера попадают public key и подпись.
+#
+# Запуск (нужен test-профиль: kms-init фондирует ключи на живой цепи):
+#   docker compose -f docker-compose.yaml -f docker-compose.kms.yaml --profile test up -d
+# или make kms-up / kms-down.
+#
+# ВАЖНО: стеки repo-а монопольны — container_name (postgres_db, kafka,
+# ledger-adapter, ...) глобальны в docker. Перед kms-up остановите стеки
+# других worktree-ов (иначе compose утащит/переименует чужие контейнеры).
+#
+# ponytail: file-raw ключи = dev-режим (ключ на диске KMS-контейнера, том
+# kms_keys). Prod-путь без изменения адаптера — конфиги Web3Signer
+# type: "hashicorp" (ключ в Vault KV v2) или type: "aws-kms"; тогда kms-init
+# используется только для фандинга/публикации identifier'ов.
+
+services:
+  # Единственный держатель приватника адаптера. eth1-режим: REST API подписи
+  # secp256k1 (applyHash=false — подпись готового EIP-155 digest'а).
+  web3signer:
+    image: consensys/web3signer:26.9.0
+    container_name: web3signer
+    # ponytail: root только для dev: свежие именованные тома создаёт root,
+    # а kms-init пишет туда key-файлы 0600 — образ по умолчанию ходит как
+    # uid 999 и не смог бы их читать. Prod — дефолтный пользователь образа
+    # и преднастроенный owner тома.
+    user: "0:0"
+    # chain-id обязателен для eth1-режима; на sign-API не влияет (digest
+    # подписывается как есть), нужен только встроенному JSON-RPC proxy.
+    # host-allowlist по умолчанию localhost,127.0.0.1: запрос с Host: web3signer
+    # из сети compose получает 403.
+    command:
+      [
+        "--key-store-path=/data/keys",
+        "--http-listen-host=0.0.0.0",
+        "--http-host-allowlist=web3signer,localhost,127.0.0.1",
+        "--http-listen-port=9000",
+        "eth1",
+        "--chain-id=99999",
+      ]
+    volumes:
+      - kms_keys:/data/keys
+    ports:
+      # только loopback — KMS не должен торчать в LAN.
+      - "127.0.0.1:9000:9000"
+    networks:
+      - app_network
+
+  # Одноразовый bootstrap (image адаптера, entrypoint /kms-init): генерит
+  # file-raw ключи (идемпотентно — адреса стабильны между рестартами тома),
+  # дергает /reload, фондирует адреса с ewoq и публикует identifier'ы
+  # в /shared/kms_public_keys.txt.
+  kms-init:
+    build:
+      context: ./ledger-adapter
+    entrypoint: ["/kms-init"]
+    container_name: kms_init
+    restart: "no"
+    # Root: образ адаптера — distroless nonroot, а kms-init должен писать
+    # key-файлы (0600) и /shared/kms_public_keys.txt в root-владеющие тома
+    # (kms_keys, shared_state).
+    user: "0:0"
+    environment:
+      KMS_URL: http://web3signer:9000
+      KMS_KEYS_DIR: /data/keys
+      KMS_SIGNER_COUNT: ${KMS_SIGNER_COUNT:-1}
+      RPC_URL_FILE: /shared/rpc_url.txt
+      FUND_AMOUNT: ${KMS_FUND_AMOUNT:-1000000000000000000000}
+      SHARED_OUT: /shared/kms_public_keys.txt
+    depends_on:
+      web3signer:
+        condition: service_started
+      subnet-init:
+        condition: service_completed_successfully
+      # contract-deploy тоже тратит ewoq nonce: без этой зависимости оба читают
+      # pending nonce одновременно → коллизия в окне <1s. Хард-блокируемся.
+      contract-deploy:
+        condition: service_completed_successfully
+    volumes:
+      - kms_keys:/data/keys
+      - shared_state:/shared
+    networks:
+      - app_network
+
+  # Переопределение базового сервиса: тот же образ/hostname (WMS продолжает
+  # ходить на http://ledger-adapter:8085), но подпись — через KMS.
+  # PRIVATE_KEY из базового файла в kms-режиме игнорируется (config.Load его
+  # не читает).
+  ledger-adapter:
+    environment:
+      SIGNER_MODE: kms
+      KMS_URL: http://web3signer:9000
+      KMS_PUBLIC_KEYS_FILE: /shared/kms_public_keys.txt
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+      contract-deploy:
+        condition: service_completed_successfully
+        required: false
+      kms-init:
+        condition: service_completed_successfully
+
+volumes:
+  kms_keys:

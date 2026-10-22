@@ -13,6 +13,8 @@ type InsertPutawayParams struct {
 	BinID      uuid.UUID
 	OperatorID uuid.UUID
 	OccurredAt time.Time
+	// ActionID — подписанное действие (часть операции), которое разместило товар (ADR-0001 §4).
+	ActionID uuid.UUID
 }
 
 type ProductBufferItem struct {
@@ -20,10 +22,4 @@ type ProductBufferItem struct {
 	QRCode    string
 	Status    string
 	SKUName   string
-}
-
-type OutboxEventsParams struct {
-	EventIDs     []uuid.UUID
-	ProductIDs   []uuid.UUID
-	StorageBinID uuid.UUID
 }

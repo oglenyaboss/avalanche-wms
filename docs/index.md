@@ -7,7 +7,7 @@
 
 ## Что это за система
 
-Складская система (WMS), которая управляет 5 этапами жизненного цикла товара: **Приёмка на КПП → Приёмка на столе → Раскладка → Сборка → Отгрузка**. Каждая физическая операция автоматически фиксируется на блокчейне через цепочку Outbox → Debezium → Kafka → Ledger Adapter → смарт-контракт.
+Складская система (WMS), которая управляет 5 этапами жизненного цикла товара: **Приёмка на КПП → Приёмка на столе → Раскладка → Сборка → Отгрузка**. Каждый шаг, меняющий состояние товара в цепи, оператор подтверждает и подписывает своим passkey; подписанное действие фиксируется на блокчейне через цепочку Outbox → Debezium → Kafka → Ledger Adapter → смарт-контракт.
 
 ### Стек
 
@@ -16,10 +16,10 @@
 | WMS-монолит | Go, net/http |
 | БД | PostgreSQL 17 (3 схемы: public, wms_inventory, wms_ops) |
 | CDC | Debezium (outbox → Kafka) |
-| Очереди | Apache Kafka (рабочий топик `wms.events.v1` + DLQ `wms.dlq.v1`; 4 per-aggregate топика — legacy/rollback) |
+| Очереди | Apache Kafka (рабочий топик `wms.events.v1` + DLQ `wms.dlq.v1`; одна партиция) |
 | Мост в блокчейн | Ledger Adapter (Go) |
-| Блокчейн | Avalanche Subnet-EVM (локально, dev; кастомный сабнет chainID 99999); permissioned Allow Lists ещё не реализованы |
-| Контракт | BatchMappingWMS (Solidity, batch-операции) |
+| Блокчейн | Avalanche Subnet-EVM (локально, dev; кастомный сабнет chainID 99999); permissioned Allow Lists включены ([deploy/subnet/README.md](../deploy/subnet/README.md), раздел Allow-list) |
+| Контракты | ConsortiumRegistry + SignedMappingWMS (Solidity; подписанные действия, [ADR-0001](adr/0001-signed-actions.md)) |
 
 ### Архитектурная схема (упрощённая)
 
@@ -49,13 +49,13 @@
 
 ### Детальные flow-диаграммы (по этапам)
 
-| Документ | Этап | Outbox |
+| Документ | Этап | В цепи |
 |----------|------|--------|
 | [Приёмка на КПП](flows/receiving-gate-flow.md) | Сканирование TTN и грузомест | Нет |
-| [Приёмка на столе](flows/receiving-table-flow.md) | Вскрытие грузоместа, создание products | receiving |
-| [Раскладка](flows/putaway-flow.md) | Из буфера в ячейки хранения | putaway |
-| [Сборка](flows/assembly-flow.md) | Аллокация + подбор товаров | picking |
-| [Отгрузка](flows/shipping-flow.md) | Верификация и отправка заказа | shipping |
+| [Приёмка на столе](flows/receiving-table-flow.md) | Вскрытие грузоместа, создание products | Подписанное действие Receive |
+| [Раскладка](flows/putaway-flow.md) | Из буфера в ячейки хранения | Подписанное действие PutAway |
+| [Сборка](flows/assembly-flow.md) | Аллокация + подбор товаров | Подписанное действие Pick |
+| [Отгрузка](flows/shipping-flow.md) | Верификация и отправка заказа | Подписанное действие Ship |
 
 ### Модель данных
 
@@ -69,9 +69,10 @@
 
 | Документ | Описание |
 |----------|----------|
-| [Маппинг WMS → Блокчейн](integration/blockchain-mapping.md) | Какая операция что пишет в блокчейн, полный путь события |
-| [Контракт данных](integration/data-contract.md) | Формат outbox, Kafka, Ledger Adapter, onchain_events |
-| [BatchMappingWMS](integration/batch-mapping-approach.md) | Смарт-контракт: FSM, batch-функции, производительность |
+| [Маппинг WMS → Блокчейн](integration/blockchain-mapping.md) | Какой шаг какое подписанное действие пишет в цепь: FSM, детали, отклонения, лимиты |
+| [Контракт данных](integration/data-contract.md) | Формат outbox, Kafka, Ledger Adapter, onchain_events подписанного действия |
+| [Управление ключами](integration/key-management.md) | Регистрация и отзыв ключей, роли, корень доверия консорциума |
+| [Процедура аудита](integration/audit-procedure.md) | CLI-сверка `wms/cmd/audit` и страница `/audit` для аудитора |
 
 ### Документация разработчика (hand-off)
 
@@ -79,7 +80,7 @@
 |----------|----------|
 | [WMS Reference](developer/wms-reference.md) | Референс WMS-монолита: пакеты, модули (receiving / putaway / assembly / shipping / dispatches / auth), сервисы, репозитории, запись outbox |
 | [Ledger Adapter Reference](developer/ledger-adapter-reference.md) | Внутреннее устройство моста: пакеты `internal/`, consumer, batch-flusher, reconcile, идемпотентность, env, типы и сигнатуры |
-| [Smart Contract Reference](developer/smart-contract-reference.md) | Контракт BatchMappingWMS: FSM, сигнатуры batch-функций, события, revert-условия, storage layout, `UUID → uint256` |
+| [Smart Contract Reference](developer/smart-contract-reference.md) | Справочник по контракту старого пути (событие на товар, до #19): FSM, batch-функции, `UUID → uint256`. Текущая модель — [ADR-0001](adr/0001-signed-actions.md) |
 | [Operations](developer/operations.md) | Эксплуатация: docker-compose, переменные окружения, инициализация БД/Kafka, регистрация Debezium-коннектора, мониторинг, CI |
 
 ### API
@@ -93,7 +94,7 @@
 
 | Документ | Описание |
 |----------|----------|
-| [Архитектура MVP](architecture/system-overview.md) | Компоненты, роли, Kafka, Debezium, безопасность |
+| [Архитектура системы](architecture/system-overview.md) | Компоненты, роли, Kafka, Debezium, безопасность |
 | [Конвенции проекта](CONVENTIONS.md) | Git workflow, Go style, SQL naming, Docker |
 | [Гайд по MR](MR_GUIDE.md) | Правила оформления merge requests |
 
@@ -111,7 +112,7 @@
 ## Ключевые принципы
 
 1. **Outbox pattern** — WMS пишет только в PostgreSQL. Debezium подхватывает outbox_events и публикует в Kafka. Нет двойной записи.
-2. **1 outbox event = 1 product** — aggregate_id всегда product_id. aggregate_type едет в Kafka-заголовке и определяет, какой `batch*`-метод контракта вызывается (все события идут в один топик `wms.events.v1`).
-3. **Блокчейн = верификатор, не хранилище.** Контракт реализует FSM (None → Accepted → PutAway → Picked → Shipped). На пути адаптера (batch-функции) элемент с неверным статусом пропускается с событием `ItemTransitionFailed` — без revert всей транзакции; revert делают только per-item функции.
-4. **Идемпотентность на каждом уровне** — event_id уникален в outbox, onchain_events, и processedEventIds в контракте.
+2. **Одна строка outbox = одно подписанное действие** — `event_id = action_id = actionId`, `aggregate_type = signed_action`; всё едет в один топик `wms.events.v1` (одна партиция — порядок в цепи равен порядку коммитов в БД).
+3. **Блокчейн = верификатор, не хранилище.** Контракт `SignedMappingWMS` проверяет подпись действия через реестр `ConsortiumRegistry` и FSM каждого товара; действие применяется или отклоняется персонально — батч не ревертится целиком.
+4. **Идемпотентность на каждом уровне** — `event_id` уникален в outbox и onchain_events; повтор `actionId` отсекается `actionState` в контракте.
 5. **КПП не пишет в блокчейн** — товары (products) создаются только на столе приёмки.

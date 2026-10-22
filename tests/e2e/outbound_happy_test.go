@@ -26,8 +26,10 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	env := testEnv
 	require.NotNil(t, env)
 
-	// 2. Log in to WMS and build a dedicated per-run fixture (shipment, cargoplace,
-	//    bins, SKU, NEW order, SCHEDULED dispatch) so re-runs stay deterministic.
+	// 2. Build a dedicated per-run fixture (shipment, cargoplace, bins, SKU, NEW
+	//    order, SCHEDULED dispatch) so re-runs stay deterministic, and provision a
+	//    signed operator for the receiving steps: the close is a signed action now.
+	op := newSignedOperator(t, ctx, env)
 	token := login(t, env)
 	fixture := newOutboundFixture(t, ctx, env)
 	requireOrderStatus(t, ctx, env, fixture.OrderID, "NEW")
@@ -38,20 +40,20 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	stageEventIDs := map[string][]uuid.UUID{}
 
 	// 3. Scan the cargoplace at the receiving table so it moves to TABLE_IN_PROGRESS.
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-cargoplace", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-cargoplace", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 	}, nil)
 
 	// 4. Scan the box, SKU barcode, and QR code; scan-qr creates the product.
 	var box scanBoxData
-	postJSON(t, env, token, "/receiving/table/scan-box", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-box", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_barcode":   fixture.BoxBarcode,
 	}, &box)
 	require.Equal(t, "OPEN", box.Status)
 
 	var sku scanSKUData
-	postJSON(t, env, token, "/receiving/table/scan-sku", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-sku", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"barcode":       fixture.Barcode,
@@ -59,7 +61,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	require.Equal(t, fixture.SKUID, sku.SKUID)
 
 	var scannedProduct scanQRData
-	postJSON(t, env, token, "/receiving/table/scan-qr", map[string]string{
+	postJSON(t, env, op.token, "/receiving/table/scan-qr", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"box_id":        box.BoxID.String(),
 		"sku_id":        sku.SKUID.String(),
@@ -69,25 +71,22 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	requireProductStatus(t, ctx, env, scannedProduct.ProductID, "RECEIVED")
 
 	// 5. Close box, move to receiving buffer, close cargoplace, wait for receiving on-chain.
-	postJSON[map[string]any](t, env, token, "/receiving/table/close-box", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/close-box", map[string]string{
 		"box_id": box.BoxID.String(),
 	}, nil)
 
-	postJSON[map[string]any](t, env, token, "/receiving/table/scan-buffer", map[string]string{
+	postJSON[map[string]any](t, env, op.token, "/receiving/table/scan-buffer", map[string]string{
 		"cargoplace_id": fixture.CargoplaceID.String(),
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
 
-	var closeCP closeCargoplaceData
-	postJSON(t, env, token, "/receiving/table/close-cargoplace", map[string]string{
-		"cargoplace_id": fixture.CargoplaceID.String(),
-	}, &closeCP)
+	closeCP := closeCargoplaceSigned(t, env, op, fixture.CargoplaceID.String())
 	require.Equal(t, "TABLE_CLOSED", closeCP.Status)
-	require.Equal(t, 1, closeCP.OutboxEventsCreated)
+	require.Equal(t, 1, closeCP.OutboxEventsCreated, "a cargoplace of <2000 products closes with exactly one signed part")
 	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "receiving"))
 
 	receivingEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "receiving")
-	waitForOnchainCommitted(t, ctx, env, receivingEventID, "receiving")
+	waitForOnchainCommitted(t, ctx, env, receivingEventID)
 	stageEventIDs["receiving"] = append(stageEventIDs["receiving"], receivingEventID)
 
 	// 6. Putaway: scan from buffer, place into storage bin, wait for putaway on-chain.
@@ -99,18 +98,14 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 		"buffer_bin_id": fixture.ReceivingBinID.String(),
 	}, nil)
 
-	var putaway scanStorageBinData
-	postJSON(t, env, token, "/putaway/scan-storage-bin", map[string]any{
-		"product_ids":    []string{scannedProduct.ProductID.String()},
-		"storage_bin_id": fixture.StorageBinID.String(),
-	}, &putaway)
+	putaway := placeToStorageBinSigned(t, env, op, []uuid.UUID{scannedProduct.ProductID}, fixture.StorageBinID)
 	require.Equal(t, 1, putaway.ProductsPlaced)
 	require.Equal(t, 1, putaway.OutboxEventsCreated)
 	requireProductStatus(t, ctx, env, scannedProduct.ProductID, "STORED")
 	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "putaway"))
 
 	putawayEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "putaway")
-	waitForOnchainCommitted(t, ctx, env, putawayEventID, "putaway")
+	waitForOnchainCommitted(t, ctx, env, putawayEventID)
 	stageEventIDs["putaway"] = append(stageEventIDs["putaway"], putawayEventID)
 
 	// 7. Allocate the dedicated order; only this run's product should be assigned.
@@ -127,7 +122,11 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	productIDs := productIDsFromTasks(tasks.Tasks)
 	require.Equal(t, []string{scannedProduct.ProductID.String()}, productIDs)
 
-	// 8. Pick the product: task DONE, product ASSEMBLED, picking outbox + on-chain.
+	// 8. Pick the product: task DONE, product ASSEMBLED. #14: the pick itself
+	// writes no picking event — the signed unload action is the picking event,
+	// so the on-chain assertions follow the unload.
+	// The unload must be done by the same (signed) operator who picked: the
+	// basket is keyed by assembly_tasks.operator_id.
 	for i, productID := range productIDs {
 		parsedProductID, err := uuid.Parse(productID)
 		require.NoError(t, err)
@@ -135,27 +134,24 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 		requireTaskStatus(t, ctx, env, parsedProductID, "PENDING")
 
 		var picked pickData
-		postJSON(t, env, token, "/assembly/pick", map[string]string{
+		postJSON(t, env, op.token, "/assembly/pick", map[string]string{
 			"product_id": productID,
 		}, &picked)
 		require.Equal(t, productID, picked.ProductID)
 		require.Equal(t, i+1, picked.CartSize)
 		requireProductStatus(t, ctx, env, parsedProductID, "ASSEMBLED")
 		requireTaskStatus(t, ctx, env, parsedProductID, "DONE")
-
-		pickingEventID := eventIDForAggregate(t, ctx, env, parsedProductID, "picking")
-		waitForOnchainCommitted(t, ctx, env, pickingEventID, "picking")
-		stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
 	}
-	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "picking"))
 
-	// 9. Move from the picking cart into the shipping buffer so the order is ASSEMBLED.
-	var placed scanShippingBufferData
-	postJSON(t, env, token, "/assembly/scan-shipping-buffer", map[string]string{
-		"buffer_bin_id": fixture.ShippingBinID.String(),
-	}, &placed)
+	// 9. Unload the picking basket into the shipping buffer so the order is ASSEMBLED.
+	placed := unloadToShippingBufferSigned(t, env, op, fixture.ShippingBinID.String())
 	require.Equal(t, len(productIDs), placed.ProductsPlaced)
 	require.GreaterOrEqual(t, placed.OrdersAssembled, 1)
+
+	pickingEventID := eventIDForAggregate(t, ctx, env, scannedProduct.ProductID, "picking")
+	waitForOnchainCommitted(t, ctx, env, pickingEventID)
+	stageEventIDs["picking"] = append(stageEventIDs["picking"], pickingEventID)
+	require.Equal(t, 1, outboxCountForAggregate(t, ctx, env, scannedProduct.ProductID, "picking"))
 	requireOrderStatus(t, ctx, env, fixture.OrderID, "ASSEMBLED")
 	for _, productID := range productIDs {
 		parsedProductID, err := uuid.Parse(productID)
@@ -176,14 +172,11 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 	require.Equal(t, "AT_GATE", driver.Status)
 	requireDispatchStatus(t, ctx, env, fixture.DispatchID, "AT_GATE")
 
-	var shipped shipData
-	postJSON(t, env, token, "/shipping/ship", map[string]any{
-		"buffer_bin_id": fixture.ShippingBinID.String(),
-		"dispatch_id":   fixture.DispatchID.String(),
-		"product_ids":   productIDs,
-	}, &shipped)
+	// Ship: a signed spot action by the signed operator (any active key may sign
+	// a warehouse action); the <2000-product bin drafts into one part.
+	shipped, _ := shipSigned(t, env, op, fixture.ShippingBinID.String(), fixture.DispatchID.String(), parseProductIDs(t, productIDs))
 	require.Equal(t, len(productIDs), shipped.ProductsShipped)
-	require.Equal(t, len(productIDs), shipped.OutboxEventsCreated)
+	require.Equal(t, 1, shipped.OutboxEventsCreated, "a bin of <2000 products ships with exactly one signed part")
 	require.GreaterOrEqual(t, shipped.OrdersCompleted, 1)
 	require.True(t, shipped.DispatchDeparted)
 	require.Equal(t, 0, shipped.BufferRemaining)
@@ -197,7 +190,7 @@ func TestOutboundFlow_EndToEnd(t *testing.T) {
 		requireProductStatus(t, ctx, env, parsedProductID, "SHIPPED")
 
 		shippingEventID := eventIDForAggregate(t, ctx, env, parsedProductID, "shipping")
-		waitForOnchainCommitted(t, ctx, env, shippingEventID, "shipping")
+		waitForOnchainCommitted(t, ctx, env, shippingEventID)
 		stageEventIDs["shipping"] = append(stageEventIDs["shipping"], shippingEventID)
 
 		status := callItemStatus(t, ctx, env, parsedProductID)

@@ -36,55 +36,103 @@ done
 CHAIN_ID=$(cast chain-id --rpc-url "$RPC_URL")
 echo "==> Subnet-EVM ready, chainID=$CHAIN_ID"
 
-# Idempotency: skip deploy if shared/contract_addr.txt points to a live contract.
-# Транзиентная RPC-ошибка при `cast code` НЕ должна приводить к слепому redeploy —
-# это orphan'ит старый контракт под тем же ewoq-nonce'ом.
-if [ -s /shared/contract_addr.txt ]; then
-  # `tr -d` — защита от случайного trailing newline (nano и пр. редакторы).
-  EXISTING=$(tr -d '[:space:]' < /shared/contract_addr.txt)
-  if [ -z "$EXISTING" ]; then
-    echo "==> /shared/contract_addr.txt is whitespace-only, treating as empty"
-  else
-    if ! CODE=$(cast code "$EXISTING" --rpc-url "$RPC_URL" 2>&1); then
-      echo "FATAL: cast code for $EXISTING failed: $CODE"
-      echo "       refusing to redeploy blindly — fix RPC or wipe shared_state volume"
-      exit 1
-    fi
-    if [ "${#CODE}" -gt 4 ]; then
-      echo "==> Contract already deployed at $EXISTING — skipping redeploy"
-      # Re-persist auxiliary files in case they were cleared
-      echo -n "$RPC_URL"   > /shared/rpc_url.txt
-      echo -n "$EWOQ_KEY"  > /shared/deployer_key.txt
-      exit 0
-    fi
-    echo "==> Stale contract_addr.txt ($EXISTING has no code), redeploying"
-  fi
-fi
-
 cd /contracts
 # /contracts mounted read-only; write forge artifacts somewhere writable.
 export FOUNDRY_OUT=/tmp/forge-out
 export FOUNDRY_CACHE_PATH=/tmp/forge-cache
 mkdir -p "$FOUNDRY_OUT" "$FOUNDRY_CACHE_PATH"
 
-echo "==> Deploying BatchMappingWMS"
-OUT=$(forge create BatchMappingWMS \
+EWOQ_ADDR=0x8db97C7cEcE249c2b98bDC0226Cc4C2A57BF52FC
+
+# live_addr <file>: печатает адрес из файла, если по нему есть байткод. Пусто — файла нет
+# или он пустой. RPC-ошибка — FATAL: слепой redeploy осиротил бы старый контракт. Адрес без
+# кода — тоже FATAL: цепь сброшена, а тома с адресами и БД WMS живы, и передеплой оставил бы
+# в WMS ACTIVE-ключи, которых новый реестр не знает.
+# Сообщения идут в stderr, потому что stdout забирает вызывающий через $(...).
+live_addr() {
+  local file=$1 existing code
+  [ -s "$file" ] || return 0
+  # `tr -d` — защита от случайного trailing newline (nano и пр. редакторы).
+  existing=$(tr -d '[:space:]' < "$file")
+  if [ -z "$existing" ]; then
+    echo "==> $file is whitespace-only, treating as empty" >&2
+    return 0
+  fi
+  if ! code=$(cast code "$existing" --rpc-url "$RPC_URL" 2>&1); then
+    echo "FATAL: cast code for $existing failed: $code" >&2
+    echo "       refusing to redeploy blindly — fix RPC or wipe shared_state volume" >&2
+    exit 1
+  fi
+  if [ "${#code}" -gt 4 ]; then
+    echo "$existing"
+  else
+    echo "FATAL: stale $(basename "$file") ($existing has no code) — chain was reset while other volumes survived" >&2
+    echo "       recreate volumes: docker compose --profile test down -v" >&2
+    exit 1
+  fi
+}
+
+# Registry деплоится первым (ewoq nonce 0), SignedMappingWMS — вторым (nonce 1).
+REG=$(live_addr /shared/registry_addr.txt)
+if [ -n "$REG" ]; then
+  echo "==> ConsortiumRegistry already deployed at $REG — skipping"
+else
+  echo "==> Deploying ConsortiumRegistry"
+  OUT=$(forge create ConsortiumRegistry \
+    --rpc-url "$RPC_URL" \
+    --private-key "$EWOQ_KEY" \
+    --broadcast \
+    --json)
+  REG=$(echo "$OUT" | sed -n '/^{$/,/^}$/p' | jq -r '.deployedTo')
+
+  echo "==> Sanity: owner() must be ewoq ($EWOQ_ADDR)"
+  OWNER=$(cast call "$REG" "owner()(address)" --rpc-url "$RPC_URL")
+  [ "${OWNER,,}" = "${EWOQ_ADDR,,}" ] || { echo "FAIL: owner() = $OWNER"; exit 1; }
+
+  # Persist only after successful sanity
+  echo -n "$REG" > /shared/registry_addr.txt
+  echo "==> Deployed ConsortiumRegistry at $REG"
+fi
+
+CONTRACT=$(live_addr /shared/contract_addr.txt)
+if [ -n "$CONTRACT" ]; then
+  # live-адрес может указывать на контракт v1 (без registry()): слепой skip
+  # оставил бы стек с контрактом без подписанных действий. v2 обязан указывать
+  # на задеплоенный реестр (case-insensitive, как sanity ниже).
+  REG_ONCHAIN=$(cast call "$CONTRACT" "registry()(address)" --rpc-url "$RPC_URL") || REG_ONCHAIN=""
+  [ "${REG_ONCHAIN,,}" = "${REG,,}" ] || { echo "FAIL: $CONTRACT is not SignedMappingWMS v2 with registry $REG — recreate volumes: docker compose --profile test down -v"; exit 1; }
+  echo "==> Contract already deployed at $CONTRACT — skipping redeploy"
+  # Re-persist auxiliary files in case they were cleared
+  echo -n "$RPC_URL"   > /shared/rpc_url.txt
+  echo -n "$EWOQ_KEY"  > /shared/deployer_key.txt
+  exit 0
+fi
+
+echo "==> Deploying SignedMappingWMS"
+OUT=$(forge create SignedMappingWMS \
   --rpc-url "$RPC_URL" \
   --private-key "$EWOQ_KEY" \
   --broadcast \
-  --json)
+  --json \
+  --constructor-args "$REG")
 
-ADDR=$(echo "$OUT" | jq -r '.deployedTo')
-TX=$(echo   "$OUT" | jq -r '.transactionHash')
+ADDR=$(echo "$OUT" | sed -n '/^{$/,/^}$/p' | jq -r '.deployedTo')
+TX=$(echo   "$OUT" | sed -n '/^{$/,/^}$/p' | jq -r '.transactionHash')
 
 echo "==> Sanity: itemStatus(0) must be 0 (None)"
 STATUS=$(cast call "$ADDR" "itemStatus(uint256)(uint8)" 0 --rpc-url "$RPC_URL")
 [ "$STATUS" = "0" ] || { echo "FAIL: itemStatus(0) = $STATUS"; exit 1; }
 
+echo "==> Sanity: registry() must be the deployed Registry ($REG)"
+REG_ONCHAIN=$(cast call "$ADDR" "registry()(address)" --rpc-url "$RPC_URL")
+[ "${REG_ONCHAIN,,}" = "${REG,,}" ] || { echo "FAIL: registry() = $REG_ONCHAIN"; exit 1; }
+
 # Persist only after successful sanity
 echo -n "$RPC_URL"   > /shared/rpc_url.txt
 echo -n "$ADDR"      > /shared/contract_addr.txt
 echo -n "$EWOQ_KEY"  > /shared/deployer_key.txt
-echo "==> Deployed BatchMappingWMS at $ADDR"
+echo "==> Deployed SignedMappingWMS at $ADDR"
 echo "    tx $TX"
+echo "==> ConsortiumRegistry: $REG"
+echo "==> SignedMappingWMS:   $ADDR"
 echo "OK"

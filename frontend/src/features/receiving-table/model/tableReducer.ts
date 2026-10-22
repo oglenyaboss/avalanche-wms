@@ -41,8 +41,10 @@ export interface TableState {
   // Buffer phase: how many products were moved to the buffer bin (null until
   // the buffer is scanned).
   bufferPlaced: number | null
-  // Buffer phase: the close summary (null until the cargoplace is closed).
+  // Buffer phase: the close summary and the id of the signed operation that
+  // recorded it into the chain (both null until the cargoplace is closed).
   summary: CloseCargoplaceSummary | null
+  operationId: string | null
   errorMessage: string | null
   successMessage: string | null
   confirmCloseBoxOpen: boolean
@@ -57,7 +59,7 @@ export type TableAction =
   | { type: 'BOX_CLOSED' }
   | { type: 'GO_TO_BUFFER' }
   | { type: 'BUFFER_SCANNED'; productsPlaced: number }
-  | { type: 'CARGOPLACE_CLOSED'; summary: CloseCargoplaceSummary }
+  | { type: 'CARGOPLACE_CLOSED'; summary: CloseCargoplaceSummary; operationId: string }
   | { type: 'FINISH' }
   | { type: 'OPEN_CONFIRM_CLOSE_BOX' }
   | { type: 'CANCEL_CONFIRM_CLOSE_BOX' }
@@ -78,6 +80,7 @@ export const initialTableState: TableState = {
   scannedProducts: [],
   bufferPlaced: null,
   summary: null,
+  operationId: null,
   errorMessage: null,
   successMessage: null,
   confirmCloseBoxOpen: false,
@@ -187,6 +190,7 @@ export function tableReducer(
         phase: 'buffer',
         bufferPlaced: null,
         summary: null,
+        operationId: null,
         confirmAcceptCargoplaceOpen: false,
         errorMessage: null,
       }
@@ -204,6 +208,7 @@ export function tableReducer(
       return {
         ...state,
         summary: action.summary,
+        operationId: action.operationId,
         errorMessage: null,
       }
     }

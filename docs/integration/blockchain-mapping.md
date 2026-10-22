@@ -1,9 +1,10 @@
-# Маппинг: WMS → Блокчейн
+# Маппинг: WMS → Блокчейн (подписанные действия)
 
-**Версия:** 1.0
-**Дата:** 2026-03-31
+**Версия:** 2.0
+**Дата:** 2026-11
+**Первоисточник:** [ADR-0001 «Подписанные складские действия»](../adr/0001-signed-actions.md)
 
-Этот документ описывает, как каждая WMS-операция превращается в запись на блокчейне. Полный путь: бизнес-операция → outbox → Debezium → Kafka → Ledger Adapter → BatchMappingWMS.
+Этот документ описывает, как каждый шаг WMS превращается в запись на блокчейне. Полный путь: операция → черновик (`draft`) → подпись passkey в браузере → `submit` → outbox → Debezium → Kafka (`wms.events.v1`) → Ledger Adapter → `SignedMappingWMS.applyActions` / `ConsortiumRegistry.applyKeyActions`. Форматы данных на каждом стыке — в [Контракте данных](data-contract.md).
 
 ---
 
@@ -12,252 +13,136 @@
 ```mermaid
 flowchart LR
     subgraph WMS["WMS (Go)"]
-        OP["Бизнес-операция"]
-        OB["outbox_events"]
+        OP["Шаг оператора"]
+        DR["draft: части действия<br/>(actionId, соль, challenge)"]
+        SUB["submit: проверка подписи,<br/>бизнес-операция + N строк outbox"]
     end
+    PK["Passkey браузера<br/>(WebAuthn, P-256)"]
 
     subgraph CDC["CDC"]
         DZ["Debezium"]
     end
-
-    subgraph MQ["Message Queue"]
-        KF["Kafka topics"]
-    end
+    KF["Kafka: wms.events.v1<br/>(key = actionId)"]
 
     subgraph LA["Ledger Adapter (Go)"]
-        BATCH["Batch accumulator"]
-        TX["TX builder"]
+        SEG["Сегменты: складские / ключевые"]
+        TX["TX builder (calldata ≤ 120 000 Б)"]
     end
 
     subgraph BC["Blockchain"]
-        SC["BatchMappingWMS"]
-        LOG["Event logs"]
+        SC["SignedMappingWMS.applyActions<br/>ConsortiumRegistry.applyKeyActions"]
+        LOG["Логи: ActionApplied / ItemMoved / ActionRejected"]
     end
 
-    OP -->|"INSERT в одной TX"| OB
-    OB -->|"WAL / CDC"| DZ
-    DZ -->|"publish"| KF
-    KF -->|"consume"| BATCH
-    BATCH -->|"flush (10 msgs / 100ms)"| TX
-    TX -->|"RPC call"| SC
-    SC -->|"emit"| LOG
+    OP --> DR
+    DR -->|"challenge на часть"| PK
+    PK -->|"assertions"| SUB
+    SUB -->|"одна TX БД"| DZ
+    DZ --> KF
+    KF --> SEG
+    SEG --> TX
+    TX --> SC
+    SC --> LOG
 ```
+
+Ключевое отличие от старого пути (до #19): единица записи — **действие**, а не событие на товар. Одна строка outbox на действие, одна подпись оператора на часть, один вызов `applyActions` на сегмент.
 
 ---
 
 ## Маппинг по этапам
 
-### 1. Приёмка на КПП
+Каждый шаг — двухфазный HTTP-поток: `POST …/draft` (сервер возвращает части с challenge) → браузер подписывает → `POST …/submit`. Плоские (неподписанные) эндпоинты этих шагов удалены после #19.
 
-| Аспект | Значение |
-|--------|---------|
-| **Outbox event** | НЕ создаётся |
-| **Причина** | Товары (products) ещё не существуют. КПП работает с грузоместами |
-| **Блокчейн** | Ничего |
+| Шаг WMS (маршрут) | `action_type` | Вызов контракта | Переход FSM каждого товара |
+|---|---|---|---|
+| Закрытие грузоместа на столе приёмки — `POST /receiving/table/close-cargoplace/draft` → `submit` | 1 `Receive` | `SignedMappingWMS.applyActions` | `None → Accepted` |
+| Раскладка корзины в ячейку — `POST /putaway/scan-storage-bin/draft` → `submit` | 2 `PutAway` | `SignedMappingWMS.applyActions` | `Accepted → PutAway` |
+| Выгрузка корзины сборки в буфер отгрузки — `POST /assembly/scan-shipping-buffer/draft` → `submit` | 3 `Pick` | `SignedMappingWMS.applyActions` | `PutAway → Picked` |
+| Отгрузка рейса — `POST /shipping/ship/draft` → `submit` | 4 `Ship` | `SignedMappingWMS.applyActions` | `Picked → Shipped` |
+| Регистрация ключа оператора — `POST /passkeys/actions/key-register/draft` → `POST /passkeys/actions/{id}/submit` (админ) | 5 `KeyRegister` | `ConsortiumRegistry.applyKeyActions` | — |
+| Отзыв ключа оператора — `POST /passkeys/actions/key-revoke/draft` → `submit` (админ) | 6 `KeyRevoke` | `ConsortiumRegistry.applyKeyActions` | — |
 
----
+Переходы FSM определены в `ledger-adapter/contracts/SignedMappingWMS.sol` (`_transition`): `Receive` None→Accepted, `PutAway` Accepted→PutAway, `Pick` PutAway→Picked, `Ship` Picked→Shipped. Переходов из `Shipped` нет: повторная отгрузка того же товара отклоняется с `WrongItemStatus`.
 
-### 2. Приёмка на столе
+**Приёмка на КПП** (`/receiving/gate/scan-ttn`, `/receiving/gate/scan-cargoplace`, `/receiving/gate/accept-shipment`) в блокчейн не пишет: товары (`products`) ещё не существуют, это логистическая операция с грузоместами.
 
-| Аспект | Значение |
-|--------|---------|
-| **Триггер** | POST /receiving/table/close-cargoplace |
-| **Что происходит в WMS** | Закрытие грузоместа: сверка expected vs actual |
-| **Outbox events** | N штук (по 1 на каждый product в грузоместе) |
-| **aggregate_id** | product_id |
-| **aggregate_type** | `receiving` |
-| **event_type** | `wms.receiving.v1` |
-| **Kafka topic** | `wms.receiving.v1` |
-| **Kafka key** | product_id (UUID string) |
-| **Контракт** | `batchAccept(eventIds[], itemIds[])` |
-| **On-chain переход** | None → Accepted |
-| **Event log** | `ItemTransition(eventId, itemId, None, Accepted, actor, timestamp)` |
+**Аллокация заказа** (`POST /assembly/allocate`) в блокчейн не пишет: это системное назначение, а не физическая операция.
 
-**Пример:** грузоместо с 10 товарами → 10 outbox events → Kafka → batch=10 → 1 транзакция `batchAccept` → 10 `ItemTransition` events в блокчейне.
+**Пример:** грузоместо с 10 товарами → 1 черновик → оператор подтверждает одну часть → 1 строка outbox → 1 действие `Receive` в `applyActions` → 1 `ActionApplied` + 10 `ItemMoved` в блокчейне.
 
 ---
 
-### 3. Раскладка
+## Что лежит в действии
 
-| Аспект | Значение |
-|--------|---------|
-| **Триггер** | POST /putaway/scan-storage-bin |
-| **Что происходит в WMS** | Товары перемещены из буфера в ячейку хранения |
-| **Outbox events** | N штук (по 1 на каждый product в «корзине») |
-| **aggregate_id** | product_id |
-| **aggregate_type** | `putaway` |
-| **event_type** | `wms.putaway.v1` |
-| **Kafka topic** | `wms.putaway.v1` |
-| **Kafka key** | product_id (UUID string) |
-| **Контракт** | `batchPutAway(eventIds[], itemIds[])` |
-| **On-chain переход** | Accepted → PutAway |
-| **Event log** | `ItemTransition(eventId, itemId, Accepted, PutAway, actor, timestamp)` |
+Поля складского действия (конверт из outbox → calldata `applyActions`; ADR-0001 §1, §9):
 
----
+| Поле | Что это |
+|---|---|
+| `actionId` | UUIDv7 действия; он же `event_id` строки outbox и ключ идемпотентности (`actionState` в контракте) |
+| `actionType` | 1–4 (складские), 5–6 (ключевые); коды общие с контрактом (`SignedAction.sol`) |
+| `itemIds` | UUID товаров, строго по возрастанию `itemId = uint256(keccak256(bytes(uuid)))`; дублей нет — это же условие контракта |
+| `detailsHash` | `keccak256(abi.encode(salt, детали))` — соль и детали хранятся в WMS (`warehouse_actions.salt`/`details`), в цепь не едут |
+| `keyId` | `keccak256(qx ‖ qy)` ключа подписанта; должен быть активен в `ConsortiumRegistry` |
+| `webauthn` | assertion: `authenticatorData`, `clientDataJSON` (+ индексы `challenge`/`type`), `(r, s)` |
 
-### 4. Сборка (подбор)
+Challenge считается по всем полям сразу (`SignedAction.sol`): подпись над другим набором товаров, другим типом или другими деталями не проходит.
 
-| Аспект | Значение |
-|--------|---------|
-| **Триггер** | POST /assembly/pick |
-| **Что происходит в WMS** | Оператор физически подобрал товар с полки |
-| **Outbox events** | 1 штука (за каждый pick — 1 product) |
-| **aggregate_id** | product_id |
-| **aggregate_type** | `picking` |
-| **event_type** | `wms.picking.v1` |
-| **Kafka topic** | `wms.picking.v1` |
-| **Kafka key** | product_id (UUID string) |
-| **Контракт** | `batchPick(eventIds[], itemIds[])` |
-| **On-chain переход** | PutAway → Picked |
-| **Event log** | `ItemTransition(eventId, itemId, PutAway, Picked, actor, timestamp)` |
+### `detailsHash` по типам (ADR-0001 §4)
 
-**Важно:** аллокация (STORED → ALLOCATED) **не создаёт** outbox event. Блокчейн видит только физические операции, не системные назначения.
+`detailsHash = keccak256(abi.encode(bytes32 salt, <поля типа>…))`; поля после соли:
+
+| Тип | Поля деталей |
+|---|---|
+| `Receive` | `cargoplaceId`, `operatorId`, `occurredAtMs` |
+| `PutAway` | `storageBinId`, `operatorId`, `occurredAtMs` |
+| `Pick` | `shippingBufferBinId`, `orderIds[]`, `operatorId`, `occurredAtMs` |
+| `Ship` | `dispatchId`, `shippingBufferBinId`, `orderIds[]`, `operatorId`, `occurredAtMs` |
+| `KeyRegister` / `KeyRevoke` | без соли: `keccak256(abi.encode(qx, qy))` — контракт считает сам, в конверте `detailsHash` отсутствует |
+
+Каждое поле деталей должно читаться из доменной таблицы, которую меняет действие: сверка (#17) пересчитывает хеш из таблиц, а не из копии — подмену ячейки в `putaways` так не спрятать.
 
 ---
 
-### 5. Отгрузка
+## Размер действия: 2000 товаров и calldata
 
-| Аспект | Значение |
-|--------|---------|
-| **Триггер** | POST /shipping/ship |
-| **Что происходит в WMS** | Все товары заказа отгружены в транспортное средство |
-| **Outbox events** | N штук (по 1 на каждый product в заказе) |
-| **aggregate_id** | product_id |
-| **aggregate_type** | `shipping` |
-| **event_type** | `wms.shipping.v1` |
-| **Kafka topic** | `wms.shipping.v1` |
-| **Kafka key** | product_id (UUID string) |
-| **Контракт** | `batchShip(eventIds[], itemIds[])` |
-| **On-chain переход** | Picked → Shipped |
-| **Event log** | `ItemTransition(eventId, itemId, Picked, Shipped, actor, timestamp)` |
-
-Это **финальный** переход. После Shipped статус на блокчейне не меняется.
+- Лимит WMS — **2000 товаров на действие** (`MaxItemsPerAction`, `wms/internal/signedops/operation.go`). Одно действие стоит ~930 байт плюс 32 байта на товар, поэтому 2000 — с запасом до потолка транзакции.
+- Узел subnet-evm отклоняет транзакцию больше 131 072 байт (`oversized data`); адаптер режет сегмент действий по **120 000 байт calldata** (`maxActionCalldata`, `ledger-adapter/internal/consumer/flusher_actions.go`), оставляя место на упаковку нескольких действий в транзакцию.
+- Операцию крупнее лимита бэкенд режет сам: черновик возвращает N частей по ≤ 2000 товаров, у каждой части свой `actionId`, своя соль и свой challenge, поля деталей одинаковые. Оператор подтверждает каждую часть, все assertion уходят одним `submit`, бэкенд коммитит операцию и N событий-действий одной транзакцией БД. В цепи каждая часть атомарна сама по себе (ADR-0001 §10).
 
 ---
 
-## Сводная таблица
+## Как работает отклонение (ADR-0001 §6)
 
-| Этап WMS | aggregate_type | Kafka topic | Batch-функция | FSM переход |
-|----------|---------------|-------------|---------------|-------------|
-| КПП | — | — | — | — |
-| Стол приёмки | `receiving` | `wms.receiving.v1` | `batchAccept` | None → Accepted |
-| Раскладка | `putaway` | `wms.putaway.v1` | `batchPutAway` | Accepted → PutAway |
-| Сборка | `picking` | `wms.picking.v1` | `batchPick` | PutAway → Picked |
-| Отгрузка | `shipping` | `wms.shipping.v1` | `batchShip` | Picked → Shipped |
+- **Батч никогда не ревертится целиком.** В одной транзакции `applyActions` каждое действие применяется или отклоняется отдельно, со своим событием `ActionRejected`.
+- **Действие атомарно:** сначала проверяются все товары, потом пишутся. Один товар не в том статусе отклоняет всё действие (`itemIndex` указывает на первый неверный товар), товары не трогаются.
+- Повтор `actionId` со статусом `Applied`/`Rejected` пропускается молча, без событий.
+- Причины 1–3 (неизвестный ключ, отозванный ключ, битая подпись) не занимают `actionId`: кто угодно не может «сжечь» чужой `actionId` мусорной подписью. Остальные причины пишут `Rejected`.
 
----
+| Код | `RejectReason` | Где проверяется | Занимает `actionId` |
+|---|---|---|---|
+| 1 | `UnknownKey` | оба контракта | нет |
+| 2 | `KeyRevoked` | оба контракта | нет |
+| 3 | `BadSignature` | оба контракта | нет |
+| 4 | `WrongType` | оба контракта | да |
+| 5 | `NotAdmin` | Registry | да |
+| 6 | `KeyExists` | Registry | да |
+| 7 | `InvalidPublicKey` | Registry | да |
+| 8 | `WrongOrganization` | Registry | да |
+| 9 | `TargetNotOperator` | Registry | да |
+| 10 | `EmptyItems` | FSM | да |
+| 11 | `ItemsNotAscending` | FSM | да |
+| 12 | `WrongItemStatus` | FSM | да |
 
-## Конвертация идентификаторов
-
-```
-UUID (PostgreSQL)  →  uint256 (Solidity)
-─────────────────────────────────────────
-event_id           →  uint256(keccak256(bytes("550e8400-e29b-41d4-a716-446655440000")))
-product_id         →  uint256(keccak256(bytes("7c9e6679-7425-40de-944b-e07fc1f90ae7")))
-```
-
-Конвертация детерминистична и однонаправлена. Один UUID всегда даёт один uint256. Из uint256 восстановить UUID нельзя.
-
----
-
-## Обработка ошибок
-
-### Дубликаты
-
-Двойная защита:
-
-1. **Ledger Adapter:** проверяет `onchain_events.event_id` перед обработкой
-2. **Контракт:** `processedEventIds[eventId] == true` → revert `DuplicateEventId`
-
-### Неверный порядок переходов
-
-Контракт проверяет FSM: нельзя вызвать `batchPutAway` для товара в статусе `None` (нужен сначала `batchAccept`). Revert всей batch-транзакции.
-
-**Митигация:** Kafka key = product_id → все события одного товара в одной партиции → ordering гарантирован.
-
-### Невалидный item в batch
-
-Один невалидный item → **вся транзакция** ревертится (атомарность EVM).
-
-**Митигация:**
-1. Ledger Adapter валидирует items перед отправкой
-2. Невалидные → DLQ (`wms.dlq.v1`)
-3. Retry без невалидных items
-
-### Сбой блокчейна / RPC
-
-```
-TX отправлена, нет receipt
-→ Ledger Adapter ждёт с экспоненциальным backoff
-→ Запись в onchain_events остаётся в статусе SENT
-→ После получения receipt → COMMITTED или FAILED
-```
+Исход виден в WMS: `GET /signed-actions/operations/{operationID}` возвращает на каждую часть состояние `SENT / APPLIED / REJECTED (+ reason) / FAILED` из `onchain_events`. Отклонённое действие блокирует следующий этап товара (409) — см. [Архитектуру системы, «Гейты»](../architecture/system-overview.md).
 
 ---
 
-## Диаграмма: полный путь одного события
+## Идентификаторы
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant WMS as WMS (Go)
-    participant PG as PostgreSQL
-    participant DZ as Debezium
-    participant KF as Kafka
-    participant LA as Ledger Adapter
-    participant BC as BatchMappingWMS
+- UUID → `bytes16` с сырыми 16 байтами: `actionId`, `orgId`. Запись обратима: по логу виден исходный UUID.
+- Исключение: `itemId = uint256(keccak256(bytes(uuid)))` — каноническая строка UUID из 36 символов в нижнем регистре. Из `itemId` UUID не восстановить.
+- `keyId = keccak256(abi.encode(qx, qy))` — keccak от 64 байт публичного ключа; один ключ нельзя зарегистрировать дважды, даже в разных организациях.
 
-    WMS->>PG: BEGIN TX
-    WMS->>PG: UPDATE products SET status = 'STORED'
-    WMS->>PG: INSERT putaways (product_id, bin_id)
-    WMS->>PG: INSERT outbox_events (event_id, aggregate_id=product_id, type='putaway')
-    WMS->>PG: COMMIT
+## Сверка с БД
 
-    Note over PG,DZ: CDC (~5 сек)
-    DZ->>KF: Publish to wms.putaway.v1 (key=product_id, header.id=event_id)
-
-    Note over KF,LA: Consumer poll
-    LA->>KF: Poll messages
-    LA->>LA: Accumulate batch (10 msgs / 100ms)
-    LA->>PG: INSERT onchain_events (event_id, status=PENDING)
-
-    Note over LA: UUID → uint256 conversion
-    LA->>LA: eventId = keccak256(event_id_str)
-    LA->>LA: itemId = keccak256(product_id_str)
-
-    LA->>BC: batchPutAway([eventId], [itemId])
-
-    Note over BC: Blockchain consensus (~2 сек)
-    BC->>BC: Проверка: itemStatus[itemId] == Accepted?
-    BC->>BC: itemStatus[itemId] = PutAway
-    BC->>BC: processedEventIds[eventId] = true
-    BC->>BC: emit ItemTransition(eventId, itemId, Accepted, PutAway, msg.sender, block.timestamp)
-    BC-->>LA: TX receipt (success)
-
-    LA->>PG: UPDATE onchain_events SET status='COMMITTED', tx_hash='0x...'
-```
-
----
-
-## Аудит: как проверить целостность
-
-### Шаг 1: найти on-chain записи товара
-
-```sql
-SELECT oe.event_id, oe.tx_hash, oe.status, oe.aggregate_type, oe.created_at
-FROM onchain_events oe
-JOIN outbox_events ob ON ob.event_id = oe.event_id
-WHERE ob.aggregate_id = :product_id
-  AND oe.status = 'COMMITTED'
-ORDER BY oe.created_at;
-```
-
-Ожидаемый результат: 4 записи (receiving, putaway, picking, shipping).
-
-### Шаг 2: проверить on-chain данные
-
-Взять `tx_hash` → запросить receipt → декодировать `ItemTransition` events → сверить `itemId` и `status` с PostgreSQL.
-
-### Шаг 3: проверить порядок
-
-On-chain timestamps должны быть монотонно возрастающими: Accepted < PutAway < Picked < Shipped. Расхождение = индикатор подмены данных в БД.
+Как аудитор сверяет цепь с БД — [Процедура аудита](audit-procedure.md) (CLI `wms/cmd/audit`, страница `/audit`) и ADR-0001 §8.

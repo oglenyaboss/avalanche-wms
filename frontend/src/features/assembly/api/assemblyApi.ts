@@ -6,6 +6,13 @@ import type {
   PickResult,
   ShippingBufferResult,
 } from '@/entities/assembly'
+import {
+  mapSignedOperationDraft,
+  toAssertionsBody,
+  type PartAssertion,
+  type SignedOperationDraft,
+  type SignedOperationDraftResponse,
+} from '@/entities/signed-action'
 import { apiClient } from '@/shared/api'
 
 // ── Wire shapes (snake_case, as returned by the WMS API) ────────────────────
@@ -83,6 +90,12 @@ interface ScanShippingBufferResponse {
   buffer_bin_id: string
   products_placed: number
   orders_assembled: number
+}
+
+// scan-shipping-buffer/submit result: today's unload result plus the id of
+// the signed operation that performed it.
+interface UnloadToShippingBufferResponse extends ScanShippingBufferResponse {
+  operation_id: string
 }
 
 // ── Mappers ─────────────────────────────────────────────────────────────────
@@ -176,12 +189,31 @@ export async function pick(productId: string): Promise<PickResult> {
   }
 }
 
-export async function scanShippingBuffer(
+// Drafts the signed unload operation: the operator's whole cart into the
+// shipping-buffer bin. Errors: CART_EMPTY, DESTINATION_MISMATCH,
+// BIN_NOT_SHIPPING_BUFFER, SIGNER_KEY_NOT_ACTIVE.
+export async function draftUnloadToShippingBuffer(
   bufferBinId: string,
+): Promise<SignedOperationDraft> {
+  const { data } = await apiClient.post<
+    ApiEnvelope<SignedOperationDraftResponse>
+  >('/assembly/scan-shipping-buffer/draft', { buffer_bin_id: bufferBinId })
+
+  return mapSignedOperationDraft(unwrap(data))
+}
+
+// Submits the per-part assertions produced by signOperation. Extra errors:
+// DRAFT_STALE, OPERATION_ALREADY_SUBMITTED, INVALID_ASSERTION.
+export async function submitUnloadToShippingBuffer(
+  operationId: string,
+  assertions: PartAssertion[],
 ): Promise<ShippingBufferResult> {
   const { data } = await apiClient.post<
-    ApiEnvelope<ScanShippingBufferResponse>
-  >('/assembly/scan-shipping-buffer', { buffer_bin_id: bufferBinId })
+    ApiEnvelope<UnloadToShippingBufferResponse>
+  >('/assembly/scan-shipping-buffer/submit', {
+    operation_id: operationId,
+    assertions: toAssertionsBody(assertions),
+  })
 
   const result = unwrap(data)
 
@@ -189,5 +221,6 @@ export async function scanShippingBuffer(
     bufferBinId: result.buffer_bin_id,
     productsPlaced: result.products_placed,
     ordersAssembled: result.orders_assembled,
+    operationId: result.operation_id,
   }
 }

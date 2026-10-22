@@ -6,13 +6,16 @@ out = "out"
 # (so `forge create BatchMappingWMS` never tries to compile forge-std) and resolves the
 # forge-std/ import for the test file. Absent on a clean checkout — harmless: the
 # deploy target imports nothing from lib/.
-libs = ["lib"]
-remappings = []
-solc_version = "0.8.23"
-evm_version = "paris"
+# deps/ holds the vendored subset of OpenZeppelin that the deploy targets do import.
+libs = ["lib", "deps"]
+remappings = ["@openzeppelin/contracts/=deps/openzeppelin-contracts/contracts/"]
+# 0.8.24+ и cancun нужны WebAuthn из OpenZeppelin 5.7 (mcopy); subnet-evm 0.8.0 исполняет cancun (ADR-0001).
+solc_version = "0.8.28"
+evm_version = "cancun"
 via_ir = false
 optimizer = true
 optimizer_runs = 200
+fs_permissions = [{ access = "read-write", path = "../../testdata/signed-actions" }]
 
 # Тесты лежат рядом с контрактами: *.t.sol матчится автоматически.
 test = "."
