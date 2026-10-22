@@ -77,7 +77,12 @@ func (a *Auditor) stage(ctx context.Context, db *Action, applied *ChainAction, r
 			Findings:    []Finding{},
 		}
 		if db.ChainStatus == "PENDING" || db.ChainStatus == "SENT" {
-			s.Status = StatusPending
+			if a.now().Sub(db.SubmittedAt) <= PendingStaleAfter {
+				s.Status = StatusPending
+				return s, nil
+			}
+			s.Status = StatusMissingOnChain
+			s.Findings = append(s.Findings, Finding{ActionID: db.ActionID, Kind: KindMissingOnChain, Detail: "action is PENDING/SENT in DB for over 10m but not on chain"})
 			return s, nil
 		}
 		s.Status = StatusMissingOnChain

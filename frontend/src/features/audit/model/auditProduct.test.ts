@@ -211,7 +211,55 @@ describe('auditProduct', () => {
 
   it('marks a pending DB action as pending without problems', async () => {
     const action = dbAction({ chainStatus: 'PENDING' })
-    const stages = await auditProduct(dbAudit(action), mockChain({ chainIds: [], applied: [] }))
+    const stages = await auditProduct(
+      dbAudit(action),
+      mockChain({ chainIds: [], applied: [] }),
+      Date.parse('2025-10-18T10:02:00Z'),
+    )
+    expect(stages[0].status).toBe('pending')
+    expect(stages[0].problems).toEqual([])
+  })
+
+  it('marks a PENDING DB action one minute old as pending without problems', async () => {
+    const action = dbAction({ chainStatus: 'PENDING' })
+    const stages = await auditProduct(
+      dbAudit(action),
+      mockChain({ chainIds: [], applied: [] }),
+      Date.parse('2025-10-18T10:02:00Z'),
+    )
+    expect(stages[0].status).toBe('pending')
+    expect(stages[0].problems).toEqual([])
+  })
+
+  it('flags a PENDING DB action eleven minutes old as missingOnChain', async () => {
+    const action = dbAction({ chainStatus: 'PENDING' })
+    const stages = await auditProduct(
+      dbAudit(action),
+      mockChain({ chainIds: [], applied: [] }),
+      Date.parse('2025-10-18T10:12:00Z'),
+    )
+    expect(stages[0].status).toBe('missingOnChain')
+    expect(stages[0].problems).toEqual(['Действие ждёт цепь дольше 10 минут, но в цепи его нет'])
+  })
+
+  it('flags a SENT DB action eleven minutes old as missingOnChain', async () => {
+    const action = dbAction({ chainStatus: 'SENT' })
+    const stages = await auditProduct(
+      dbAudit(action),
+      mockChain({ chainIds: [], applied: [] }),
+      Date.parse('2025-10-18T10:12:00Z'),
+    )
+    expect(stages[0].status).toBe('missingOnChain')
+    expect(stages[0].problems).toEqual(['Действие ждёт цепь дольше 10 минут, но в цепи его нет'])
+  })
+
+  it('keeps a PENDING DB action exactly ten minutes old as pending', async () => {
+    const action = dbAction({ chainStatus: 'PENDING' })
+    const stages = await auditProduct(
+      dbAudit(action),
+      mockChain({ chainIds: [], applied: [] }),
+      Date.parse('2025-10-18T10:11:00Z'),
+    )
     expect(stages[0].status).toBe('pending')
     expect(stages[0].problems).toEqual([])
   })
