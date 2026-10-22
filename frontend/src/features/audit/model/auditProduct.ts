@@ -12,7 +12,13 @@ const DETAILS_ERROR_TEXT: Record<string, string> = {
   DOMAIN_INCONSISTENT: 'Детали действия в БД расходятся между товарами',
 }
 
-export async function auditProduct(db: ProductAudit, chain: ChainReader): Promise<AuditStage[]> {
+const PENDING_STALE_MS = 10 * 60 * 1000
+
+export async function auditProduct(
+  db: ProductAudit,
+  chain: ChainReader,
+  now: number = Date.now(),
+): Promise<AuditStage[]> {
   const chainIds = await chain.actionIdsForItem(BigInt(db.itemId))
   const ids = [...new Set([...chainIds, ...db.actions.map((a) => a.actionId)])]
   const applied = await chain.appliedActions(ids)
@@ -26,7 +32,7 @@ export async function auditProduct(db: ProductAudit, chain: ChainReader): Promis
 
     if (chainAction === null) {
       if (dbAction === null) continue
-      entries.push(dbOnlyStage(id, dbAction, rejected.get(id) ?? null, dbIndex))
+      entries.push(dbOnlyStage(id, dbAction, rejected.get(id) ?? null, dbIndex, now))
       continue
     }
 
@@ -78,6 +84,7 @@ function dbOnlyStage(
   action: DbAction,
   rejection: RejectedAction | null,
   dbIndex: number,
+  now: number,
 ): Entry {
   if (rejection !== null) {
     return {
@@ -104,7 +111,8 @@ function dbOnlyStage(
     }
   }
 
-  const pending = action.chainStatus === 'PENDING' || action.chainStatus === 'SENT'
+  const onChainPending = action.chainStatus === 'PENDING' || action.chainStatus === 'SENT'
+  const pending = onChainPending && now - Date.parse(action.submittedAt) <= PENDING_STALE_MS
   return {
     stage: {
       actionId: id,
@@ -122,7 +130,13 @@ function dbOnlyStage(
       items: 'skipped',
       signer: 'skipped',
       signature: 'skipped',
-      problems: pending ? [] : ['Действие есть в БД, но нет в цепи'],
+      problems: pending
+        ? []
+        : [
+            onChainPending
+              ? 'Действие ждёт цепь дольше 10 минут, но в цепи его нет'
+              : 'Действие есть в БД, но нет в цепи',
+          ],
     },
     blockNumber: null,
     dbIndex,

@@ -433,7 +433,9 @@ func TestAudit_Product_MissingOnChainAndPending(t *testing.T) {
 		byProduct: map[uuid.UUID][]Action{product: {f.dbAction}},
 		details:   func(a Action) (Details, error) { return f.details(), nil },
 	}
-	report, err = NewAuditor(s2, l).Product(context.Background(), product)
+	a := NewAuditor(s2, l)
+	a.now = func() time.Time { return f.dbAction.SubmittedAt.Add(time.Minute) }
+	report, err = a.Product(context.Background(), product)
 	if err != nil {
 		t.Fatalf("Product pending: %v", err)
 	}
@@ -442,6 +444,55 @@ func TestAudit_Product_MissingOnChainAndPending(t *testing.T) {
 	}
 	if len(report.Findings()) != 0 {
 		t.Errorf("findings = %v, want none", report.Findings())
+	}
+}
+
+// TestAudit_Product_StalePending reports a PENDING/SENT DB action absent from
+// the chain as MISSING_ON_CHAIN once it waits longer than PendingStaleAfter.
+func TestAudit_Product_StalePending(t *testing.T) {
+	f := newFixture(t)
+	product := f.productOf(t)
+
+	cases := []struct {
+		name   string
+		status string
+		delta  time.Duration
+		want   Status
+	}{
+		{name: "PENDING one minute", status: "PENDING", delta: time.Minute, want: StatusPending},
+		{name: "PENDING eleven minutes", status: "PENDING", delta: 11 * time.Minute, want: StatusMissingOnChain},
+		{name: "SENT eleven minutes", status: "SENT", delta: 11 * time.Minute, want: StatusMissingOnChain},
+		{name: "PENDING exactly ten minutes", status: "PENDING", delta: 10 * time.Minute, want: StatusPending},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f.dbAction.ChainStatus = tc.status
+			s := &fakeStore{
+				byProduct: map[uuid.UUID][]Action{product: {f.dbAction}},
+				details:   func(a Action) (Details, error) { return f.details(), nil },
+			}
+			a := NewAuditor(s, &fakeLedger{})
+			a.now = func() time.Time { return f.dbAction.SubmittedAt.Add(tc.delta) }
+			report, err := a.Product(context.Background(), product)
+			if err != nil {
+				t.Fatalf("Product: %v", err)
+			}
+			if report.Stages[0].Status != tc.want {
+				t.Errorf("status = %s, want %s", report.Stages[0].Status, tc.want)
+			}
+			finding := findFinding(report.Findings(), KindMissingOnChain)
+			if tc.want == StatusPending {
+				if len(report.Findings()) != 0 {
+					t.Errorf("findings = %v, want none", report.Findings())
+				}
+				return
+			}
+			if finding == nil {
+				t.Errorf("no %s finding in %v", KindMissingOnChain, report.Findings())
+			} else if finding.ActionID != f.actionID {
+				t.Errorf("finding action = %s, want %s", finding.ActionID, f.actionID)
+			}
+		})
 	}
 }
 

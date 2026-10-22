@@ -107,15 +107,20 @@ type ledger interface {
 	Auth(ctx context.Context, tx common.Hash, actionID uuid.UUID) (OnChainAuth, error)
 }
 
+// PendingStaleAfter is how long a PENDING/SENT DB action may stay absent from
+// the chain before the audit reports it as missing on chain.
+const PendingStaleAfter = 10 * time.Minute
+
 // Auditor compares submitted signed actions in the DB with the chain and the signatures.
 type Auditor struct {
 	store  store
 	ledger ledger
+	now    func() time.Time
 }
 
 // NewAuditor builds an Auditor over the DB store and the chain reader.
 func NewAuditor(s store, l ledger) *Auditor {
-	return &Auditor{store: s, ledger: l}
+	return &Auditor{store: s, ledger: l, now: time.Now}
 }
 
 // Product reconciles every action that touched the product, ordered by block
