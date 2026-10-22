@@ -212,6 +212,25 @@ func (r *Repository) GetProductsByIDForUpdate(ctx context.Context, productID uui
 	return &p, nil
 }
 
+// GetCargoplaceStatus возвращает статус грузоместа товара: размещать можно только из
+// закрытого на приёмке (TABLE_CLOSED), иначе цепь отклонит PutAway.
+func (r *Repository) GetCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID) (string, error) {
+	const query = `
+		SELECT status
+		FROM wms_inventory.cargoplaces
+		WHERE cargoplace_id = $1`
+
+	var status string
+	err := r.q.QueryRow(ctx, query, cargoplaceID).Scan(&status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("putaway.Repository.GetCargoplaceStatus: %w", ErrCargoplaceNotClosed)
+		}
+		return "", fmt.Errorf("putaway.Repository.GetCargoplaceStatus scan: %w", err)
+	}
+	return status, nil
+}
+
 // GetSKUByProductID возвращает SKU товара
 func (r *Repository) GetSKUByProductID(ctx context.Context, productID uuid.UUID) (*domain.SKU, error) {
 	const query = `

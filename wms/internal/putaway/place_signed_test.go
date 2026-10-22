@@ -375,3 +375,144 @@ func TestSubmitPlaceToStorageBin_Success(t *testing.T) {
 		t.Fatalf("WriteActions payloads = %d, want %d", len(repo.lastWriteActionsPayloads), len(op.Parts))
 	}
 }
+
+// TestDraftPlaceToStorageBin_RequiresClosedCargoplace blocks placement of a
+// product whose cargoplace is still open on receiving: the receiving scan-buffer
+// fills the buffer while the cargoplace is TABLE_IN_PROGRESS, so "buffer +
+// RECEIVED" alone would let the putaway chain run before the signed Receive.
+func TestDraftPlaceToStorageBin_RequiresClosedCargoplace(t *testing.T) {
+	operatorID := uuid.New()
+	storageBinID := uuid.New()
+	bufferBinID := uuid.New()
+	cpA := uuid.New()
+	cpB := uuid.New()
+	p1, p2, p3 := uuid.New(), uuid.New(), uuid.New()
+	dbDown := errors.New("db down")
+
+	base := func() (*mockPutawayRepo, *mockOperationStore, *mockSignerSource) {
+		repo := &mockPutawayRepo{
+			storageBin: &domain.Bin{BinID: storageBinID, Code: "M2-A-03"},
+			productsMap: map[uuid.UUID]*domain.Product{
+				p1: {ProductID: p1, Status: "RECEIVED", BinID: &bufferBinID, CargoplaceID: cpA},
+				p2: {ProductID: p2, Status: "RECEIVED", BinID: &bufferBinID, CargoplaceID: cpA},
+				p3: {ProductID: p3, Status: "RECEIVED", BinID: &bufferBinID, CargoplaceID: cpA},
+			},
+		}
+		signer, _ := signedSigner()
+		return repo, &mockOperationStore{operations: map[uuid.UUID]*signedops.Operation{}}, &mockSignerSource{signer: signer}
+	}
+
+	tests := []struct {
+		name        string
+		products    []uuid.UUID
+		cargoplaces map[uuid.UUID]uuid.UUID
+		statuses    map[uuid.UUID]string
+		statusErr   error
+		wantErr     error
+		wantCalls   int
+		wantStored  bool
+	}{
+		{
+			name:       "product cargoplace still in progress",
+			products:   []uuid.UUID{p1},
+			statuses:   map[uuid.UUID]string{cpA: "TABLE_IN_PROGRESS"},
+			wantErr:    ErrCargoplaceNotClosed,
+			wantCalls:  1,
+			wantStored: false,
+		},
+		{
+			name:        "second product cargoplace still in progress",
+			products:    []uuid.UUID{p1, p2},
+			cargoplaces: map[uuid.UUID]uuid.UUID{p2: cpB},
+			statuses:    map[uuid.UUID]string{cpA: "TABLE_CLOSED", cpB: "TABLE_IN_PROGRESS"},
+			wantErr:     ErrCargoplaceNotClosed,
+			wantCalls:   2,
+			wantStored:  false,
+		},
+		{
+			name:       "all products from one closed cargoplace",
+			products:   []uuid.UUID{p1, p2, p3},
+			statuses:   map[uuid.UUID]string{cpA: "TABLE_CLOSED"},
+			wantCalls:  1,
+			wantStored: true,
+		},
+		{
+			name:       "cargoplace status lookup fails",
+			products:   []uuid.UUID{p1},
+			statusErr:  dbDown,
+			wantErr:    dbDown,
+			wantCalls:  1,
+			wantStored: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, ops, signer := base()
+			for productID, cargoplaceID := range tc.cargoplaces {
+				repo.productsMap[productID].CargoplaceID = cargoplaceID
+			}
+			repo.cargoplaceStatuses = tc.statuses
+			repo.cargoplaceStatusErr = tc.statusErr
+
+			_, _, err := putawayService(repo, ops, signer).
+				DraftPlaceToStorageBin(context.Background(), operatorID, tc.products, storageBinID)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("DraftPlaceToStorageBin: %v", err)
+			}
+			if tc.wantStored && ops.inserted == nil {
+				t.Fatal("operation not stored")
+			}
+			if !tc.wantStored && ops.inserted != nil {
+				t.Fatalf("operation must not be stored, got %v", ops.inserted.OperationID)
+			}
+			if repo.cargoplaceStatusCalls != tc.wantCalls {
+				t.Fatalf("GetCargoplaceStatus calls = %d, want %d (one per unique cargoplace)", repo.cargoplaceStatusCalls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestSubmitPlaceToStorageBin_RequiresClosedCargoplace blocks the signed submit
+// when a locked product's cargoplace is not TABLE_CLOSED yet: nothing is written.
+func TestSubmitPlaceToStorageBin_RequiresClosedCargoplace(t *testing.T) {
+	operatorID := uuid.New()
+	storageBinID := uuid.New()
+	bufferBinID := uuid.New()
+	cpA := uuid.New()
+	items := []uuid.UUID{uuid.New(), uuid.New()}
+
+	op, signerPasskey, key := newSignedOperation(t, storageBinID, operatorID, items)
+	repo := &mockPutawayRepo{
+		storageBin:         &domain.Bin{BinID: storageBinID, Code: "M2-A-03"},
+		productsMap:        map[uuid.UUID]*domain.Product{},
+		lockedOperation:    op,
+		cargoplaceStatuses: map[uuid.UUID]string{cpA: "TABLE_IN_PROGRESS"},
+	}
+	for _, id := range items {
+		bin := bufferBinID
+		repo.productsMap[id] = &domain.Product{ProductID: id, Status: "RECEIVED", BinID: &bin, CargoplaceID: cpA}
+	}
+	ops := &mockOperationStore{operations: map[uuid.UUID]*signedops.Operation{op.OperationID: op}}
+	signerSource := &mockSignerSource{signer: signerPasskey, rpID: signedactiontest.RPID, origins: []string{signedactiontest.Origin}}
+
+	_, err := putawayService(repo, ops, signerSource).
+		SubmitPlaceToStorageBin(context.Background(), operatorID, op.OperationID, signParts(t, op, key, signerPasskey.CredentialID))
+	if !errors.Is(err, ErrCargoplaceNotClosed) {
+		t.Fatalf("err = %v, want ErrCargoplaceNotClosed", err)
+	}
+	if repo.writeActionsCalls != 0 || len(repo.insertedPutaways) != 0 || len(repo.updatedProductIDs) != 0 {
+		t.Fatalf("open cargoplace must write nothing: actions=%d putaways=%d updates=%d",
+			repo.writeActionsCalls, len(repo.insertedPutaways), len(repo.updatedProductIDs))
+	}
+	if repo.cargoplaceStatusCalls != 1 {
+		t.Fatalf("GetCargoplaceStatus calls = %d, want 1 (one per unique cargoplace)", repo.cargoplaceStatusCalls)
+	}
+	if repo.withTxCalls != 1 {
+		t.Fatalf("status check must run inside the placement transaction; withTxCalls=%d", repo.withTxCalls)
+	}
+}

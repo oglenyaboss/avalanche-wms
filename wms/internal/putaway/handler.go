@@ -192,6 +192,8 @@ func mapServiceError(err error) (status int, code, message string) {
 		return http.StatusConflict, "PRODUCT_NOT_IN_BUFFER", "Товар не находится в указанной буферной ячейке"
 	case errors.Is(err, ErrProductNotReceived):
 		return http.StatusConflict, "PRODUCT_NOT_RECEIVED", "Товар не в статусе RECEIVED"
+	case errors.Is(err, ErrCargoplaceNotClosed):
+		return http.StatusConflict, "CARGOPLACE_NOT_CLOSED", "Грузоместо товара ещё не закрыто на приёмке"
 	case errors.Is(err, ErrDraftStale):
 		return http.StatusConflict, "DRAFT_STALE", "Состав корзины изменился, подтвердите размещение заново"
 	case errors.Is(err, ledger.ErrChainEventRejected):

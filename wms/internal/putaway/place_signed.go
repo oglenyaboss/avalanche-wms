@@ -29,6 +29,8 @@ type signerSource interface {
 	RelyingParty() (rpID string, origins []string)
 }
 
+const cargoplaceStatusTableClosed = "TABLE_CLOSED"
+
 // putawayDetails are the draft inputs hashed into every part's detailsHash.
 type putawayDetails struct {
 	StorageBinID uuid.UUID `json:"storage_bin_id"`
@@ -61,6 +63,7 @@ func (s *Service) DraftPlaceToStorageBin(ctx context.Context, operatorID uuid.UU
 	}
 
 	verifiedBuffers := make(map[uuid.UUID]struct{})
+	checkedCargoplaces := make(map[uuid.UUID]struct{})
 	for _, productID := range items {
 		product, err := s.repo.GetProductByID(ctx, productID)
 		if err != nil {
@@ -80,6 +83,16 @@ func (s *Service) DraftPlaceToStorageBin(ctx context.Context, operatorID uuid.UU
 		}
 		if product.Status != "RECEIVED" {
 			return nil, "", fmt.Errorf("putaway.Service.DraftPlaceToStorageBin product %s: %w", productID, ErrProductNotReceived)
+		}
+		if _, ok := checkedCargoplaces[product.CargoplaceID]; !ok {
+			status, err := s.repo.GetCargoplaceStatus(ctx, product.CargoplaceID)
+			if err != nil {
+				return nil, "", fmt.Errorf("putaway.Service.DraftPlaceToStorageBin cargoplace for product %s: %w", productID, err)
+			}
+			if status != cargoplaceStatusTableClosed {
+				return nil, "", fmt.Errorf("putaway.Service.DraftPlaceToStorageBin product %s: %w", productID, ErrCargoplaceNotClosed)
+			}
+			checkedCargoplaces[product.CargoplaceID] = struct{}{}
 		}
 	}
 
@@ -197,6 +210,7 @@ func (s *Service) SubmitPlaceToStorageBin(ctx context.Context, operatorID, opera
 		// Состав черновика должен дожить до submit: каждый подписанный товар всё ещё
 		// лежит в буферной ячейке со статусом RECEIVED, иначе подпись устарела.
 		verifiedBuffers := make(map[uuid.UUID]struct{})
+		checkedCargoplaces := make(map[uuid.UUID]struct{})
 		for _, product := range locked {
 			if product.BinID == nil {
 				return fmt.Errorf("putaway.Service.SubmitPlaceToStorageBin product %s: %w", product.ProductID, ErrDraftStale)
@@ -212,6 +226,16 @@ func (s *Service) SubmitPlaceToStorageBin(ctx context.Context, operatorID, opera
 			}
 			if product.Status != "RECEIVED" {
 				return fmt.Errorf("putaway.Service.SubmitPlaceToStorageBin product %s: %w", product.ProductID, ErrDraftStale)
+			}
+			if _, ok := checkedCargoplaces[product.CargoplaceID]; !ok {
+				status, err := txRepo.GetCargoplaceStatus(ctx, product.CargoplaceID)
+				if err != nil {
+					return fmt.Errorf("putaway.Service.SubmitPlaceToStorageBin cargoplace for product %s: %w", product.ProductID, err)
+				}
+				if status != cargoplaceStatusTableClosed {
+					return fmt.Errorf("putaway.Service.SubmitPlaceToStorageBin product %s: %w", product.ProductID, ErrCargoplaceNotClosed)
+				}
+				checkedCargoplaces[product.CargoplaceID] = struct{}{}
 			}
 		}
 
