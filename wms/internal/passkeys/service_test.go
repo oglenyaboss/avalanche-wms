@@ -457,11 +457,13 @@ func TestSyncStatuses(t *testing.T) {
 		wantUpdate bool
 		wantCalls  int
 	}{
-		{"pending becomes active", domain.PasskeyStatusPending, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true}}, domain.PasskeyStatusActive, true, 1},
-		{"active becomes revoked", domain.PasskeyStatusActive, &fakeChain{key: ledger.RegistryKey{Found: true, Active: false}}, domain.PasskeyStatusRevoked, true, 1},
+		{"pending becomes active", domain.PasskeyStatusPending, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true, OrgID: orgA.String(), Role: "admin"}}, domain.PasskeyStatusActive, true, 1},
+		{"active becomes revoked", domain.PasskeyStatusActive, &fakeChain{key: ledger.RegistryKey{Found: true, Active: false, OrgID: orgA.String(), Role: "admin"}}, domain.PasskeyStatusRevoked, true, 1},
 		{"chain error keeps status", domain.PasskeyStatusPending, &fakeChain{err: errors.New("502")}, domain.PasskeyStatusPending, false, 1},
 		{"not found keeps status", domain.PasskeyStatusPending, &fakeChain{key: ledger.RegistryKey{Found: false}}, domain.PasskeyStatusPending, false, 1},
-		{"revoked is not queried", domain.PasskeyStatusRevoked, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true}}, domain.PasskeyStatusRevoked, false, 0},
+		{"revoked is not queried", domain.PasskeyStatusRevoked, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true, OrgID: orgA.String(), Role: "admin"}}, domain.PasskeyStatusRevoked, false, 0},
+		{"other org keeps status", domain.PasskeyStatusPending, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true, OrgID: orgB.String(), Role: "admin"}}, domain.PasskeyStatusPending, false, 1},
+		{"other role keeps status", domain.PasskeyStatusPending, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true, OrgID: orgA.String(), Role: "operator"}}, domain.PasskeyStatusPending, false, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -517,10 +519,12 @@ func TestActiveSigner(t *testing.T) {
 	}{
 		{"registry error is fatal", domain.PasskeyStatusActive, &fakeChain{err: errors.New("502")}, nil, ErrRegistryUnavailable, "", 0, 1},
 		{"key absent from registry", domain.PasskeyStatusActive, &fakeChain{keys: map[string]ledger.RegistryKey{}}, nil, ErrSignerKeyNotActive, "", 0, 1},
-		{"inactive with failing update", domain.PasskeyStatusActive, &fakeChain{key: ledger.RegistryKey{Found: true, Active: false}}, errors.New("db down"), ErrSignerKeyNotActive, "", 1, 1},
-		{"pending confirmed active", domain.PasskeyStatusPending, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true}}, nil, nil, domain.PasskeyStatusActive, 1, 1},
-		{"revoked is not queried", domain.PasskeyStatusRevoked, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true}}, nil, ErrSignerKeyNotActive, "", 0, 0},
+		{"inactive with failing update", domain.PasskeyStatusActive, &fakeChain{key: ledger.RegistryKey{Found: true, Active: false, OrgID: orgA.String(), Role: "admin"}}, errors.New("db down"), ErrSignerKeyNotActive, "", 1, 1},
+		{"pending confirmed active", domain.PasskeyStatusPending, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true, OrgID: orgA.String(), Role: "admin"}}, nil, nil, domain.PasskeyStatusActive, 1, 1},
+		{"revoked is not queried", domain.PasskeyStatusRevoked, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true, OrgID: orgA.String(), Role: "admin"}}, nil, ErrSignerKeyNotActive, "", 0, 0},
 		{"no chain keeps stored status", domain.PasskeyStatusActive, nil, nil, nil, domain.PasskeyStatusActive, 0, 0},
+		{"other org is not active", domain.PasskeyStatusActive, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true, OrgID: orgB.String(), Role: "admin"}}, nil, ErrSignerKeyNotActive, "", 0, 1},
+		{"other role is not active", domain.PasskeyStatusActive, &fakeChain{key: ledger.RegistryKey{Found: true, Active: true, OrgID: orgA.String(), Role: "operator"}}, nil, ErrSignerKeyNotActive, "", 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -546,13 +550,10 @@ func TestActiveSigner(t *testing.T) {
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tc.wantErr)
 			}
-			if tc.wantErr != nil {
-				return
-			}
-			if got != signer || got.Status != tc.wantStatus {
+			if tc.wantErr == nil && (got != signer || got.Status != tc.wantStatus) {
 				t.Fatalf("signer = %+v, want the stored key with status %s", got, tc.wantStatus)
 			}
-			if updates != tc.wantUpdates || (updates == 1 && updatedStatus != tc.wantStatus) {
+			if updates != tc.wantUpdates || (tc.wantErr == nil && updates == 1 && updatedStatus != tc.wantStatus) {
 				t.Fatalf("updates = %d (status %s), want %d (%s)", updates, updatedStatus, tc.wantUpdates, tc.wantStatus)
 			}
 			if tc.chain != nil && tc.chain.calls != tc.wantCalls {
@@ -602,8 +603,8 @@ func TestOrganization_StatusSyncOneRequest(t *testing.T) {
 		return nil
 	}
 	chain := &fakeChain{keys: map[string]ledger.RegistryKey{
-		keyIDHex(pending): {Found: true, Active: true},
-		keyIDHex(active):  {Found: true, Active: false},
+		keyIDHex(pending): {Found: true, Active: true, OrgID: orgA.String(), Role: "admin"},
+		keyIDHex(active):  {Found: true, Active: false, OrgID: orgA.String(), Role: "admin"},
 	}}
 	svc := newTestService(t, repo, chain)
 
@@ -667,8 +668,8 @@ func TestOrganization_UpdateFailureDoesNotStopOthers(t *testing.T) {
 		return nil
 	}
 	chain := &fakeChain{keys: map[string]ledger.RegistryKey{
-		keyIDHex(pending): {Found: true, Active: true},
-		keyIDHex(active):  {Found: true, Active: false},
+		keyIDHex(pending): {Found: true, Active: true, OrgID: orgA.String(), Role: "admin"},
+		keyIDHex(active):  {Found: true, Active: false, OrgID: orgA.String(), Role: "admin"},
 	}}
 	svc := newTestService(t, repo, chain)
 

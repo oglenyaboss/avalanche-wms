@@ -5,9 +5,18 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 
 	"wms/internal/domain"
+	"wms/internal/ledger"
 )
+
+// registryKeyMatches reports whether the registry entry describes the same key
+// WMS stores: same organization and same role. A registry key registered under
+// another organization or role is not this key, whatever its active flag says.
+func registryKeyMatches(key ledger.RegistryKey, p *domain.Passkey) bool {
+	return key.OrgID == p.OrgID.String() && strings.EqualFold(key.Role, string(p.Role))
+}
 
 // syncStatuses refreshes the statuses of all given keys with one registry request; chain errors are logged and the stored statuses are kept.
 func (s *Service) syncStatuses(ctx context.Context, keys []*domain.Passkey) {
@@ -34,7 +43,7 @@ func (s *Service) syncStatuses(ctx context.Context, keys []*domain.Passkey) {
 	}
 	for id, p := range byID {
 		key, ok := statuses[id]
-		if !ok || !key.Found {
+		if !ok || !key.Found || !registryKeyMatches(key, p) {
 			continue
 		}
 		next := domain.PasskeyStatusRevoked
@@ -62,7 +71,7 @@ func (s *Service) confirmActive(ctx context.Context, p *domain.Passkey) error {
 		return fmt.Errorf("%w: %v", ErrRegistryUnavailable, err)
 	}
 	key, ok := statuses[id]
-	if !ok || !key.Found {
+	if !ok || !key.Found || !registryKeyMatches(key, p) {
 		return ErrSignerKeyNotActive
 	}
 	next := domain.PasskeyStatusRevoked
