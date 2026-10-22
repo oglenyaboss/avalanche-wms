@@ -153,3 +153,43 @@ func buildSubmitBody(t *testing.T, operationID string, assertions []map[string]s
 	}
 	return string(body)
 }
+
+// TestScanStorageBinHandler_CargoplaceNotClosed maps the cargoplace gate to 409
+// so the client can tell "not closed on receiving yet" from other conflicts.
+func TestScanStorageBinHandler_CargoplaceNotClosed(t *testing.T) {
+	operatorID := uuid.New()
+	storageBinID := uuid.New()
+	bufferBinID := uuid.New()
+	cpA := uuid.New()
+	item := uuid.New()
+
+	repo := &mockPutawayRepo{
+		storageBin: &domain.Bin{BinID: storageBinID, Code: "M2-A-03"},
+		productsMap: map[uuid.UUID]*domain.Product{
+			item: {ProductID: item, Status: "RECEIVED", BinID: &bufferBinID, CargoplaceID: cpA},
+		},
+		cargoplaceStatuses: map[uuid.UUID]string{cpA: "TABLE_IN_PROGRESS"},
+	}
+	ops := &mockOperationStore{operations: map[uuid.UUID]*signedops.Operation{}}
+	signerPasskey, _ := signedSigner()
+	svc := putawayService(repo, ops, &mockSignerSource{signer: signerPasskey, rpID: signedactiontest.RPID, origins: []string{signedactiontest.Origin}})
+
+	body := `{"product_ids":["` + item.String() + `"],"storage_bin_id":"` + storageBinID.String() + `"}`
+	rec := servePutaway(t, svc, http.MethodPost, "/putaway/scan-storage-bin/draft", body, operatorID, domain.UserRoleOperator)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Error   *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal error envelope: %v (%s)", err, rec.Body.String())
+	}
+	if resp.Error == nil || resp.Error.Code != "CARGOPLACE_NOT_CLOSED" {
+		t.Fatalf("error.code = %+v, want CARGOPLACE_NOT_CLOSED (body=%s)", resp.Error, rec.Body.String())
+	}
+}

@@ -24,6 +24,7 @@ type putawayRepository interface {
 	ListProductsByBufferBin(ctx context.Context, bufferBinID uuid.UUID) ([]*ProductBufferItem, error)
 	GetProductByID(ctx context.Context, productID uuid.UUID) (*domain.Product, error)
 	GetProductsByIDForUpdate(ctx context.Context, productID uuid.UUID) (*domain.Product, error)
+	GetCargoplaceStatus(ctx context.Context, cargoplaceID uuid.UUID) (string, error)
 	GetSKUByProductID(ctx context.Context, productID uuid.UUID) (*domain.SKU, error)
 	UpdateProductStorage(ctx context.Context, productID, binID uuid.UUID) error
 	InsertPutaway(ctx context.Context, params *InsertPutawayParams) error

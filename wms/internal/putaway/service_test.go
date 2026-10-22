@@ -65,6 +65,11 @@ type mockPutawayRepo struct {
 
 	// CountReceivedInBuffer (#46 DB-derived cart size)
 	receivedInBuffer int
+
+	// GetCargoplaceStatus
+	cargoplaceStatuses    map[uuid.UUID]string
+	cargoplaceStatusErr   error
+	cargoplaceStatusCalls int
 }
 
 func (m *mockPutawayRepo) WithTx(_ context.Context, fn func(putawayRepository) error) error {
@@ -156,6 +161,17 @@ func (m *mockPutawayRepo) GetProductsByIDForUpdate(_ context.Context, productID 
 		}
 	}
 	return nil, ErrProductNotFound
+}
+
+func (m *mockPutawayRepo) GetCargoplaceStatus(_ context.Context, cargoplaceID uuid.UUID) (string, error) {
+	m.cargoplaceStatusCalls++
+	if m.cargoplaceStatusErr != nil {
+		return "", m.cargoplaceStatusErr
+	}
+	if status, ok := m.cargoplaceStatuses[cargoplaceID]; ok {
+		return status, nil
+	}
+	return cargoplaceStatusTableClosed, nil
 }
 
 func (m *mockPutawayRepo) GetSKUByProductID(_ context.Context, _ uuid.UUID) (*domain.SKU, error) {
