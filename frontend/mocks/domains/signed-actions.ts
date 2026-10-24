@@ -5,7 +5,7 @@ import { fail, guards, parseUuid, route } from "../http";
 
 type PartStatus = Schema<"OperationStatus">["parts"][number];
 
-function confirmationOf(state: Db, actionId: string): Pick<PartStatus, "state" | "reject_reason"> {
+export function confirmationOf(state: Db, actionId: string): Pick<PartStatus, "state" | "reject_reason"> {
   const event = state.onchain_events.find((row) => row.event_id === actionId);
   if (event?.status === "COMMITTED") return { state: "APPLIED", reject_reason: null };
   if (event?.status === "FAILED") return event.reject_reason === null ? { state: "FAILED", reject_reason: null } : { state: "REJECTED", reject_reason: event.reject_reason };
