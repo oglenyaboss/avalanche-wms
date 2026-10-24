@@ -16,8 +16,9 @@ info:
     1. **Модуль `auth` (`/auth/*`)** — ошибки в виде **простого текста** (`text/plain`),
        тело — голая строка вроде `unauthorized` (через `http.Error`, с завершающим `\n`).
        Конверт `{success,data,error}` здесь **не используется**.
-    2. **Бизнес-модули** (`receiving`, `putaway`, `assembly`, `shipping`, `dispatches`) —
-       единый **JSON-конверт** (`application/json`):
+    2. **Бизнес-модули** (`receiving`, `putaway`, `assembly`, `shipping`, `dispatches`,
+       `analytics`, `products`, `audit`, `passkeys`, `signedops`) — единый
+       **JSON-конверт** (`application/json`):
        `{"success": false, "data": null, "error": {"code": "...", "message": "..."}}`.
        `message` — на русском, `code` — машинно-читаемый ASCII.
     3. **`GET /health`** — отдельный формат: голый JSON-объект `{status, checks, time}`
@@ -28,14 +29,15 @@ info:
     Все эндпоинты, кроме `/auth/login`, `/auth/refresh`, `/health`, требуют заголовок
     `Authorization: Bearer <access_token>` (JWT, HS256). Бизнес-модули дополнительно
     проверяют роль через RBAC-гейты (см. описание каждой операции). Большинство
-    операций доступны **только роли `OPERATOR`**; исключения — `POST /auth/register`
-    (только `ADMIN`) и `POST /assembly/allocate` (`ADMIN` или `OPERATOR`, issue #39).
+    операций доступны **только роли `OPERATOR`**; исключения перечислены в описании
+    каждой операции (`ADMIN`, `ADMIN или OPERATOR`, `AUDITOR или ADMIN`).
 
     ## Строгий разбор тела (DisallowUnknownFields)
 
     Все тела запросов декодируются с `json.Decoder.DisallowUnknownFields()`. **Любое
     лишнее поле в теле приводит к `400`.** Поэтому каждая схема запроса помечена
-    `additionalProperties: false`.
+    `additionalProperties: false`. Исключение — тела `/passkeys/*`: их разбирает обычный
+    `json.NewDecoder` без `DisallowUnknownFields`, лишние поля игнорируются.
 
     ## Связанная документация
 
@@ -72,6 +74,14 @@ tags:
     description: Служебные эндпоинты (health-check).
   - name: Analytics
     description: Аналитика склада и статус блокчейн-аудита (только чтение). RBAC — ADMIN или OPERATOR.
+  - name: Passkeys
+    description: Регистрация passkey, свои и организационные ключи, отклонение регистрации. RBAC — ADMIN или OPERATOR (организация — только ADMIN).
+  - name: SignedActions
+    description: Черновики и submit ключевых действий (KeyRegister/KeyRevoke) и статус операций в цепи. RBAC — ADMIN (статус операции — ADMIN или OPERATOR).
+  - name: Products
+    description: Read-only список последних товаров и таймлайн товара. RBAC — ADMIN или OPERATOR.
+  - name: Audit
+    description: Аудит товара — подписанные действия и детали (только чтение). RBAC — AUDITOR или ADMIN.
 
 security:
   - bearerAuth: []
@@ -877,7 +887,7 @@ paths:
                 data:
                   operation_id: 01929c5e-6f00-7000-8000-000000001001
                   action_type: 1
-                  signer_key_id: 0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b
+                  signer_key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
                   rp_id: localhost
                   allow_credentials:
                     - type: public-key
@@ -888,7 +898,7 @@ paths:
                     - action_id: 01929c5e-6f00-7000-8000-000000001002
                       item_ids:
                         - 55555555-5555-5555-5555-555555555555
-                      details_hash: 0x3d2a91c4e8b7f6a5d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c
+                      details_hash: '0x3d2a91c4e8b7f6a5d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c'
                       challenge: 3q2-7wY0bXk9tR4sP1nM6vL8zJ5hG2fD0cA
                 error: null
         '400':
@@ -1157,7 +1167,7 @@ paths:
                 data:
                   operation_id: 01929c5e-6f00-7000-8000-000000002001
                   action_type: 2
-                  signer_key_id: 0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b
+                  signer_key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
                   rp_id: localhost
                   allow_credentials:
                     - type: public-key
@@ -1168,7 +1178,7 @@ paths:
                     - action_id: 01929c5e-6f00-7000-8000-000000002002
                       item_ids:
                         - 55555555-5555-5555-5555-555555555555
-                      details_hash: 0x9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0
+                      details_hash: '0x9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0'
                       challenge: 1aB2cD3eF4gH5iJ6kL7mN8oP9qR0sT
                 error: null
         '400':
@@ -1523,7 +1533,7 @@ paths:
                 data:
                   operation_id: 01929c5e-6f00-7000-8000-000000003001
                   action_type: 3
-                  signer_key_id: 0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b
+                  signer_key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
                   rp_id: localhost
                   allow_credentials:
                     - type: public-key
@@ -1534,7 +1544,7 @@ paths:
                     - action_id: 01929c5e-6f00-7000-8000-000000003002
                       item_ids:
                         - 55555555-5555-5555-5555-555555555555
-                      details_hash: 0x4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b
+                      details_hash: '0x4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b'
                       challenge: 0zY9xW8vU7tS6rQ5pO4nM3lK2jI1hG
                 error: null
         '400':
@@ -2203,7 +2213,7 @@ paths:
                 data:
                   operation_id: 01929c5e-6f00-7000-8000-000000004001
                   action_type: 4
-                  signer_key_id: 0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b
+                  signer_key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
                   rp_id: localhost
                   allow_credentials:
                     - type: public-key
@@ -2214,7 +2224,7 @@ paths:
                     - action_id: 01929c5e-6f00-7000-8000-000000004002
                       item_ids:
                         - 55555555-5555-5555-5555-555555555555
-                      details_hash: 0x7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d
+                      details_hash: '0x7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d'
                       challenge: 5hG2fD0cA9bE8dF7gH6iJ5kL4mN3oP
                 error: null
         '400':
@@ -2358,6 +2368,1076 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # PASSKEYS
+  # ──────────────────────────────────────────────────────────────────────────
+  /passkeys/registration/begin:
+    post:
+      tags: [Passkeys]
+      summary: Начать регистрацию passkey
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Создаёт сессию регистрации (в памяти процесса,
+        TTL 5 минут, одна сессия на пользователя) и отдаёт опции WebAuthn — браузер
+        передаёт `data.publicKey` в `navigator.credentials.create`. `residentKey: preferred`,
+        `userVerification: required`, алгоритм ES256 (alg -7), attestation none.
+        Живой ключ (`PENDING`/`ACTIVE`) у пользователя только один, поэтому повторная
+        регистрация до отклонения или отзыва ключа даёт `409`.
+      operationId: passkeysRegistrationBegin
+      responses:
+        '200':
+          description: Сессия регистрации создана, опции WebAuthn в `data.publicKey`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/PasskeyCreationOptions'
+              example:
+                success: true
+                data:
+                  publicKey:
+                    rp: { id: localhost, name: WMS }
+                    user:
+                      id: aWNhbmV2ZXItc2lnbg
+                      name: op-1a2b3c4d
+                      displayName: op-1a2b3c4d
+                    challenge: 5hG2fD0cA9bE8dF7gH6iJ5kL4mN3oPqR0sT
+                    pubKeyCredParams:
+                      - type: public-key
+                        alg: -7
+                    timeout: 60000
+                    authenticatorSelection:
+                      residentKey: preferred
+                      userVerification: required
+                    attestation: none
+                error: null
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: |
+            `FORBIDDEN` — роль не разрешена (RBAC-гейт), или `NO_ORGANIZATION` —
+            пользователь не принадлежит организации (сервис passkeys).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: NO_ORGANIZATION, message: Пользователь не принадлежит организации }
+        '409':
+          description: '`PASSKEY_EXISTS` — у пользователя уже есть живой ключ (`PENDING` или `ACTIVE`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PASSKEY_EXISTS, message: Ключ уже зарегистрирован }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /passkeys/registration/finish:
+    post:
+      tags: [Passkeys]
+      summary: Завершить регистрацию passkey (attestation)
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Принимает JSON attestation — сырой результат
+        `navigator.credentials.create` (`RegistrationResponseJSON`, тело до 64 KiB).
+        Сессия из `begin` одноразовая и живёт 5 минут: без неё или с истёкшей —
+        `400 INVALID_REGISTRATION`. Проверка attestation требует флаг UV и P-256
+        ключ пользователя; ключ сохраняется в `passkey_credentials` со статусом
+        `PENDING`. Дальше его активирует админ (action_type 5, реестр цепи),
+        а статус отображают `GET /passkeys/me` и `GET /passkeys/organization`.
+      operationId: passkeysRegistrationFinish
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasskeyRegistrationResponse'
+            example:
+              id: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+              rawId: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+              type: public-key
+              response:
+                clientDataJSON: eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0
+                attestationObject: o2NmbXRpb25lLXN0emlwYXRpb25Ob25lZ2F0dFN0bXQ
+                transports:
+                  - internal
+              clientExtensionResults: {}
+              authenticatorAttachment: platform
+      responses:
+        '201':
+          description: Ключ сохранён в `passkey_credentials` со статусом `PENDING`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/PasskeyView'
+              example:
+                success: true
+                data:
+                  credential_id: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+                  key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+                  qx: '0x3f95d6e1c8b0a277441955670e8a2b1c4d5e6f708192a3b4c5d6e7f8091a2b37'
+                  qy: '0x4fa06e7f2d9c1b38840289755e5a0cc2b39c40d5f8a709e1b2c9d6e7f08fa3b4'
+                  role: OPERATOR
+                  status: PENDING
+                  created_at: '2026-05-31T10:30:00Z'
+                error: null
+        '400':
+          description: |
+            `INVALID_REGISTRATION` — битый JSON или тело больше 64 KiB, нет/истекла
+            сессия регистрации (`begin` не вызывался, параллельный `finish`, TTL 5 минут),
+            attestation не прошёл проверку, нет флага UV, ключ не P-256.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_REGISTRATION, message: Некорректная регистрация passkey }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: |
+            `FORBIDDEN` — роль не разрешена (RBAC-гейт), или `NO_ORGANIZATION` —
+            пользователь не принадлежит организации (сервис passkeys).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: NO_ORGANIZATION, message: Пользователь не принадлежит организации }
+        '409':
+          description: '`PASSKEY_EXISTS` — у пользователя уже есть живой ключ (`PENDING` или `ACTIVE`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PASSKEY_EXISTS, message: Ключ уже зарегистрирован }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /passkeys/me:
+    get:
+      tags: [Passkeys]
+      summary: Свой passkey
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Последний ключ пользователя; статус `PENDING`
+        -> `ACTIVE`/`REVOKED` подтягивается из реестра цепи прямо перед ответом.
+        Ключа ещё нет — это `200` с `data: null`, не `404` (регистрация — через
+        `POST /passkeys/registration/begin`).
+      operationId: passkeysMe
+      responses:
+        '200':
+          description: '`data` — ключ пользователя или `null`, когда ключа нет.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        oneOf:
+                          - $ref: '#/components/schemas/PasskeyView'
+                          - type: 'null'
+              example:
+                success: true
+                data:
+                  credential_id: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+                  key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+                  qx: '0x3f95d6e1c8b0a277441955670e8a2b1c4d5e6f708192a3b4c5d6e7f8091a2b37'
+                  qy: '0x4fa06e7f2d9c1b38840289755e5a0cc2b39c40d5f8a709e1b2c9d6e7f08fa3b4'
+                  role: ADMIN
+                  status: ACTIVE
+                  created_at: '2026-05-31T10:30:00Z'
+                error: null
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: '`FORBIDDEN` — роль не разрешена (RBAC-гейт). Организацию `/me` не проверяет.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Недостаточно прав для этого действия }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /passkeys/organization:
+    get:
+      tags: [Passkeys]
+      summary: Обзор организации (ключи сотрудников)
+      description: |
+        RBAC: только `ADMIN`. По всем пользователям организации — последний ключ
+        и последнее подтверждение по нему; статус ключа синхронизируется с реестром
+        цепи прямо перед ответом. У сотрудников без ключа — `passkey: null`.
+        `confirmation` со стороны ключа показывает состояние действия
+        `KeyRegister`/`KeyRevoke` в цепи (`null` — подтверждений ещё не было).
+      operationId: passkeysOrganization
+      responses:
+        '200':
+          description: Обзор организации в `data`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/OrganizationOverview'
+              example:
+                success: true
+                data:
+                  organization:
+                    org_id: 11111111-1111-1111-1111-111111111111
+                    name: Склад №1
+                  members:
+                    - user_id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                      username: admin-1a2b3c4d
+                      role: ADMIN
+                      passkey:
+                        credential_id: aGFzaC1hZG1pbi1rZXk
+                        key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+                        qx: '0x3f95d6e1c8b0a277441955670e8a2b1c4d5e6f708192a3b4c5d6e7f8091a2b37'
+                        qy: '0x4fa06e7f2d9c1b38840289755e5a0cc2b39c40d5f8a709e1b2c9d6e7f08fa3b4'
+                        role: ADMIN
+                        status: ACTIVE
+                        created_at: '2026-05-31T10:00:00Z'
+                      confirmation: null
+                    - user_id: 9fd6a10f-3333-4ec8-a2c0-f3b5ff7788a1
+                      username: op-1a2b3c4d
+                      role: OPERATOR
+                      passkey:
+                        credential_id: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+                        key_id: '0xd2c3a11f6c8e5b79032877a4f2b0a6d5c4e7f8091a2b45678cddbb99eeff01278'
+                        qx: '0x7fa09e1c2b3c4d5e6f708192a3b4c5d6e7f809a1b2c3d4e5f60718293a4b5c6d'
+                        qy: '0x8fa09e0d1c2b3a4c5d6e7f8091a2b3c4d5e6f70819a2b3c4d5e6f70819a3b4c5'
+                        role: OPERATOR
+                        status: PENDING
+                        created_at: '2026-05-31T10:30:00Z'
+                      confirmation:
+                        action_id: 01929c5e-6f00-7000-8000-000000005001
+                        action_type: 5
+                        state: SENT
+                        reject_reason: null
+                error: null
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: |
+            `FORBIDDEN` — роль не `ADMIN` (RBAC-гейт), или `NO_ORGANIZATION` —
+            пользователь не принадлежит организации (сервис passkeys).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Только администратор может выполнять это действие }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /passkeys/organization/admin-key:
+    get:
+      tags: [Passkeys]
+      summary: Экспорт публичного ключа админа
+      description: |
+        RBAC: только `ADMIN`. Отдаёт P-256 открытый ключ админа и организацию в
+        формате `AdminKeyExport`; этот формат читает CLI владельца при регистрации
+        ключа в контракте `ConsortiumRegistry`. Поля в **camelCase** — историческое
+        исключение из snake_case (вместе с `audit`). Ключ отдаётся, только пока его
+        статус `PENDING` или `ACTIVE`; после `REJECTED`/`REVOKED` — `404`.
+      operationId: passkeysOrganizationAdminKey
+      responses:
+        '200':
+          description: Открытый ключ и организация в `data` (camelCase).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/AdminKeyExport'
+              example:
+                success: true
+                data:
+                  orgId: 11111111-1111-1111-1111-111111111111
+                  name: Склад №1
+                  qx: '0x3f95d6e1c8b0a277441955670e8a2b1c4d5e6f708192a3b4c5d6e7f8091a2b37'
+                  qy: '0x4fa06e7f2d9c1b38840289755e5a0cc2b39c40d5f8a709e1b2c9d6e7f08fa3b4'
+                error: null
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: |
+            `FORBIDDEN` — роль не `ADMIN` (RBAC-гейт), или `NO_ORGANIZATION` —
+            пользователь не принадлежит организации (сервис passkeys).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Только администратор может выполнять это действие }
+        '404':
+          description: '`PASSKEY_NOT_FOUND` — ключа нет, или его статус уже `REJECTED`/`REVOKED`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PASSKEY_NOT_FOUND, message: Ключ не найден }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /passkeys/organization/keys/reject:
+    post:
+      tags: [Passkeys]
+      summary: Отклонить PENDING-регистрацию passkey
+      description: |
+        RBAC: только `ADMIN`. Административное отклонение `PENDING`-ключа оператора
+        своей организации (`passkey_credentials.status` -> `REJECTED`): без черновика,
+        подписи и подтверждения цепью — действует сразу. Цель ищется по
+        `target_key_id` (`0x` + 64 hex, keyId); это должен быть ключ оператора этой
+        организации без подтверждения в полёте (иначе `404`/`409`).
+      operationId: passkeysOrganizationKeysReject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetKeyRequest'
+            example:
+              target_key_id: '0xd2c3a11f6c8e5b79032877a4f2b0a6d5c4e7f8091a2b45678cddbb99eeff01278'
+      responses:
+        '200':
+          description: Регистрация отклонена; `data` всегда `null` (конверт без полезной нагрузки).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        type: 'null'
+              example:
+                success: true
+                data: null
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — битый JSON или неверный формат `target_key_id` (`0x` + 64 hex).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_REQUEST, message: Некорректный запрос }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: |
+            `FORBIDDEN` — роль не `ADMIN` (RBAC-гейт), или `NO_ORGANIZATION` —
+            пользователь не принадлежит организации (сервис passkeys).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Только администратор может выполнять это действие }
+        '404':
+          description: '`PASSKEY_NOT_FOUND` — ключ не найден, он в другой организации или не ключ оператора.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PASSKEY_NOT_FOUND, message: Ключ не найден }
+        '409':
+          description: |
+            `TARGET_NOT_PENDING` — ключ уже не в `PENDING`, или `ACTION_IN_PROGRESS` —
+            последнее действие ключа ещё в полёте (`SENT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: TARGET_NOT_PENDING, message: Ключ оператора не ожидает подтверждения }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # SIGNED ACTIONS
+  # ──────────────────────────────────────────────────────────────────────────
+  /passkeys/actions/key-register/draft:
+    post:
+      tags: [SignedActions]
+      summary: Черновик действия KeyRegister (action_type 5)
+      description: |
+        RBAC: только `ADMIN`. Создаёт черновик подтверждения `PENDING`-ключа оператора
+        своей организации (`action_type` 5) и пишет его в `key_actions`. Подписывает
+        активный ключ админа: реестр цепи подтверждает его `ACTIVE` прямо на старте
+        черновика — иначе `409` или `503`; challenge в ответе подписывает браузер админа
+        (`navigator.credentials.get` по `allow_credentials[0].id`). `item_ids`
+        у ключевых действий всегда пуст. Подтверждение отдаёт
+        `POST /passkeys/actions/{action_id}/submit`.
+      operationId: passkeysKeyRegisterDraft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetKeyRequest'
+            example:
+              target_key_id: '0xd2c3a11f6c8e5b79032877a4f2b0a6d5c4e7f8091a2b45678cddbb99eeff01278'
+      responses:
+        '200':
+          description: Черновик создан — материалы для подписи браузером админа.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/KeyActionDraft'
+              example:
+                success: true
+                data:
+                  action_id: 01929c5e-6f00-7000-8000-000000005001
+                  action_type: 5
+                  item_ids: []
+                  subject_key:
+                    qx: '0x7fa09e1c2b3c4d5e6f708192a3b4c5d6e7f809a1b2c3d4e5f60718293a4b5c6d'
+                    qy: '0x8fa09e0d1c2b3a4c5d6e7f8091a2b3c4d5e6f70819a2b3c4d5e6f70819a3b4c5'
+                  details_hash: '0xc73fb7bce1a766808cb4674f3dfb9b8718ef43213408af1d84dd2c79904e313f'
+                  signer_key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+                  challenge: 1aB2cD3eF4gH5iJ6kL7mN8oP9qR0sT
+                  rp_id: localhost
+                  allow_credentials:
+                    - type: public-key
+                      id: aGFzaC1hZG1pbi1rZXk
+                  user_verification: required
+                  timeout: 60000
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — битый JSON или неверный формат `target_key_id` (`0x` + 64 hex).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_REQUEST, message: Некорректный запрос }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: |
+            `FORBIDDEN` — роль не `ADMIN` (RBAC-гейт), или `NO_ORGANIZATION` —
+            пользователь не принадлежит организации (сервис passkeys).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Только администратор может выполнять это действие }
+        '404':
+          description: '`PASSKEY_NOT_FOUND` — нет ключа админа, цель не найдена, она в другой организации или не ключ оператора.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PASSKEY_NOT_FOUND, message: Ключ не найден }
+        '409':
+          description: |
+            `TARGET_NOT_PENDING` — целевой ключ уже не в `PENDING`,
+            `SIGNER_KEY_NOT_ACTIVE` — ключ подписанта не `ACTIVE` в реестре цепи,
+            `ACTION_IN_PROGRESS` — последнее действие целевого ключа ещё в полёте (`SENT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: SIGNER_KEY_NOT_ACTIVE, message: Ключ администратора не активен в реестре }
+        '503':
+          description: '`REGISTRY_UNAVAILABLE` — реестр цепи не ответил при проверке ключа подписанта; ничего не подписывается. Повторите позже.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: REGISTRY_UNAVAILABLE, message: 'Реестр недоступен, повторите позже' }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /passkeys/actions/key-revoke/draft:
+    post:
+      tags: [SignedActions]
+      summary: Черновик действия KeyRevoke (action_type 6)
+      description: |
+        RBAC: только `ADMIN`. Создаёт черновик отзыва `ACTIVE`-ключа оператора своей
+        организации (`action_type` 6) и пишет его в `key_actions`. Подписывает активный
+        ключ админа (реестр цепи подтверждает его `ACTIVE` — иначе `409`/`503`);
+        challenge подписывает браузер админа (`navigator.credentials.get`). После
+        подтверждения целевой ключ выходит из реестра и теряет право подписи
+        (ADR-0001 §7). Подтверждение черновика — `POST /passkeys/actions/{action_id}/submit`.
+      operationId: passkeysKeyRevokeDraft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetKeyRequest'
+            example:
+              target_key_id: '0xd2c3a11f6c8e5b79032877a4f2b0a6d5c4e7f8091a2b45678cddbb99eeff01278'
+      responses:
+        '200':
+          description: Черновик создан — материалы для подписи браузером админа.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/KeyActionDraft'
+              example:
+                success: true
+                data:
+                  action_id: 01929c5e-6f00-7000-8000-000000006001
+                  action_type: 6
+                  item_ids: []
+                  subject_key:
+                    qx: '0x7fa09e1c2b3c4d5e6f708192a3b4c5d6e7f809a1b2c3d4e5f60718293a4b5c6d'
+                    qy: '0x8fa09e0d1c2b3a4c5d6e7f8091a2b3c4d5e6f70819a2b3c4d5e6f70819a3b4c5'
+                  details_hash: '0x3963d0526975670e66220bdc41fc669d8723df76d07b3f530eaa64c55afc7abf'
+                  signer_key_id: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+                  challenge: 0zY9xW8vU7tS6rQ5pO4nM3lK2jI1hG
+                  rp_id: localhost
+                  allow_credentials:
+                    - type: public-key
+                      id: aGFzaC1hZG1pbi1rZXk
+                  user_verification: required
+                  timeout: 60000
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — битый JSON или неверный формат `target_key_id` (`0x` + 64 hex).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_REQUEST, message: Некорректный запрос }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: |
+            `FORBIDDEN` — роль не `ADMIN` (RBAC-гейт), или `NO_ORGANIZATION` —
+            пользователь не принадлежит организации (сервис passkeys).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Только администратор может выполнять это действие }
+        '404':
+          description: '`PASSKEY_NOT_FOUND` — нет ключа админа, цель не найдена, она в другой организации или не ключ оператора.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PASSKEY_NOT_FOUND, message: Ключ не найден }
+        '409':
+          description: |
+            `TARGET_NOT_ACTIVE` — целевой ключ не `ACTIVE`,
+            `SIGNER_KEY_NOT_ACTIVE` — ключ подписанта не `ACTIVE` в реестре цепи,
+            `ACTION_IN_PROGRESS` — последнее действие целевого ключа ещё в полёте (`SENT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: TARGET_NOT_ACTIVE, message: Ключ оператора не активен в реестре }
+        '503':
+          description: '`REGISTRY_UNAVAILABLE` — реестр цепи не ответил при проверке ключа подписанта; ничего не подписывается. Повторите позже.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: REGISTRY_UNAVAILABLE, message: 'Реестр недоступен, повторите позже' }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /passkeys/actions/{action_id}/submit:
+    post:
+      tags: [SignedActions]
+      summary: Отправить ключевое действие в цепь (подпись админа)
+      description: |
+        RBAC: только `ADMIN`. Проверяет WebAuthn-assertion над challenge черновика
+        (браузер подписывает по `allow_credentials` ответа draft; все поля тела —
+        base64url без паддинга, как их отдаёт `navigator.credentials.get`), тело
+        ограничено 16 KiB. Успех: `submitted_at`, **строка `outbox_events`
+        (ADR-0001 §9)** и `state=SENT` в ответе — дальше статус в цепи виден как
+        `confirmation` в `GET /passkeys/organization` (`onchain_events` ->
+        `APPLIED`/`REJECTED`/`FAILED`). Действие доступно только его автору:
+        черновик другого админа — `404 ACTION_NOT_FOUND`.
+      operationId: passkeysActionSubmit
+      parameters:
+        - name: action_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebAuthnAssertion'
+            example:
+              credential_id: aGFzaC1hZG1bi1rZXk
+              authenticator_data: TLkAxdzUh_5QoqvizgHY4sQ0v6X-Vj1UVVeC2mEcqFbC8O8yAAAAAQ
+              client_data_json: eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0
+              signature: MEUCIQDx2jZVv6nT3W8M_yUc9dY4hA
+      responses:
+        '200':
+          description: Подпись верна, действие отправлено в outbox; `data.state` пока `SENT`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/KeyConfirmation'
+              example:
+                success: true
+                data:
+                  action_id: 01929c5e-6f00-7000-8000-000000005001
+                  action_type: 5
+                  state: SENT
+                  reject_reason: null
+                error: null
+        '400':
+          description: |
+            `INVALID_REQUEST` — битый JSON, не-UUID `action_id`, невалидный base64url в теле,
+            или `INVALID_ASSERTION` — подпись не сошлась с challenge/ключом админа (или
+            assertion от другого ключа).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_ASSERTION, message: Подтверждение не прошло проверку }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: |
+            `FORBIDDEN` — роль не `ADMIN` (RBAC-гейт), или `NO_ORGANIZATION` —
+            пользователь не принадлежит организации (сервис passkeys).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Только администратор может выполнять это действие }
+        '404':
+          description: |
+            `ACTION_NOT_FOUND` — действие не существует или создано другим админом
+            (черновик доступен только автору), или `PASSKEY_NOT_FOUND` — строка ключа
+            не найдена к моменту submit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: ACTION_NOT_FOUND, message: Действие не найдено }
+        '409':
+          description: '`ACTION_ALREADY_SUBMITTED` — действие уже отправлено в цепь.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: ACTION_ALREADY_SUBMITTED, message: Действие уже отправлено }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /signed-actions/operations/{operation_id}:
+    get:
+      tags: [SignedActions]
+      summary: Статус подтверждения частей подписанной операции
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Состояние каждой части подписанной операции
+        (`warehouse_actions` + `onchain_events`), в порядке `part_index`. Статус
+        выводится именно из `onchain_events`: строки нет (или `PENDING`/`SENT`) —
+        `SENT`, `COMMITTED` — `APPLIED`, `FAILED` с `reject_reason` — `REJECTED`,
+        `FAILED` без причины — `FAILED`. Поле `reject_reason` — коды ADR-0001 §6:
+        1 UnknownKey, 2 KeyRevoked, 3 BadSignature, 4 WrongType, 5 NotAdmin,
+        6 KeyExists, 7 InvalidPublicKey, 8 WrongOrganization, 9 TargetNotOperator,
+        10 EmptyItems, 11 ItemsNotAscending, 12 WrongItemStatus.
+        Клиент опрашивает этот статус, пока хотя бы одна часть ещё `SENT`.
+        Операция должна быть отправлена (`submit`): черновик отдаёт
+        `409 OPERATION_NOT_SUBMITTED`. Операция видна только её автору:
+        чужая — тоже `404` (фильтр по `created_by`).
+      operationId: signedActionsOperationStatus
+      parameters:
+        - name: operation_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Статус подтверждения каждой части в `data`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/OperationStatus'
+              example:
+                success: true
+                data:
+                  operation_id: 01929c5e-6f00-7000-8000-000000002001
+                  parts:
+                    - action_id: 01929c5e-6f00-7000-8000-000000002002
+                      state: APPLIED
+                      reject_reason: null
+                    - action_id: 01929c5e-6f00-7000-8000-000000002003
+                      state: REJECTED
+                      reject_reason: 12
+                error: null
+        '400':
+          description: '`INVALID_REQUEST` — `operation_id` не UUID.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_REQUEST, message: Некорректный запрос }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: |
+            `OPERATION_NOT_FOUND` — операции нет и, в том числе, когда она существует,
+            но была создана другим пользователем (фильтр по `created_by`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: OPERATION_NOT_FOUND, message: Операция не найдена }
+        '409':
+          description: '`OPERATION_NOT_SUBMITTED` — операция ещё не отправлена в цепь (нет `submit`).' 
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: OPERATION_NOT_SUBMITTED, message: Операция ещё не отправлена }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # PRODUCTS
+  # ──────────────────────────────────────────────────────────────────────────
+  /products/recent:
+    get:
+      tags: [Products]
+      summary: Список последних изменённых товаров
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Товары по убыванию `updated_at` с названием
+        SKU. `limit`: нечисловое значение, 0 или меньше — игнорируется (по умолчанию
+        20), больше 50 — обрезается до 50, так что `400` здесь невозможен.
+        Работают оба пути: `/products/recent` и `/products/recent/`.
+      operationId: productsRecent
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        '200':
+          description: Массив товаров в `data` (может быть пустым).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/RecentProduct'
+              example:
+                success: true
+                data:
+                  - product_id: 55555555-5555-5555-5555-555555555555
+                    qr_code: QR-E2E-1a2b3c4d
+                    sku_name: Товар 1
+                    status: STORED
+                    updated_at: '2026-05-31T12:00:00Z'
+                  - product_id: 0f9f2f55-6666-4517-bd23-feb0f37a1eb0
+                    qr_code: QR-E2E-9f8e7d6c
+                    sku_name: Товар 2
+                    status: RECEIVED
+                    updated_at: '2026-05-31T11:30:00Z'
+                error: null
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  /products/timeline:
+    get:
+      tags: [Products]
+      summary: Таймлайн товара со статусами цепи
+      description: |
+        RBAC: `ADMIN` или `OPERATOR`. Хронология всех подписанных действий с товаром
+        (`warehouse_actions.item_ids`), каждое со своим статусом подтверждения в цепи,
+        по возрастанию времени; повтор этапа (пере-раскладка) возвращается как есть.
+        `key` — `product_id` (UUID) или QR-код. `stage` — нижний регистр
+        `aggregate_type` (`receiving`, `putaway`, `picking`, `shipping`). Событий нет —
+        тоже `200` с пустым `steps`. Работают оба пути: `/products/timeline` и
+        `/products/timeline/`.
+      operationId: productsTimeline
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Шапка товара и шаги в `data`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ProductTimeline'
+              example:
+                success: true
+                data:
+                  product:
+                    product_id: 55555555-5555-5555-5555-555555555555
+                    qr_code: QR-E2E-1a2b3c4d
+                    sku_name: Товар 1
+                    status: STORED
+                  steps:
+                    - stage: receiving
+                      event_type: wms.action.v1
+                      occurred_at: '2026-05-31T10:20:00Z'
+                      event_id: 01929c5e-6f00-7000-8000-000000001002
+                      tx_hash: '0x2be804dde1e3a1578819c47b5f8e0e31f3a10c7b4d5e6f708192a3b4c5d6e7f80'
+                      chain_status: COMMITTED
+                      chain_updated_at: '2026-05-31T10:25:00Z'
+                      error_message: null
+                    - stage: putaway
+                      event_type: wms.action.v1
+                      occurred_at: '2026-05-31T10:40:00Z'
+                      event_id: 01929c5e-6f00-7000-8000-000000002002
+                      tx_hash: null
+                      chain_status: SENT
+                      chain_updated_at: null
+                      error_message: null
+                error: null
+        '400':
+          description: '`MISSING_KEY` — параметр `key` обязателен (пустой или отсутствует).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: MISSING_KEY, message: Укажите product_id или QR-код }
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          $ref: '#/components/responses/JSONForbidden'
+        '404':
+          description: '`PRODUCT_NOT_FOUND` — `key` не UUID товара и не QR-код существующего товара.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PRODUCT_NOT_FOUND, message: Товар не найден }
+        '500':
+          $ref: '#/components/responses/JSONInternal'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # AUDIT
+  # ──────────────────────────────────────────────────────────────────────────
+  /audit/products/{key}:
+    get:
+      tags: [Audit]
+      summary: Аудит товара (подписанные действия)
+      description: |
+        RBAC: `AUDITOR` или `ADMIN`. Товар (`key` — uuid или QR-код) с полной историей
+        **отправленных подписанных действий** с ним: salt, оператор, ключ подписанта,
+        статус в цепи — плюс детали, пересчитанные из доменных таблиц WMS (issue #18 —
+        только БД и salt, данные из цепи не возвращаются). `itemId` — itemID товара в
+        цепи (keccak256(product_id), `0x`-hex 32 байта). `details` содержит ровно те
+        поля, которые были подписаны именно этим типом действия, а при испорченных
+        доменных строках становится `null` с кодом в `detailsError`:
+        `DOMAIN_ROW_MISSING` (строка отсутствует) или `DOMAIN_INCONSISTENT`
+        (строки расходятся). Ответ — **camelCase** (вместе с `AdminKeyExport` —
+        единственное исключение из snake_case).
+      operationId: auditProduct
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Аудит товара в `data` (camelCase; `actions` может быть пустым).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/ProductAudit'
+              example:
+                success: true
+                data:
+                  productId: 55555555-5555-5555-5555-555555555555
+                  itemId: '0x3d2a91c4e8b7f6a5d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c'
+                  actions:
+                    - actionId: 01929c5e-6f00-7000-8000-000000001002
+                      operationId: 01929c5e-6f00-7000-8000-000000001001
+                      partIndex: 0
+                      actionType: 1
+                      itemIds:
+                        - 55555555-5555-5555-5555-555555555555
+                      salt: '0xdf6c6b77628a0141ae15ae06213f0ded61ed1c0b1de212880a67bbd897aa2da7'
+                      submittedAt: '2026-05-31T10:20:05.123456Z'
+                      operatorId: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                      operator: op-1a2b3c4d
+                      keyOwnerId: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                      orgId: 11111111-1111-1111-1111-111111111111
+                      orgName: Склад №1
+                      keyId: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+                      chainStatus: COMMITTED
+                      rejectReason: null
+                      details:
+                        cargoplaceId: 66666666-6666-6666-6666-666666666666
+                        operatorId: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                        occurredAtMs: 1748919612123
+                      detailsError: null
+                error: null
+        '401':
+          $ref: '#/components/responses/PlainTextUnauthorized'
+        '403':
+          description: '`FORBIDDEN` — роль не `AUDITOR` и не `ADMIN`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: FORBIDDEN, message: Требуется роль аудитора или администратора }
+        '404':
+          description: '`PRODUCT_NOT_FOUND` — `key` не UUID товара и не QR-код существующего товара.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: PRODUCT_NOT_FOUND, message: Товар не найден }
         '500':
           $ref: '#/components/responses/JSONInternal'
 
@@ -2574,7 +3654,7 @@ components:
     # ── Доменные enum'ы ──────────────────────────────────────────────────────
     UserRole:
       type: string
-      enum: [ADMIN, OPERATOR, CUSTOMER]
+      enum: [ADMIN, OPERATOR, CUSTOMER, AUDITOR]
       description: Роль пользователя (DB enum public.user_role).
     ProductStatus:
       type: string
@@ -2757,11 +3837,9 @@ components:
         aggregate_type:
           type: string
         tx_hash:
-          type: string
-          nullable: true
+          type: [string, 'null']
         error_message:
-          type: string
-          nullable: true
+          type: [string, 'null']
         updated_at:
           type: string
           format: date-time
@@ -3612,3 +4690,615 @@ components:
               signature:
                 type: string
                 description: base64url без паддинга, ASN.1 DER; бэкенд нормализует s к нижней половине.
+
+    # ── Passkeys: ключи и подтверждения ────────────────────────────────────
+    PasskeyStatus:
+      type: string
+      enum: [PENDING, ACTIVE, REJECTED, REVOKED]
+      description: |
+        Статус ключа (`passkey_credentials.status`). Живые — `PENDING` и `ACTIVE`;
+        `ACTIVE`/`REVOKED` приходят синхронизацией с реестром цепи при чтении.
+    PasskeyRole:
+      type: string
+      enum: [ADMIN, OPERATOR]
+      description: Роль пользователя, с которой зарегистрирован ключ (регистрация доступна только ADMIN и OPERATOR).
+    ConfirmationState:
+      type: string
+      enum: [SENT, APPLIED, REJECTED, FAILED]
+      description: |
+        Состояние подписанного действия в цепи, выводится из `onchain_events`:
+        строки нет (или `PENDING`/`SENT`) → `SENT`, `COMMITTED` → `APPLIED`,
+        `FAILED` с `reject_reason` → `REJECTED`, `FAILED` без причины → `FAILED`.
+    PasskeyView:
+      type: object
+      description: 'Passkey пользователя: credential id, P-256-ключ и статус (`status` при чтении синхронизируется с реестром цепи).'
+      required: [credential_id, key_id, qx, qy, role, status, created_at]
+      properties:
+        credential_id:
+          type: string
+          description: WebAuthn credential id в base64url без паддинга.
+          example: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+        key_id:
+          type: string
+          description: 'keyId = keccak256(qx||qy), 0x-hex 32 байта.'
+          example: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+        qx:
+          type: string
+          description: X-координата P-256 ключа, 0x-hex 32 байта.
+          example: '0x3f95d6e1c8b0a277441955670e8a2b1c4d5e6f708192a3b4c5d6e7f8091a2b37'
+        qy:
+          type: string
+          description: Y-координата P-256 ключа, 0x-hex 32 байта.
+          example: '0x4fa06e7f2d9c1b38840289755e5a0cc2b39c40d5f8a709e1b2c9d6e7f08fa3b4'
+        role:
+          $ref: '#/components/schemas/PasskeyRole'
+        status:
+          $ref: '#/components/schemas/PasskeyStatus'
+        created_at:
+          type: string
+          format: date-time
+          example: '2026-05-31T10:30:00Z'
+    KeyConfirmation:
+      type: object
+      description: 'Состояние последнего ключевого действия (`KeyRegister`/`KeyRevoke`) в цепи; `null` — подтверждений ещё не было.'
+      required: [action_id, action_type, state, reject_reason]
+      properties:
+        action_id:
+          type: string
+          format: uuid
+        action_type:
+          type: integer
+          enum: [5, 6]
+          description: '5 KeyRegister, 6 KeyRevoke (коды signedaction.Type).'
+        state:
+          $ref: '#/components/schemas/ConfirmationState'
+        reject_reason:
+          type: [integer, 'null']
+          description: 'Код причины отклонения (ADR-0001 §6); `null`, пока отклонений нет.'
+    OrganizationOverview:
+      type: object
+      description: 'Обзор организации: пользователи и их ключи (`passkeys/organization`).'
+      required: [organization, members]
+      properties:
+        organization:
+          type: object
+          required: [org_id, name]
+          properties:
+            org_id:
+              type: string
+              format: uuid
+            name:
+              type: string
+        members:
+          type: array
+          description: Все пользователи организации, без фильтра по ключам.
+          items:
+            type: object
+            required: [user_id, username, role]
+            properties:
+              user_id:
+                type: string
+                format: uuid
+              username:
+                type: string
+              role:
+                $ref: '#/components/schemas/UserRole'
+              passkey:
+                description: Последний ключ сотрудника; `null`, если ключа нет.
+                oneOf:
+                  - $ref: '#/components/schemas/PasskeyView'
+                  - type: 'null'
+              confirmation:
+                description: Подтверждение последнего ключевого действия ключа; `null`, если ключа или подтверждений нет.
+                oneOf:
+                  - $ref: '#/components/schemas/KeyConfirmation'
+                  - type: 'null'
+    AdminKeyExport:
+      type: object
+      description: |
+        Публичный ключ админа в формате CLI владельца (`passkeys.AdminKeyExport`) —
+        поля в camelCase, историческое исключение из snake_case (вместе с `audit`).
+      required: [orgId, name, qx, qy]
+      properties:
+        orgId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Название организации.
+        qx:
+          type: string
+          description: X-координата P-256 ключа, 0x-hex 32 байта.
+          example: '0x3f95d6e1c8b0a277441955670e8a2b1c4d5e6f708192a3b4c5d6e7f8091a2b37'
+        qy:
+          type: string
+          description: Y-координата P-256 ключа, 0x-hex 32 байта.
+          example: '0x4fa06e7f2d9c1b38840289755e5a0cc2b39c40d5f8a709e1b2c9d6e7f08fa3b4'
+
+    # ── Passkeys: тела запросов (без DisallowUnknownFields, см. описание API) ─
+    TargetKeyRequest:
+      type: object
+      description: 'Тело ключевых действий: цель — keyId (`0x` + 64 hex, = keccak256(qx||qy)).'
+      required: [target_key_id]
+      properties:
+        target_key_id:
+          type: string
+          description: 'keyId цели, `0x` + 64 hex-символа.'
+          example: '0xd2c3a11f6c8e5b79032877a4f2b0a6d5c4e7f8091a2b45678cddbb99eeff01278'
+    WebAuthnAssertion:
+      type: object
+      description: |
+        Один WebAuthn-assertion (`signedaction.AssertionRequest`) — тело submit;
+        все поля — base64url без паддинга, как их отдаёт `navigator.credentials.get`.
+        Тело ограничено 16 KiB.
+      required: [credential_id, authenticator_data, client_data_json, signature]
+      properties:
+        credential_id:
+          type: string
+          description: base64url без паддинга.
+        authenticator_data:
+          type: string
+          description: base64url без паддинга.
+        client_data_json:
+          type: string
+          description: base64url без паддинга; challenge и type ищутся позиционно.
+        signature:
+          type: string
+          description: base64url без паддинга, ASN.1 DER; бэкенд нормализует s к нижней половине.
+    KeyActionDraft:
+      type: object
+      description: |
+        Черновик ключевого действия (`keyActionDraftView`): материалы для подписи
+        браузером админа. `item_ids` всегда пуст, `challenge` — 32 байта в base64url.
+      required: [action_id, action_type, item_ids, subject_key, details_hash, signer_key_id, challenge, rp_id, allow_credentials, user_verification, timeout]
+      properties:
+        action_id:
+          type: string
+          format: uuid
+        action_type:
+          type: integer
+          enum: [5, 6]
+          description: '5 KeyRegister (подтвердить PENDING-ключ), 6 KeyRevoke (отозвать ACTIVE-ключ).'
+        item_ids:
+          type: array
+          description: Для ключевых действий всегда пуст (товары они не меняют).
+          items:
+            type: string
+            format: uuid
+        subject_key:
+          type: object
+          description: P-256 ключ субъекта действия (ключ оператора из БД).
+          required: [qx, qy]
+          properties:
+            qx:
+              type: string
+              description: 0x-hex 32 байта.
+              example: '0x7fa09e1c2b3c4d5e6f708192a3b4c5d6e7f809a1b2c3d4e5f60718293a4b5c6d'
+            qy:
+              type: string
+              description: 0x-hex 32 байта.
+              example: '0x8fa09e0d1c2b3a4c5d6e7f8091a2b3c4d5e6f70819a2b3c4d5e6f70819a3b4c5'
+        details_hash:
+          type: string
+          description: 'keccak256 деталей действия (ADR-0001 §4), 0x-hex 32 байта.'
+          example: '0xc73fb7bce1a766808cb4674f3dfb9b8718ef43213408af1d84dd2c79904e313f'
+        signer_key_id:
+          type: string
+          description: 'keyId администратора-подписанта, 0x-hex 32 байта.'
+          example: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+        challenge:
+          type: string
+          description: 32 байта challenge в base64url без паддинга — их подписывает passkey админа.
+          example: 1aB2cD3eF4gH5iJ6kL7mN8oP9qR0sT
+        rp_id:
+          type: string
+          description: Relying Party ID для WebAuthn (из конфигурации WMS).
+          example: localhost
+        allow_credentials:
+          type: array
+          items:
+            type: object
+            required: [type, id]
+            properties:
+              type:
+                type: string
+                const: public-key
+              id:
+                type: string
+                description: credential id подписанта в base64url без паддинга.
+        user_verification:
+          type: string
+          const: required
+        timeout:
+          type: integer
+          example: 60000
+
+    # ── Passkeys: WebAuthn приветствия и тела регистрации ────────────────────
+    PasskeyCreationOptions:
+      type: object
+      description: |
+        Опции регистрации WebAuthn (`protocol.CredentialCreation` в JSON-виде):
+        браузер передаёт `publicKey` в `navigator.credentials.create`.
+      required: [publicKey]
+      properties:
+        publicKey:
+          type: object
+          additionalProperties: true
+          description: 'Аргументы `navigator.credentials.create`; поля go-webauthn, лишние серверные поля возможны.'
+          required: [rp, user, challenge, pubKeyCredParams, timeout, authenticatorSelection, attestation]
+          properties:
+            rp:
+              type: object
+              required: [id, name]
+              properties:
+                id:
+                  type: string
+                  description: RP ID — домен WMS (из конфигурации).
+                  example: localhost
+                name:
+                  type: string
+                  description: Отображаемое имя RP.
+                  example: WMS
+            user:
+              type: object
+              required: [id, name, displayName]
+              properties:
+                id:
+                  type: string
+                  description: user_id пользователя в base64url без паддинга.
+                  example: aWNhbmV2ZXItc2lnbg
+                name:
+                  type: string
+                  description: username.
+                  example: op-1a2b3c4d
+                displayName:
+                  type: string
+                  example: op-1a2b3c4d
+            challenge:
+              type: string
+              description: Случайные 32+ байта в base64url без паддинга — их подписывает ключ при регистрации.
+              example: 5hG2fD0cA9bE8dF7gH6iJ5kL4mN3oPqR0sT
+            pubKeyCredParams:
+              type: array
+              description: 'Допустимые алгоритмы; WMS предлагает только ES256 (alg -7).'
+              items:
+                type: object
+                required: [type, alg]
+                properties:
+                  type:
+                    type: string
+                    const: public-key
+                    example: public-key
+                  alg:
+                    type: integer
+                    description: 'COSE-код алгоритма; -7 — ES256.'
+                    example: -7
+            timeout:
+              type: integer
+              description: Время жизни сессии регистрации в миллисекундах (TTL 5 минут).
+              example: 60000
+            excludeCredentials:
+              type: array
+              description: Существующие ключи, которые нельзя использовать; обычно отсутствует (живой ключ один).
+              items:
+                type: object
+                required: [type, id]
+                properties:
+                  type:
+                    type: string
+                    const: public-key
+                    example: public-key
+                  id:
+                    type: string
+                    description: credential id в base64url без паддинга.
+                    example: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+            authenticatorSelection:
+              type: object
+              required: [residentKey, userVerification]
+              properties:
+                residentKey:
+                  type: string
+                  const: preferred
+                  example: preferred
+                userVerification:
+                  type: string
+                  const: required
+                  example: required
+            attestation:
+              type: string
+              const: none
+              example: none
+    PasskeyRegistrationResponse:
+      type: object
+      description: |
+        Тело `POST /passkeys/registration/finish` — сырой результат
+        `navigator.credentials.create` (`RegistrationResponseJSON`); разбирается
+        go-webauthn без `DisallowUnknownFields` (см. описание API), тело до 64 KiB.
+      required: [id, rawId, type, response, clientExtensionResults]
+      properties:
+        id:
+          type: string
+          description: base64url credential id.
+          example: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+        rawId:
+          type: string
+          description: base64url raw credential id.
+          example: vEJYj3dHhit9F8qLm0RGjXYkKluWjdI6W_1Lb3tQ6HA
+        type:
+          type: string
+          const: public-key
+          example: public-key
+        response:
+          type: object
+          required: [clientDataJSON, attestationObject, transports]
+          properties:
+            clientDataJSON:
+              type: string
+              description: base64url clientDataJSON.
+              example: eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0
+            attestationObject:
+              type: string
+              description: base64url CBOR-attestation.
+              example: o2NmbXRpb25lLXN0emlwYXRpb25Ob25lZ2F0dFN0bXQ
+            transports:
+              type: array
+              description: Транспорта authenticator'а (может быть пустым).
+              items:
+                type: string
+                example: internal
+        clientExtensionResults:
+          type: object
+          additionalProperties: true
+          description: Результаты client-extensions браузера.
+        authenticatorAttachment:
+          type: string
+          description: '`platform` или `cross-platform`, если браузер сделал вывод.'
+          example: platform
+
+    # ── Подписанные действия: статус операции ─────────────────────────────────
+    OperationStatus:
+      type: object
+      description: Тело `data` в ответе `GET /signed-actions/operations/{operation_id}`.
+      required: [operation_id, parts]
+      properties:
+        operation_id:
+          type: string
+          format: uuid
+        parts:
+          type: array
+          description: По одной на каждое действие операции, в порядке `part_index`.
+          items:
+            $ref: '#/components/schemas/OperationPartStatus'
+    OperationPartStatus:
+      type: object
+      description: Состояние одной части операции в цепи.
+      required: [action_id, state, reject_reason]
+      properties:
+        action_id:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/ConfirmationState'
+        reject_reason:
+          type: [integer, 'null']
+          description: |
+            Код причины отклонения (ADR-0001 §6): 1 UnknownKey, 2 KeyRevoked,
+            3 BadSignature, 4 WrongType, 5 NotAdmin, 6 KeyExists,
+            7 InvalidPublicKey, 8 WrongOrganization, 9 TargetNotOperator,
+            10 EmptyItems, 11 ItemsNotAscending, 12 WrongItemStatus;
+            `null`, пока никаких отклонений нет.
+
+    # ── Products: read-only лента и таймлайн ──────────────────────────────
+    RecentProduct:
+      type: object
+      description: Одна строка списка `GET /products/recent`.
+      required: [product_id, qr_code, sku_name, status, updated_at]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        qr_code:
+          type: string
+          example: QR-E2E-1a2b3c4d
+        sku_name:
+          type: string
+          example: Товар 1
+        status:
+          $ref: '#/components/schemas/ProductStatus'
+        updated_at:
+          type: string
+          format: date-time
+          example: '2026-05-31T12:00:00Z'
+    ProductHeader:
+      type: object
+      description: Шапка товара в таймлайне.
+      required: [product_id, qr_code, sku_name, status]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        qr_code:
+          type: string
+          example: QR-E2E-1a2b3c4d
+        sku_name:
+          type: string
+          example: Товар 1
+        status:
+          $ref: '#/components/schemas/ProductStatus'
+    TimelineStep:
+      type: object
+      description: |
+        Шаг таймлайна: подписанное действие с товаром + статус его события в цепи.
+        `stage` — нижний регистр `aggregate_type`; фронт мапит его в label этапа.
+      required: [stage, event_type, occurred_at, event_id, tx_hash, chain_status, chain_updated_at, error_message]
+      properties:
+        stage:
+          type: string
+          enum: [receiving, putaway, picking, shipping]
+          description: Этап действия (lowercase aggregate_type).
+        event_type:
+          type: string
+          description: Тип outbox-события (в текущем коде `wms.action.v1`).
+          example: wms.action.v1
+        occurred_at:
+          type: string
+          format: date-time
+          description: Время события (`outbox_events.created_at`).
+          example: '2026-05-31T10:20:00Z'
+        event_id:
+          type: string
+          format: uuid
+          description: id события — `action_id` части операции.
+        tx_hash:
+          type: [string, 'null']
+          description: Хеш транзакции цепи, задан при отправке; `null`, пока нет.
+          example: '0x2be804dde1e3a1578819c47b5f8e0e31f3a10c7b4d5e6f708192a3b4c5d6e7f80'
+        chain_status:
+          type: string
+          enum: [PENDING, SENT, COMMITTED, FAILED]
+          description: Статус события в `onchain_events`; отсутствующая строка читается как `PENDING`.
+        chain_updated_at:
+          type: [string, 'null']
+          format: date-time
+          description: Время последнего обновления статуса в `onchain_events`; `null`, пока строки нет.
+        error_message:
+          type: [string, 'null']
+          description: 'Сообщение об ошибке при `FAILED`; иначе `null`.'
+    ProductTimeline:
+      type: object
+      description: Тело `data` в ответе `GET /products/timeline`.
+      required: [product, steps]
+      properties:
+        product:
+          $ref: '#/components/schemas/ProductHeader'
+        steps:
+          type: array
+          description: Может быть пустым — товар есть, событий в цепи ещё нет.
+          items:
+            $ref: '#/components/schemas/TimelineStep'
+
+    # ── Audit: аудит товара (camelCase) ───────────────────────────────────────
+    ProductAudit:
+      type: object
+      description: 'Тело `data` в ответе `GET /audit/products/{key}` (`productAuditView`); camelCase — единственное исключение из snake_case вместе с `AdminKeyExport`.'
+      required: [productId, itemId, actions]
+      properties:
+        productId:
+          type: string
+          format: uuid
+        itemId:
+          type: string
+          description: 'itemID товара в цепи — keccak256(product_id), 0x-hex 32 байта.'
+          example: '0x3d2a91c4e8b7f6a5d4c3b2a1908f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c'
+        actions:
+          type: array
+          description: Подписанные действия с товаром (в порядке чтения из БД).
+          items:
+            $ref: '#/components/schemas/AuditAction'
+    AuditAction:
+      type: object
+      description: Одно отправленное подписанное действие (`actionView`) с salt и деталями.
+      required: [actionId, operationId, partIndex, actionType, itemIds, salt, submittedAt, operatorId, operator, keyOwnerId, orgId, orgName, keyId, chainStatus, rejectReason, details, detailsError]
+      properties:
+        actionId:
+          type: string
+          format: uuid
+        operationId:
+          type: string
+          format: uuid
+        partIndex:
+          type: integer
+          description: Номер части в операции (с 0).
+        actionType:
+          type: integer
+          description: 'код действия (ADR-0001): 1 Receive, 2 PutAway, 3 Pick, 4 Ship; 5/6 — ключевые действия.'
+        itemIds:
+          type: array
+          description: Товары действия (из строки действия, в порядке хранения).
+          items:
+            type: string
+            format: uuid
+        salt:
+          type: string
+          description: 'Salt подписи (ADR-0001 §4), 0x-hex 32 байта.'
+          example: '0xdf6c6b77628a0141ae15ae06213f0ded61ed1c0b1de212880a67bbd897aa2da7'
+        submittedAt:
+          type: string
+          format: date-time
+          description: Момент приёма подписи (RFC3339Nano).
+          example: '2026-05-31T10:20:05.123456Z'
+        operatorId:
+          type: string
+          format: uuid
+          description: user_id оператора (`warehouse_actions.created_by`).
+        operator:
+          type: string
+          description: Имя оператора (`users.username`).
+        keyOwnerId:
+          type: string
+          format: uuid
+          description: Собственник ключа подписанта (`passkey_credentials.user_id`).
+        orgId:
+          type: string
+          format: uuid
+          description: Организация ключа подписанта.
+        orgName:
+          type: string
+        keyId:
+          type: string
+          description: 'keyId подписанта, 0x-hex 32 байта.'
+          example: '0x6f1c2a7b3d9e4c8a5b2f0d7e6c1a9b8d4e3f2a1c0b9d8e7f6a5b4c3d2e1f0a9b'
+        chainStatus:
+          type: string
+          description: 'Статус события в `onchain_events` (`PENDING`/`SENT`/`COMMITTED`/`FAILED`); пустая строка — событие ещё не в цепи.'
+        rejectReason:
+          type: [integer, 'null']
+          description: 'Код причины отклонения (ADR-0001 §6); `null`, пока отклонений нет.'
+        details:
+          description: 'Детали (`detailsView`), пересчитанные из доменных таблиц; `null` с `detailsError` при испорченных строках домена.'
+          oneOf:
+            - $ref: '#/components/schemas/AuditDetails'
+            - type: 'null'
+        detailsError:
+          description: '`DOMAIN_ROW_MISSING` (строки нет) или `DOMAIN_INCONSISTENT` (строки расходятся); `null`, если детали пересчитаны.'
+          oneOf:
+            - type: string
+              enum: [DOMAIN_ROW_MISSING, DOMAIN_INCONSISTENT]
+            - type: 'null'
+    AuditDetails:
+      type: object
+      description: |
+        Детали действия (`detailsView`), пересчитанные из доменных таблиц WMS.
+        Поля, не относящиеся к типу действия, не отдаются — аудитор видит ровно
+        тот набор, что был подписан (ADR-0001 §4).
+      required: [operatorId, occurredAtMs]
+      properties:
+        cargoplaceId:
+          type: string
+          format: uuid
+          description: 'Только action_type 1 (Receive).'
+        storageBinId:
+          type: string
+          format: uuid
+          description: 'Только action_type 2 (PutAway).'
+        shippingBufferBinId:
+          type: string
+          format: uuid
+          description: 'Только action_type 3 (Pick) и 4 (Ship).'
+        dispatchId:
+          type: string
+          format: uuid
+          description: 'Только action_type 4 (Ship); водитель в детали не входит (ADR-0001).'
+        orderIds:
+          type: array
+          description: 'Только action_type 3 (Pick) и 4 (Ship); пустой список — заказов нет.'
+          items:
+            type: string
+            format: uuid
+        operatorId:
+          type: string
+          format: uuid
+        occurredAtMs:
+          type: integer
+          format: int64
+          description: 'Момент подписи (мс, Unix) — из подписанных деталей.'
