@@ -85,7 +85,8 @@ unauthorized
 |------|--------------|-----|
 | ADMIN-only | только `ADMIN` | `POST /auth/register` (проверка роли внутри сервиса) |
 | `RequireAdmin` | только `ADMIN` | `GET /passkeys/organization`, `GET /passkeys/organization/admin-key`, `POST /passkeys/organization/keys/reject`, `POST /passkeys/actions/*` |
-| `RequireAdminOrOperator` | `ADMIN` или `OPERATOR` | `POST /assembly/allocate` (issue #39), `GET /passkeys/me`, `POST /passkeys/registration/*`, `GET /signed-actions/operations/{operation_id}` |
+| `RequireAdminOrOperator` | `ADMIN` или `OPERATOR` | `POST /assembly/allocate` (issue #39), `GET /passkeys/me`, `POST /passkeys/registration/*`, `GET /signed-actions/operations/{operation_id}`, `/analytics/*`, `/products/*` |
+| `RequireAuditorOrAdmin` | `AUDITOR` или `ADMIN` | `GET /audit/products/{key}` |
 | `RequireOperator` | только `OPERATOR` | все остальные защищённые эндпоинты |
 
 `ADMIN`, вызывающий OPERATOR-only эндпоинт, получает `403`. Сообщения 401/403 в
@@ -104,10 +105,8 @@ unauthorized
 
 ## Сводка эндпоинтов
 
-Всего **42 операции** на 41 пути (на `/dispatches/` висят GET и POST). RBAC указан
+Всего **48 операций** на 47 путях (на `/dispatches/` висят GET и POST). RBAC указан
 после auth-гейта. Полные тела, ошибки и примеры — в [`openapi.yaml`](openapi.yaml).
-Разделы **Passkeys** и **Signed actions** описаны по `RegisterRoutes`
-(`wms/internal/passkeys`, `wms/internal/signedops`): в `openapi.yaml` этих путей пока нет.
 
 ### System
 
@@ -205,6 +204,27 @@ unauthorized
 | Метод | Путь | RBAC | Назначение |
 |-------|------|------|-----------|
 | GET | `/signed-actions/operations/{operation_id}` | ADMIN или OPERATOR | Статус каждой части операции: `action_id`, `state` (`SENT`/`APPLIED`/`REJECTED`/`FAILED`), `reject_reason`. |
+
+### Analytics
+
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-------------|
+| GET | `/analytics/summary` | ADMIN или OPERATOR | Сводные показатели склада: итоги справочников, статусы событий, товаров, заказов и рейсов. |
+| GET | `/analytics/onchain` | ADMIN или OPERATOR | Статус событий в блокчейне: счётчики, rate подтверждения, `recent_failed`/`recent_committed`. |
+| GET | `/analytics/throughput` | ADMIN или OPERATOR | Объем outbox-событий по дням и этапам (query: `days`, 1..90, по умолчанию 14). |
+
+### Products
+
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-------------|
+| GET | `/products/recent` | ADMIN или OPERATOR | Последние изменённые товары (query: `limit`; нечисловое/≤0 игнорируется, >50 обрезается до 50; по умолчанию 20). |
+| GET | `/products/timeline` | ADMIN или OPERATOR | Таймлайн товара со статусами цепи (query: `key` — product_id или QR-код — обязателен). |
+
+### Audit
+
+| Метод | Путь | RBAC | Назначение |
+|-------|------|------|-------------|
+| GET | `/audit/products/{key}` | AUDITOR или ADMIN | Аудит товара: все отправленные подписанные действия, salt и детали (пересчитанные из БД, **camelCase**). |
 
 \* `destination_id` — обязательный query-параметр.
 
