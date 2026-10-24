@@ -1,9 +1,11 @@
 import { useSyncExternalStore } from "react";
 
+import type { Schema } from "@/lib/api/client";
+
 import { decodeAccessToken } from "./jwt";
 import type { Role } from "./roles";
 
-export type Tokens = { access_token: string; refresh_token: string };
+export type Tokens = Schema<"TokenPair">;
 
 export type Session = Tokens & {
   user: { id: string; role: Role; username: string };

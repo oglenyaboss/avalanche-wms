@@ -44,6 +44,36 @@ npm run dev          # http://localhost:3000, API на моках
 
 `authFetch` добавляет `Authorization: Bearer …`, на `401` один раз обновляет токен через `/auth/refresh` и повторяет запрос. Если обновить не удалось, сессия сбрасывается и терминал уходит на вход.
 
+## API
+
+Типы генерируются из `docs/api/openapi.yaml` командой `npm run gen:api` в `src/lib/api/schema.d.ts`. Руками этот файл не правят и wire-типы не пишут: нужный тип берётся как `Schema<"PutawayScanBufferResponse">`.
+
+```ts
+import { api, unwrap } from "@/lib/api/client";
+import { ApiError } from "@/lib/api/errors";
+
+try {
+  const buffer = await unwrap(api.POST("/putaway/scan-buffer", { body: { buffer_bin_id } }));
+} catch (error) {
+  if (error instanceof ApiError && error.code === "BUFFER_BIN_NOT_FOUND") { /* … */ }
+}
+```
+
+`unwrap` снимает конверт `{success, data, error}` и отдаёт `data`. Ответы без конверта (`/auth/*`, `/health`) отдаёт как есть. Любая ошибка приходит как `ApiError { status, code, message }`:
+
+| Ответ | `code` | `message` |
+|-------|--------|-----------|
+| JSON-конверт ошибки | `error.code` | `error.message` с бэкенда |
+| `unauthorized` (текст) | `UNAUTHORIZED` | «Сессия истекла, войдите заново» |
+| `forbidden` (текст) | `FORBIDDEN` | «Недостаточно прав для этого действия» |
+| `invalid request body` (текст) | `INVALID_REQUEST` | «Некорректный запрос» |
+| `user already exists` (текст) | `USER_ALREADY_EXISTS` | «Пользователь уже существует» |
+| `internal server error` (текст) | `INTERNAL_ERROR` | «Внутренняя ошибка сервера» |
+| другое тело | `HTTP_<статус>` | «Сервер ответил ошибкой <статус>» |
+| нет ответа | `NETWORK_ERROR`, `status: 0` | «Нет связи с сервером» |
+
+`api` ходит через `authFetch`, `publicApi` — без токена (вход).
+
 Разметка: от 1024 px меню слева, на планшете — за кнопкой «Открыть меню».
 
 ## Новый экран

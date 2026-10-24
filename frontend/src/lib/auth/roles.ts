@@ -1,4 +1,6 @@
-export type Role = "ADMIN" | "OPERATOR" | "CUSTOMER" | "AUDITOR";
+import type { Schema } from "@/lib/api/client";
+
+export type Role = Schema<"UserRole">;
 
 export const roleLabels: Record<Role, string> = {
   ADMIN: "Администратор",
