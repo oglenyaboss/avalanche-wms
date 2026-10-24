@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 
-const mocksEnabled = process.env.NEXT_PUBLIC_API_MOCKS !== "off";
+import { mocksEnabled } from "@/lib/env";
 
 async function startMocks() {
   if (!mocksEnabled) return;

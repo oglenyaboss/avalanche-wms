@@ -9,8 +9,11 @@ import { useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { ScannerEmulator } from "@/components/scan/scanner-emulator";
 import { roleLabels } from "@/lib/auth/roles";
 import { clearSession, type Session } from "@/lib/auth/session";
+import { mocksEnabled } from "@/lib/env";
+import { ScanProvider } from "@/lib/scan/scan-context";
 
 import { NavMenu } from "./nav-menu";
 import { navItemFor } from "./navigation";
@@ -29,39 +32,42 @@ export function AppShell({ session, children }: { session: Session; children: Re
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center gap-2 border-b px-4">
-          <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
-            <SheetTrigger asChild>
-              <Button variant="ghost" size="icon-lg" className="lg:hidden" aria-label="Открыть меню">
-                <HugeiconsIcon icon={Menu01Icon} className="size-6" />
+        <ScanProvider>
+          <header className="flex h-14 items-center gap-2 border-b px-4">
+            <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
+              <SheetTrigger asChild>
+                <Button variant="ghost" size="icon-lg" className="lg:hidden" aria-label="Открыть меню">
+                  <HugeiconsIcon icon={Menu01Icon} className="size-6" />
+                </Button>
+              </SheetTrigger>
+              <SheetContent side="left" className="w-72 gap-6 bg-sidebar p-4 text-sidebar-foreground">
+                <SheetHeader className="p-0">
+                  <SheetTitle asChild>
+                    <div>
+                      <Brand />
+                    </div>
+                  </SheetTitle>
+                </SheetHeader>
+                <NavMenu role={session.user.role} onNavigate={() => setMenuOpen(false)} />
+              </SheetContent>
+            </Sheet>
+
+            <div className="ml-auto flex items-center gap-3">
+              {mocksEnabled && <ScannerEmulator />}
+              <span className="text-sm font-medium" data-testid="current-user">
+                {session.user.username}
+              </span>
+              <Badge variant="secondary">{roleLabels[session.user.role]}</Badge>
+              <Button variant="ghost" size="icon-lg" aria-label="Выйти" onClick={clearSession}>
+                <HugeiconsIcon icon={Logout01Icon} className="size-5" />
               </Button>
-            </SheetTrigger>
-            <SheetContent side="left" className="w-72 gap-6 bg-sidebar p-4 text-sidebar-foreground">
-              <SheetHeader className="p-0">
-                <SheetTitle asChild>
-                  <div>
-                    <Brand />
-                  </div>
-                </SheetTitle>
-              </SheetHeader>
-              <NavMenu role={session.user.role} onNavigate={() => setMenuOpen(false)} />
-            </SheetContent>
-          </Sheet>
+            </div>
+          </header>
 
-          <div className="ml-auto flex items-center gap-3">
-            <span className="text-sm font-medium" data-testid="current-user">
-              {session.user.username}
-            </span>
-            <Badge variant="secondary">{roleLabels[session.user.role]}</Badge>
-            <Button variant="ghost" size="icon-lg" aria-label="Выйти" onClick={clearSession}>
-              <HugeiconsIcon icon={Logout01Icon} className="size-5" />
-            </Button>
-          </div>
-        </header>
-
-        <main className="flex flex-1 flex-col gap-6 p-4 lg:p-6">
-          {allowed ? children : <Forbidden />}
-        </main>
+          <main className="flex flex-1 flex-col gap-6 p-4 lg:p-6">
+            {allowed ? children : <Forbidden />}
+          </main>
+        </ScanProvider>
       </div>
     </div>
   );
