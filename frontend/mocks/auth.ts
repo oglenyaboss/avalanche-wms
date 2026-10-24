@@ -2,26 +2,21 @@ import { http, HttpResponse } from "msw";
 
 import type { Role } from "@/lib/auth/roles";
 
-type MockUser = { id: string; username: string; password: string; role: Role };
-
-export const users: MockUser[] = [
-  { id: "01929c5e-0000-7000-8000-0000000000a1", username: "operator", password: "operator", role: "OPERATOR" },
-  { id: "01929c5e-0000-7000-8000-0000000000a2", username: "admin", password: "admin", role: "ADMIN" },
-  { id: "01929c5e-0000-7000-8000-0000000000a3", username: "auditor", password: "auditor", role: "AUDITOR" },
-  { id: "01929c5e-0000-7000-8000-0000000000a4", username: "customer", password: "customer", role: "CUSTOMER" },
-];
+import { db, newId, now, type UserRow } from "./db";
+import { inTransaction, serialized, textError } from "./http";
 
 const accessTtlSeconds = 15 * 60;
 const refreshTtlSeconds = 7 * 24 * 60 * 60;
+const roles: Role[] = ["ADMIN", "OPERATOR", "CUSTOMER", "AUDITOR"];
 
 function base64url(value: object): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function makeToken(user: MockUser, type: "access" | "refresh", ttlSeconds: number): string {
+function makeToken(user: UserRow, type: "access" | "refresh", ttlSeconds: number): string {
   const iat = Math.floor(Date.now() / 1000);
-  const claims = { user_id: user.id, role: type === "access" ? user.role : undefined, type, iat, exp: iat + ttlSeconds };
+  const claims = { user_id: user.user_id, role: type === "access" ? user.role : undefined, type, iat, exp: iat + ttlSeconds };
   return `${base64url({ alg: "none", typ: "JWT" })}.${base64url(claims)}.mock`;
 }
 
@@ -34,46 +29,62 @@ function readClaims(token: string): { user_id: string; type: string; exp: number
   }
 }
 
-function tokenPair(user: MockUser) {
+function tokenPair(user: UserRow) {
   return {
     access_token: makeToken(user, "access", accessTtlSeconds),
     refresh_token: makeToken(user, "refresh", refreshTtlSeconds),
   };
 }
 
-function userFromToken(token: string | undefined, type: "access" | "refresh"): MockUser | null {
+export function userFromToken(token: string | undefined, type: "access" | "refresh"): UserRow | null {
   const claims = token ? readClaims(token) : null;
   if (!claims || claims.type !== type || claims.exp * 1000 <= Date.now()) return null;
-  return users.find((user) => user.id === claims.user_id) ?? null;
+  return db().users.find((user) => user.user_id === claims.user_id && user.is_active) ?? null;
 }
 
-const unauthorized = () => new HttpResponse("unauthorized\n", { status: 401, headers: { "Content-Type": "text/plain" } });
-
-export function authorize(request: Request, roles: Role[]): MockUser | Response {
-  const header = request.headers.get("Authorization") ?? "";
-  const user = userFromToken(header.replace(/^Bearer /, ""), "access");
-  if (!user) return unauthorized();
-  if (!roles.includes(user.role)) {
-    return HttpResponse.json(
-      { success: false, data: null, error: { code: "FORBIDDEN", message: "Недостаточно прав для этого действия" } },
-      { status: 403 },
-    );
-  }
-  return user;
+async function readBody(request: Request, keys: string[]): Promise<Record<string, string> | null> {
+  const body: unknown = await request.json().catch(() => null);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const entries = Object.entries(body);
+  if (entries.some(([key, value]) => !keys.includes(key) || (value !== null && typeof value !== "string"))) return null;
+  return body as Record<string, string>;
 }
+
+const invalidBody = () => textError(400, "invalid request body");
 
 export const authHandlers = [
-  http.post("/api/auth/login", async ({ request }) => {
-    const body = (await request.json().catch(() => null)) as { username?: string; password?: string } | null;
-    if (!body) {
-      return new HttpResponse("invalid request body\n", { status: 400, headers: { "Content-Type": "text/plain" } });
-    }
-    const user = users.find((u) => u.username === body.username && u.password === body.password);
-    return user ? HttpResponse.json(tokenPair(user)) : unauthorized();
-  }),
-  http.post("/api/auth/refresh", async ({ request }) => {
-    const body = (await request.json().catch(() => null)) as { refresh_token?: string } | null;
-    const user = userFromToken(body?.refresh_token, "refresh");
-    return user ? HttpResponse.json(tokenPair(user)) : unauthorized();
-  }),
+  http.post("/api/auth/login", ({ request }) =>
+    serialized(async () => {
+      const body = await readBody(request, ["username", "password"]);
+      if (!body) return invalidBody();
+      const user = db().users.find((u) => u.username === body.username && u.password === body.password && u.is_active);
+      return user ? HttpResponse.json(tokenPair(user)) : textError(401, "unauthorized");
+    }),
+  ),
+  http.post("/api/auth/refresh", ({ request }) =>
+    serialized(async () => {
+      const body = await readBody(request, ["refresh_token"]);
+      if (!body) return invalidBody();
+      const user = userFromToken(body.refresh_token, "refresh");
+      return user ? HttpResponse.json(tokenPair(user)) : textError(401, "unauthorized");
+    }),
+  ),
+  http.post("/api/auth/register", ({ request }) =>
+    serialized(async () => {
+      const actor = userFromToken(request.headers.get("Authorization")?.replace(/^Bearer /, ""), "access");
+      if (!actor) return textError(401, "unauthorized");
+      const body = await readBody(request, ["username", "password", "role"]);
+      if (!body) return invalidBody();
+      if (actor.role !== "ADMIN") return textError(403, "forbidden");
+      const { username = "", password = "", role = "" } = body;
+      const passwordLength = new TextEncoder().encode(password).length;
+      if (!username || passwordLength < 6 || passwordLength > 72 || !roles.includes(role as Role)) return invalidBody();
+      return inTransaction(async (state) => {
+        if (state.users.some((user) => user.username === username)) return textError(409, "user already exists");
+        const user: UserRow = { user_id: newId(), username, password, role: role as Role, is_active: true, org_id: null, created_at: now() };
+        state.users.push(user);
+        return HttpResponse.json({ id: user.user_id, username: user.username }, { status: 201 });
+      });
+    }),
+  ),
 ];
