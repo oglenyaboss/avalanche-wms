@@ -1,14 +1,26 @@
-import type { ScanCode } from "@/lib/scan/types";
+import type { ScanCode, ScanCodeType } from "@/lib/scan/types";
+
+import { db } from "./db";
+
+const bufferSections = new Set(["BUFFER", "SHIPPING_BUFFER"]);
+
+const code = (type: ScanCodeType, label: string, value: string): ScanCode => ({ type, label, value });
 
 export function scanCodes(): ScanCode[] {
+  const state = db();
+  const skuName = new Map(state.skus.map((sku) => [sku.sku_id, sku.name]));
   return [
-    { type: "ttn", label: "ТТН-0001", value: "TTN-0001" },
-    { type: "cargoplace", label: "Грузоместо CP-0001", value: "CP-0001" },
-    { type: "box", label: "Коробка BOX-0001", value: "BOX-0001" },
-    { type: "sku", label: "Ноутбук Lenovo X1", value: "4601234567890" },
-    { type: "product", label: "QR-0001", value: "QR-0001" },
-    { type: "bin", label: "Ячейка M2-A-03", value: "77777777-7777-7777-7777-777777777777" },
-    { type: "buffer", label: "Буфер BUF-01", value: "66666666-6666-6666-6666-666666666666" },
-    { type: "dispatch", label: "Рейс D-0001", value: "D-0001" },
+    ...state.inbound_shipments.map((row) => code("ttn", row.ttn_code, row.ttn_code)),
+    ...state.cargoplaces.flatMap((row) => [
+      code("cargoplace", `Грузоместо ${row.cargoplace_code}`, row.cargoplace_code),
+      code("cargoplace", `Грузоместо ${row.cargoplace_code} · id`, row.cargoplace_id),
+    ]),
+    ...state.boxes.map((row) => code("box", `Коробка ${row.box_barcode}`, row.box_barcode)),
+    ...state.sku_barcodes.map((row) => code("sku", skuName.get(row.sku_id) ?? row.barcode, row.barcode)),
+    ...state.products.map((row) => code("product", `${row.qr_code} · ${row.status}`, row.qr_code)),
+    ...state.bins.map((row) =>
+      bufferSections.has(row.section ?? "") ? code("buffer", `Буфер ${row.code}`, row.bin_id) : code("bin", `Ячейка ${row.code}`, row.bin_id),
+    ),
+    ...state.outbound_dispatches.map((row) => code("dispatch", `Рейс ${row.dispatch_code} · ${row.status}`, row.dispatch_code)),
   ];
 }

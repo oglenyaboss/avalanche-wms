@@ -16,8 +16,8 @@ async function openEmulator(page: Page, path = "/scanner-check") {
 test("эмулятор сканирует в активное поле и оставляет фокус в нём", async ({ page }) => {
   await openEmulator(page);
   await expect(page.getByText("Сканирует в: Код")).toBeVisible();
-  await page.getByRole("button", { name: "Буфер BUF-01" }).click();
-  await expect(firstScan(page)).toContainText("66666666-6666-6666-6666-666666666666");
+  await page.getByRole("button", { name: "Буфер BUFFER-01" }).click();
+  await expect(firstScan(page)).toContainText("01929c5e-0000-7000-8001-000000000006");
   await expect(firstScan(page)).toContainText("эмулятор");
   await expect(scanField(page)).toBeFocused();
   await expect(scanField(page)).toBeEmpty();
@@ -25,11 +25,11 @@ test("эмулятор сканирует в активное поле и ост
 
 test("повторный скан того же кода обрабатывается дважды", async ({ page }) => {
   await openEmulator(page);
-  const buffer = page.getByRole("button", { name: "Буфер BUF-01" });
+  const buffer = page.getByRole("button", { name: "Буфер BUFFER-01" });
   await buffer.click();
   await buffer.click();
   await expect(latestScans(page)).toHaveCount(2);
-  await expect(firstScan(page)).toContainText("66666666-6666-6666-6666-666666666666");
+  await expect(firstScan(page)).toContainText("01929c5e-0000-7000-8001-000000000006");
 });
 
 test("сканер-клавиатура: Enter в поле скана фиксирует источник «сканер»", async ({ page }) => {
@@ -52,9 +52,9 @@ test("ручной ввод в эмуляторе сканирует как «э
 
 test("поиск кода фильтрует список эмулятора", async ({ page }) => {
   await openEmulator(page);
-  await page.getByRole("textbox", { name: "Поиск кода" }).fill("lenovo");
-  await expect(page.getByRole("button", { name: "Ноутбук Lenovo X1" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Буфер BUF-01" })).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Поиск кода" }).fill("puma");
+  await expect(page.getByRole("button", { name: "Рюкзак Puma Core" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Буфер BUFFER-01" })).toHaveCount(0);
 });
 
 test("без активного поля скана эмулятор выключен", async ({ page }) => {
@@ -62,5 +62,5 @@ test("без активного поля скана эмулятор выклю�
   await page.goto("/");
   await page.getByRole("button", { name: "Эмулятор сканера" }).click();
   await expect(page.getByText("Нет активного поля скана")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Буфер BUF-01" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Буфер BUFFER-01" })).toBeDisabled();
 });
