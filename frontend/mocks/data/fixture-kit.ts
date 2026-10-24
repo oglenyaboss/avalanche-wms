@@ -85,6 +85,7 @@ export const seedIds = {
     "ORD-2026-0042": mockId(idGroup.order, 1),
     "ORD-2026-0043": mockId(idGroup.order, 2),
     "ORD-2026-0501": mockId(idGroup.order, 3),
+    "ORD-2026-0502": mockId(idGroup.order, 4),
   },
   dispatches: {
     "DSP-2026-0421-001": mockId(idGroup.dispatch, 1),
