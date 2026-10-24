@@ -209,12 +209,15 @@ VALUES (
 | `/scan-buffer`: в буфере нет товаров `READY_TO_SHIP` | `BUFFER_EMPTY` |
 | `/scan-driver`: `dispatch_code` не найден | `DISPATCH_NOT_FOUND` |
 | `/scan-driver`: `dispatch.status = DEPARTED` | `DISPATCH_ALREADY_DEPARTED` |
-| `/scan-driver`: `dispatch.status = AT_GATE` | `DISPATCH_ALREADY_AT_GATE` (опционально — уже сканировали этот QR) |
+| `/scan-driver`: `dispatch.status = CANCELLED` | `DISPATCH_CANCELLED` (409) |
+| `/scan-driver`: `dispatch.status = AT_GATE` | Не ошибка: повторный скан того же QR возвращает рейс без изменений (идемпотентно) |
 | `/ship/draft`: `bin.destination_id != dispatch.destination_id` | `DESTINATION_MISMATCH` |
 | `/ship/draft`: `dispatch.status != AT_GATE` | `DISPATCH_NOT_AT_GATE` |
 | `/ship/draft`: один из `product_ids` не в буфере / не `READY_TO_SHIP` | `PRODUCT_NOT_IN_BUFFER` |
 | `/ship/draft`: буфер пуст в bulk-режиме | `BUFFER_EMPTY` |
 | `/ship/draft`: Pick-действие какого-то товара ещё не `COMMITTED` на цепи | `PICKING_NOT_CONFIRMED` (409) |
+| `/ship/draft`, `/ship/submit`: у оператора нет активного passkey | `SIGNER_KEY_NOT_ACTIVE` (409) |
+| `/ship/submit`: товар черновика ушёл из буфера или сменил статус после подписи | `DRAFT_STALE` (409) |
 | `/ship/submit`: операция уже отправлена | `OPERATION_ALREADY_SUBMITTED` (409) |
 | `/ship/submit`: подпись части не прошла проверку | `INVALID_ASSERTION` (400) |
 

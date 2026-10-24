@@ -211,16 +211,18 @@ VALUES (
 
 | Условие | Ошибка |
 |---------|--------|
-| `/allocate`: нет `SHIPPING_BUFFER` для `destination_id` | `SHIPPING_BUFFER_NOT_FOUND` |
-| `/allocate`: недостаточно `STORED` products по SKU | `INSUFFICIENT_STOCK` |
+| `/allocate`: недостаточно `STORED` products по SKU | Не ошибка: `200`, заказ попадает в `insufficient_orders` с недостающими SKU, остальные заказы аллоцируются |
 | `/allocate`: заказ уже в статусе != `NEW` | `ORDER_NOT_NEW` |
 | `/pick`: `product.status != ALLOCATED` | `PRODUCT_NOT_ALLOCATED` |
 | `/pick`: нет `PENDING` / `IN_PROGRESS` assembly_task для product | `NO_TASK_FOR_PRODUCT` |
 | `/pick`: `FAILED` PutAway-действие товара в цепи | `CHAIN_EVENT_REJECTED` |
 | `/scan-shipping-buffer/draft`: оператор не несёт ASSEMBLED товаров (ничего не подобрано / уже размещено) | `CART_EMPTY` |
-| `/scan-shipping-buffer/draft`: `bin.section != 'SHIPPING_BUFFER'` | `BIN_NOT_SHIPPING_BUFFER` (400) |
+| `/scan-shipping-buffer/draft`: ячейка не найдена или `bin.section != 'SHIPPING_BUFFER'` | `BIN_NOT_SHIPPING_BUFFER` (400) |
 | `/scan-shipping-buffer/draft`: оператор несёт ASSEMBLED товары, но для другого `destination_id`, чем у буфера | `DESTINATION_MISMATCH` |
+| `/scan-shipping-buffer/draft`, `/submit`: у оператора нет активного passkey | `SIGNER_KEY_NOT_ACTIVE` (409) |
 | `/scan-shipping-buffer/submit`: состав корзины изменился после подписи | `DRAFT_STALE` |
+| `/scan-shipping-buffer/submit`: операция уже отправлена | `OPERATION_ALREADY_SUBMITTED` (409) |
+| `/scan-shipping-buffer/submit`: подпись части не прошла проверку | `INVALID_ASSERTION` (400) |
 
 `DESTINATION_MISMATCH` защищает от ситуации «сборщик собирал для магазина №5, а сканирует буфер магазина №7». Механика: `ListOperatorBasket` фильтрует корзину по `assembly_task.destination_id = bin.destination_id`, поэтому для чужого буфера корзина пуста. Сервис различает два случая через `CountAssembledByOperator`: если у оператора **есть** ASSEMBLED товары (для другого магазина) → `DESTINATION_MISMATCH`; если ASSEMBLED товаров нет вовсе → `CART_EMPTY`. Ни один товар чужого магазина не попадает в буфер (защита от mis-delivery).
 

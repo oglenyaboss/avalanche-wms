@@ -113,6 +113,26 @@ stateDiagram-v2
 
 Работник опирается на своё знание склада. В post-MVP можно добавить правила размещения (putaway rules).
 
+## Валидации
+
+| Условие | Ошибка |
+|---------|--------|
+| `/scan-buffer`, `/scan-product`: ячейка не найдена или не `BUFFER` | `BUFFER_BIN_NOT_FOUND` (404) |
+| `/scan-product`: товар не найден | `PRODUCT_NOT_FOUND` (404) |
+| `/scan-product`: товар лежит не в отсканированном буфере | `PRODUCT_NOT_IN_BUFFER` (409) |
+| `/scan-product`: `product.status != RECEIVED` | `PRODUCT_NOT_RECEIVED` (409) |
+| `/scan-storage-bin/draft`: `product_ids` пуст или длиннее 200 | `INVALID_REQUEST` (400) |
+| `/scan-storage-bin/draft`: ячейка не найдена, это `BUFFER` / `SHIPPING_BUFFER` или `volume = 0` | `STORAGE_BIN_NOT_FOUND` (404) |
+| `/scan-storage-bin/draft`: товар не найден | `PRODUCT_NOT_FOUND` (404) |
+| `/scan-storage-bin/draft`: товар не лежит в буфере приёмки | `PRODUCT_NOT_IN_BUFFER` (409) |
+| `/scan-storage-bin/draft`: `product.status != RECEIVED` | `PRODUCT_NOT_RECEIVED` (409) |
+| `/scan-storage-bin/draft`, `/submit`: грузоместо товара не закрыто на столе (`!= TABLE_CLOSED`) | `CARGOPLACE_NOT_CLOSED` (409) |
+| `/scan-storage-bin/draft`, `/submit`: receiving-действие товара `FAILED` в цепи | `CHAIN_EVENT_REJECTED` (409) |
+| `/scan-storage-bin/draft`, `/submit`: у оператора нет активного passkey | `SIGNER_KEY_NOT_ACTIVE` (409) |
+| `/scan-storage-bin/submit`: товар ушёл из буфера или сменил статус после подписи | `DRAFT_STALE` (409) |
+| `/scan-storage-bin/submit`: операция уже отправлена | `OPERATION_ALREADY_SUBMITTED` (409) |
+| `/scan-storage-bin/submit`: подпись части не прошла проверку | `INVALID_ASSERTION` (400) |
+
 ## Связь с предыдущими этапами
 
 ```mermaid
