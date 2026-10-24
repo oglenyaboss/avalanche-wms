@@ -199,6 +199,12 @@ export type KeyActionRow = {
   submitted_at: string | null;
 };
 
+export type RegistrationSessionRow = {
+  user_id: string;
+  challenge: string;
+  expires_at: string;
+};
+
 export type WarehouseActionRow = {
   action_id: string;
   operation_id: string;
@@ -264,6 +270,7 @@ export type Db = {
   shippings: ShippingRow[];
   passkey_credentials: PasskeyRow[];
   key_actions: KeyActionRow[];
+  registration_sessions: RegistrationSessionRow[];
   warehouse_actions: WarehouseActionRow[];
   outbox_events: OutboxEventRow[];
   onchain_events: OnchainEventRow[];

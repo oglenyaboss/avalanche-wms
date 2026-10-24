@@ -196,6 +196,7 @@ function base(): Tables {
       };
     }),
     key_actions: [],
+    registration_sessions: [],
     warehouse_actions: [],
     outbox_events: [],
     onchain_events: [],
