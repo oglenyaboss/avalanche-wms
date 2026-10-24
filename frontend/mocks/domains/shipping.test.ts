@@ -6,6 +6,7 @@ import { signAndSubmit, type SignedSubmit } from "@/lib/signing/sign-and-submit"
 
 import { setChainMode } from "../chain";
 import { db } from "../db";
+import { assemblyIds } from "../data/fixtures/assembly";
 import { shippingIds } from "../data/fixtures/shipping";
 import { ago, idGroup, later, mockId, seedIds, seededCredentialIds } from "../data/fixture-kit";
 import { loginAs, setupMockApi, waitForChain } from "../testing";
@@ -96,6 +97,11 @@ describe("сканирование буфера отгрузки", () => {
   it("админ — FORBIDDEN, отгрузка только для оператора", async () => {
     await loginAs("admin");
     await expect(scanBuffer(shipBin)).rejects.toMatchObject({ status: 403, code: "FORBIDDEN", message: "Только оператор может выполнять это действие" });
+  });
+
+  it("буфер без товаров READY_TO_SHIP — 200 с пустым списком, BUFFER_EMPTY у scan-buffer нет", async () => {
+    await loginAs("operator");
+    await expect(scanBuffer(assemblyIds.bins["BIN-SHIP-9"])).resolves.toMatchObject({ count: 0, products: [] });
   });
 });
 

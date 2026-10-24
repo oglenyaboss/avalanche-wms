@@ -81,6 +81,16 @@ describe("аллокация", () => {
       message: "Невалидный JSON в теле запроса",
     });
   });
+
+  it("повторная аллокация — заказы не NEW пропускаются без ошибки", async () => {
+    await loginAs("operator");
+    expect((await allocate(shop9)).allocated_orders).toBe(2);
+    expect(await allocate(shop9)).toEqual({
+      allocated_orders: 0,
+      allocated_products: 0,
+      insufficient_orders: [expect.objectContaining({ order_id: o["ORD-ASM-002"] })],
+    });
+  });
 });
 
 describe("задачи сборки", () => {
@@ -241,6 +251,12 @@ describe("границы черновика", () => {
     if (key) key.status = "REVOKED";
     saveDb();
     await expect(draft(seedIds.bins["BIN-SHIP-7"])).rejects.toMatchObject({ status: 409, code: "SIGNER_KEY_NOT_ACTIVE", message: "Ключ оператора не активен в реестре" });
+  });
+
+  it("у operator2 нет ключа — SIGNER_KEY_NOT_ACTIVE", async () => {
+    await loginAs("operator2");
+    await pick(p["QR-ASM-0010"]);
+    await expect(draft(assemblyIds.bins["BIN-SHIP-9"])).rejects.toMatchObject({ status: 409, code: "SIGNER_KEY_NOT_ACTIVE", message: "Ключ оператора не активен в реестре" });
   });
 });
 

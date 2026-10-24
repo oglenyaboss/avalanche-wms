@@ -17,6 +17,7 @@ const storage = seedIds.bins["A-01-01"];
 const p = putawayIds.products;
 const storedProduct = mockId(idGroup.product, 3);
 const unknownProduct = mockId(idGroup.product, 999999);
+const unknownBin = mockId(idGroup.bin, 999999);
 
 const scanBuffer = (buffer_bin_id: string) => unwrap(api.POST("/putaway/scan-buffer", { body: { buffer_bin_id } }));
 const scanProduct = (product_id: string) => unwrap(api.POST("/putaway/scan-product", { body: { product_id, buffer_bin_id: buffer } }));
@@ -74,6 +75,16 @@ describe("сканирование буфера и товара", () => {
     await loginAs("operator");
     await expect(scanProduct(productId)).rejects.toMatchObject({ status: httpStatus, code });
   });
+
+  it("неизвестная буферная ячейка — BUFFER_BIN_NOT_FOUND", async () => {
+    await loginAs("operator");
+    await expect(scanBuffer(unknownBin)).rejects.toMatchObject({ status: 404, code: "BUFFER_BIN_NOT_FOUND", message: "Буферная ячейка не найдена" });
+    await expect(unwrap(api.POST("/putaway/scan-product", { body: { product_id: p["QR-PUT-0001"], buffer_bin_id: unknownBin } }))).rejects.toMatchObject({
+      status: 404,
+      code: "BUFFER_BIN_NOT_FOUND",
+      message: "Буферная ячейка не найдена",
+    });
+  });
 });
 
 describe("черновик размещения", () => {
@@ -118,6 +129,11 @@ describe("черновик размещения", () => {
   it("у оператора нет ключа — SIGNER_KEY_NOT_ACTIVE", async () => {
     await loginAs("operator2");
     await expect(draft([p["QR-PUT-0001"]])).rejects.toMatchObject({ status: 409, code: "SIGNER_KEY_NOT_ACTIVE", message: "Ключ оператора не активен в реестре" });
+  });
+
+  it("неизвестная ячейка-цель — STORAGE_BIN_NOT_FOUND", async () => {
+    await loginAs("operator");
+    await expect(draft([p["QR-PUT-0001"]], unknownBin)).rejects.toMatchObject({ status: 404, code: "STORAGE_BIN_NOT_FOUND", message: "Ячейка хранения не найдена" });
   });
 });
 
