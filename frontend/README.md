@@ -80,3 +80,25 @@ try {
 
 1. Страница в `src/app/(terminal)/<путь>/page.tsx`.
 2. Пункт в `src/components/app-shell/navigation.ts` с ролями, которые пускает бэкенд (`docs/api/api-contract.md`, раздел RBAC).
+
+## Подписанные операции
+
+Приёмка (закрытие грузоместа), раскладка, сборка и отгрузка подписываются passkey по [ADR-0001](../docs/adr/0001-signed-actions.md): черновик → подпись каждой части → отправка → статус в цепи.
+
+```ts
+import { signAndSubmit } from "@/lib/signing/sign-and-submit";
+import { OperationStatus } from "@/components/signing/operation-status";
+
+const draft = await unwrap(api.POST("/putaway/scan-storage-bin/draft", { body }));
+const result = await signAndSubmit(draft, (submitBody) =>
+  unwrap(api.POST("/putaway/scan-storage-bin/submit", { body: submitBody })),
+);
+// <OperationStatus operationId={result.operation_id} />
+```
+
+- `signAndSubmit` просит подпись на каждую часть черновика и отправляет все подписи одним submit. Отмена на устройстве — `SigningError` с кодом `SIGNING_CANCELLED`, остальные сбои устройства — `SIGNING_FAILED`; ошибки API — `ApiError`.
+- `OperationStatus` опрашивает `/signed-actions/operations/{id}` раз в 2 секунды, пока есть части в `SENT`, и показывает итог (`role="status"`).
+- Ключевые действия админа (подтвердить, отозвать ключ) подписываются `getAssertion(draft)`, регистрация ключа — `createPasskey(options)`; оба в `src/lib/signing/webauthn.ts`.
+- `src/lib/signing/adr.ts` и `webauthn-verify.ts` пересчитывают challenge и проверяют подпись как цепь; сверены с golden vectors `testdata/signed-actions/vectors.v1.json`.
+
+На моках `navigator.credentials` подменяет программный аутентификатор (`mocks/virtual-authenticator.ts`): у `operator` и `admin` уже есть активные ключи, новые ключи создаются в браузере. Режим аутентификатора — `localStorage["wms-virtual-authenticator-mode"]`: `ok`, `cancel` (пользователь отменил) или `corrupt` (подпись не сойдётся).
