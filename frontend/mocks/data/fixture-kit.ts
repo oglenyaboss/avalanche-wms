@@ -95,7 +95,7 @@ const credentialOf = (username: string) => seededKeys.find((key) => key.username
 
 export const seededCredentialIds = { operator: credentialOf("operator"), admin: credentialOf("admin") };
 
-type ChainOutcome = { status: "COMMITTED" } | { status: "FAILED"; rejectReason: number | null };
+type ChainOutcome = { status: "COMMITTED" } | { status: "SENT" } | { status: "FAILED"; rejectReason: number | null };
 
 export function signedActionFixture(input: {
   n: number;
@@ -103,7 +103,7 @@ export function signedActionFixture(input: {
   items: string[];
   createdBy?: string;
   details?: Record<string, unknown>;
-  outcome: ChainOutcome;
+  outcome: ChainOutcome | null;
   minutesAgo: number;
 }): Fixture {
   const actionId = mockId(idGroup.action, input.n);
@@ -124,18 +124,21 @@ export function signedActionFixture(input: {
     created_at: at,
     submitted_at: at,
   };
-  const event: OnchainEventRow = {
-    event_id: actionId,
-    aggregate_type: "signed_action",
-    tx_hash: `0x${input.n.toString(16).padStart(64, "0")}`,
-    status: input.outcome.status,
-    error_message: input.outcome.status === "FAILED" ? "rejected by contract" : null,
-    reject_reason: input.outcome.status === "FAILED" ? input.outcome.rejectReason : null,
-    created_at: at,
-    updated_at: at,
-    settles_at: null,
-    settles_to: null,
-  };
+  const event: OnchainEventRow | null =
+    input.outcome === null
+      ? null
+      : {
+          event_id: actionId,
+          aggregate_type: "signed_action",
+          tx_hash: `0x${input.n.toString(16).padStart(64, "0")}`,
+          status: input.outcome.status,
+          error_message: input.outcome.status === "FAILED" ? "rejected by contract" : null,
+          reject_reason: input.outcome.status === "FAILED" ? input.outcome.rejectReason : null,
+          created_at: at,
+          updated_at: at,
+          settles_at: null,
+          settles_to: null,
+        };
   const outbox: OutboxEventRow = {
     event_id: actionId,
     aggregate_id: actionId,
@@ -145,7 +148,7 @@ export function signedActionFixture(input: {
     payload: { version: 1, actionId, actionType: input.actionType, itemIds: input.items, detailsHash: zero },
     created_at: at,
   };
-  return { warehouse_actions: [action], outbox_events: [outbox], onchain_events: [event] };
+  return event ? { warehouse_actions: [action], outbox_events: [outbox], onchain_events: [event] } : { warehouse_actions: [action], outbox_events: [outbox] };
 }
 
 export function mergeFixtures(target: Tables, ...fixtures: Fixture[]) {

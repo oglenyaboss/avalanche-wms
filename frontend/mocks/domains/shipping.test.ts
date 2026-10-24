@@ -146,6 +146,7 @@ describe("черновик и отправка отгрузки", () => {
     const expectedItems = [products["QR-SHP-0001"], products["QR-SHP-0002"], products["QR-SHP-0003"]].sort((a, b) => (itemId(a) < itemId(b) ? -1 : 1));
     expect(operation.parts[0].item_ids).toEqual(expectedItems);
     expect(operation.allow_credentials).toEqual([{ type: "public-key", id: seededCredentialIds.operator }]);
+    const shippingsBefore = db().shippings.length;
     const result = await signAndSubmit(operation, submit);
     expect(result).toEqual({
       products_shipped: 3,
@@ -161,8 +162,9 @@ describe("черновик и отправка отгрузки", () => {
     expect(productStatus("QR-SHP-0003")).toBe("SHIPPED");
     expect(orderStatus(orderIds["ORD-SHP-001"])).toBe("SHIPPED");
     expect(orderStatus(orderIds["ORD-SHP-002"])).toBe("SHIPPED");
-    expect(db().shippings).toHaveLength(3);
-    for (const row of db().shippings) {
+    const written = db().shippings.slice(shippingsBefore);
+    expect(written).toHaveLength(3);
+    for (const row of written) {
       expect(row.action_id).toBe(operation.parts[0].action_id);
       expect(row.dispatch_id).toBe(dsp["DSP-SHP-001"]);
     }
