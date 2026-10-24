@@ -124,6 +124,7 @@ function base(): Tables {
       { order_id: orders["ORD-2026-0042"], external_order_no: "ORD-2026-0042", customer_id: users.customer, warehouse_id: warehouseId, destination_id: destinations["SHOP-5"], status: "ALLOCATED", created_at: ago(200), updated_at: ago(200) },
       { order_id: orders["ORD-2026-0043"], external_order_no: "ORD-2026-0043", customer_id: users.customer, warehouse_id: warehouseId, destination_id: destinations["SHOP-7"], status: "SHIPPED", created_at: ago(199), updated_at: ago(199) },
       { order_id: orders["ORD-2026-0501"], external_order_no: "ORD-2026-0501", customer_id: users.customer, warehouse_id: warehouseId, destination_id: destinations["SHOP-5"], status: "NEW", created_at: ago(198), updated_at: ago(198) },
+      { order_id: orders["ORD-2026-0502"], external_order_no: "ORD-2026-0502", customer_id: users.customer, warehouse_id: warehouseId, destination_id: destinations["SHOP-5"], status: "NEW", created_at: ago(197), updated_at: ago(197) },
     ],
     order_lines: [
       { order_id: orders["ORD-2026-0042"], sku_id: skus.nike, qty: 1 },
@@ -132,6 +133,7 @@ function base(): Tables {
       { order_id: orders["ORD-2026-0043"], sku_id: skus.tnf, qty: 1 },
       { order_id: orders["ORD-2026-0501"], sku_id: skus.nike, qty: 5 },
       { order_id: orders["ORD-2026-0501"], sku_id: skus.adidas, qty: 5 },
+      { order_id: orders["ORD-2026-0502"], sku_id: skus.e2e, qty: 1 },
     ],
     products: [
       seededProduct("QR-TABLE-2001", skus.nike, shipments["ТТН-2026-TABLE-002"], cargoplaces["CP-TABLE-002"], boxes["BOX-TABLE-201"], null, null, "RECEIVED", 101),
