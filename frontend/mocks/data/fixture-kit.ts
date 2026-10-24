@@ -1,4 +1,4 @@
-import type { Db, OnchainEventRow, WarehouseActionRow } from "../db";
+import type { Db, OnchainEventRow, OutboxEventRow, WarehouseActionRow } from "../db";
 
 import { seededKeys } from "./keys";
 
@@ -136,7 +136,16 @@ export function signedActionFixture(input: {
     settles_at: null,
     settles_to: null,
   };
-  return { warehouse_actions: [action], onchain_events: [event] };
+  const outbox: OutboxEventRow = {
+    event_id: actionId,
+    aggregate_id: actionId,
+    aggregate_type: "signed_action",
+    event_type: "wms.action.v1",
+    payload_hash: zero.slice(2),
+    payload: { version: 1, actionId, actionType: input.actionType, itemIds: input.items, detailsHash: zero },
+    created_at: at,
+  };
+  return { warehouse_actions: [action], outbox_events: [outbox], onchain_events: [event] };
 }
 
 export function mergeFixtures(target: Tables, ...fixtures: Fixture[]) {
