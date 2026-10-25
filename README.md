@@ -4,7 +4,7 @@
 
 Off-chain — обычная реляционная система (PostgreSQL, бизнес-логика на Go). On-chain — детерминированный конечный автомат, который верифицирует, что товар прошёл этапы в правильном порядке. Связаны они однонаправленным потоком через CDC, так что блокчейн нельзя «обойти» из приложения.
 
-**Стек:** Go · PostgreSQL 17 · Debezium (CDC) · Apache Kafka · Avalanche Subnet-EVM · Solidity · React 19 / Vite · Docker Compose
+**Стек:** Go · PostgreSQL 17 · Debezium (CDC) · Apache Kafka · Avalanche Subnet-EVM · Solidity · Next.js 16 / React 19 · Docker Compose
 
 ---
 
@@ -20,7 +20,7 @@ WMS управляет 5 этапами жизненного цикла това
 
 ```mermaid
 flowchart LR
-    UI[React / Vite] -->|draft + подпись passkey| WMS[WMS-монолит<br/>Go]
+    UI[Next.js] -->|draft + подпись passkey| WMS[WMS-монолит<br/>Go]
     WMS -->|подписанные действия + outbox| PG[(PostgreSQL<br/>3 схемы)]
     PG -->|WAL| DBZ[Debezium<br/>CDC]
     DBZ -->|wms.events.v1| K[Apache Kafka]
@@ -68,7 +68,7 @@ blockchain_project/
 │   ├── internal/             #   consumer, batch-flusher, reconcile, idempotency
 │   └── contracts/            #   ConsortiumRegistry.sol, SignedMappingWMS.sol (+ Foundry-тесты)
 │
-├── frontend/                 # веб-клиент (React 19, Vite, TypeScript, Zustand)
+├── frontend/                 # веб-клиент (Next.js 16, React 19, TypeScript, Tailwind), моки API — frontend/mocks
 │
 ├── deploy/
 │   ├── subnet/               # локальный воспроизводимый Subnet-EVM (dev-чейн)
@@ -126,14 +126,14 @@ make ps
 ```bash
 cd frontend
 npm install
-npm run dev        # Vite dev-сервер на http://localhost:5173
+npm run dev        # http://localhost:5173, API на моках; с бэкендом — см. frontend/README.md
 ```
 
 ### Сервисы
 
 | Сервис | URL | Описание |
 |--------|-----|----------|
-| Frontend (Vite) | http://localhost:5173 | Веб-клиент склада |
+| Frontend (Next.js) | http://localhost:5173 | Веб-клиент склада |
 | WMS Service | http://localhost:8081 | Основной WMS API |
 | Ledger Adapter | http://localhost:8085 | Блокчейн-мост |
 | Debezium Connect | http://localhost:8083 | Управление CDC-коннекторами |

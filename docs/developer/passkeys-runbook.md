@@ -34,10 +34,12 @@ docker compose -f docker-compose.yaml -f docker-compose.kms.yaml --profile test 
 Фронтенд:
 
 ```bash
-cd frontend && npm ci && npm run dev   # откроется на http://localhost:5173
+cd frontend && npm ci
+cp .env.example .env.local && sed -i 's/NEXT_PUBLIC_API_MOCKS=on/NEXT_PUBLIC_API_MOCKS=off/' .env.local
+npm run dev   # откроется на http://localhost:5173
 ```
 
-Если 5173 занят: `npx vite --port 5174`, добавь `http://localhost:5174` в `WEBAUTHN_RP_ORIGINS` в `.env` (список через запятую, по умолчанию `http://localhost:5173`), затем `docker compose up -d --no-deps wms_app`.
+Если 5173 занят: `npm run dev -- -p 5174`, добавь `http://localhost:5174` в `WEBAUTHN_RP_ORIGINS` в `.env` (список через запятую, по умолчанию `http://localhost:5173`), затем `docker compose up -d --no-deps wms_app`.
 
 ## 3. Что нужно браузеру
 

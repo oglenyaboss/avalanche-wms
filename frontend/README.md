@@ -6,7 +6,7 @@ Next.js (App Router) + TypeScript + Tailwind + shadcn/ui. Приложение �
 
 ```bash
 npm install
-npm run dev          # http://localhost:3000, API на моках
+npm run dev          # http://localhost:5173, API на моках
 ```
 
 Бэкенд не нужен: запросы к `/api/*` перехватывают моки (MSW, папка `mocks/`). Пользователи моков — логин и пароль совпадают:
@@ -23,15 +23,16 @@ npm run dev          # http://localhost:3000, API на моках
 
 Данные, режимы цепи и аутентификатора, сброс состояния и сценарий для каждой ошибки — в [mocks/README.md](mocks/README.md).
 
-С настоящим бэкендом: создать `.env.local` по образцу `.env.example` с `NEXT_PUBLIC_API_MOCKS=off` и адресом WMS в `WMS_API_URL`.
+С настоящим бэкендом: создать `.env.local` по образцу `.env.example` с `NEXT_PUBLIC_API_MOCKS=off` и адресом WMS в `WMS_API_URL`. Порт 5173 не менять: только этот origin бэкенд принимает для passkey (`WEBAUTHN_RP_ORIGINS`), а 3000 в docker-compose занят Grafana.
 
 ## Команды
 
 | Команда | Что делает |
 |---------|-----------|
-| `npm run dev` | dev-сервер |
+| `npm run dev` | dev-сервер на порту 5173 |
 | `npm run build` | production-сборка |
 | `npm run lint` | ESLint |
+| `npm run typecheck` | проверка типов: генерирует типы маршрутов Next и запускает `tsc` |
 | `npm test` | unit-тесты (Vitest) |
 | `npm run test:e2e` | e2e (Playwright, десктоп и планшет; сам собирает и поднимает приложение на порту 3100) |
 

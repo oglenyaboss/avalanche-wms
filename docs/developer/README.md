@@ -145,7 +145,7 @@ make connector-status                         # CDC: коннектор реги
 
 `make up` поднимает только приложение и инфраструктуру без профиля `test` — локальной цепи, `contract-deploy` и он-чейн части в этом режиме нет. Перерегистрировать Debezium-коннектор вручную (например, после правки `postgres-connector.json`) — `make register-connector`.
 
-Вариант с внешним KMS-подписантом — `make kms-up` (Web3Signer, приватник адаптера не попадает в процесс); детали — [operations.md](operations.md) и [ledger-adapter/README.md](../../ledger-adapter/README.md). Фронтенд: `cd frontend && npm ci && npm run dev` → `http://localhost:5173`.
+Вариант с внешним KMS-подписантом — `make kms-up` (Web3Signer, приватник адаптера не попадает в процесс); детали — [operations.md](operations.md) и [ledger-adapter/README.md](../../ledger-adapter/README.md). Фронтенд: `cd frontend && npm ci && npm run dev` → `http://localhost:5173`; с этим бэкендом — `.env.local` с `NEXT_PUBLIC_API_MOCKS=off` ([frontend/README.md](../../frontend/README.md)).
 
 ### 2. Откуда адреса контрактов и ключ владельца
 
