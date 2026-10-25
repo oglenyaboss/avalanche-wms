@@ -236,8 +236,6 @@ unauthorized
   `GET /dispatches` (без слэша) не матчится.
 - **`POST /dispatches/` возвращает `200`, а не `201`**, и оборачивает результат в
   `data.dispatch`. У `GET /dispatches/{id}` — та же обёртка.
-- **`/dispatches` 404 → `message` это строка-сентинел** (`DESTINATION_NOT_FOUND` /
-  `DISPATCH_NOT_FOUND`), а не фраза. `code` при этом `NOT_FOUND`.
 - **`/putaway/scan-storage-bin/draft`: BUFFER/SHIPPING_BUFFER-ячейка → `404
   STORAGE_BIN_NOT_FOUND`** (не 400). Контринтуитивно.
 - **`/assembly/allocate` никогда не отдаёт ошибку при нехватке остатка** — частичная
