@@ -657,7 +657,6 @@ export interface paths {
          * Список исходящих рейсов
          * @description RBAC: только `OPERATOR`. **Завершающий слэш обязателен** (gorilla/mux не
          *     редиректит). Все фильтры опциональны. Внутренние ошибки отдают `503`.
-         *     Внимание: при пустом результате `data` может быть `null`, а не `[]`.
          */
         get: operations["dispatchesList"];
         put?: never;
@@ -2210,7 +2209,11 @@ export interface components {
             partIndex: number;
             /** @description код действия (ADR-0001): 1 Receive, 2 PutAway, 3 Pick, 4 Ship; 5/6 — ключевые действия. */
             actionType: number;
-            /** @description Товары действия (из строки действия, в порядке хранения). */
+            /**
+             * @description Товары, которые действие изменило в доменных таблицах, без DISTINCT: дубль строки виден аудитору.
+             *     Receive — товары закрытых коробок грузоместа, часть по 2000 в порядке возрастания itemId;
+             *     PutAway, Pick, Ship — строки `putaways`, `assembly_tasks`, `shippings` с этим `action_id`, порядок не гарантирован.
+             */
             itemIds: string[];
             /**
              * @description Salt подписи (ADR-0001 §4), 0x-hex 32 байта.
@@ -4487,7 +4490,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Массив рейсов в `data` (или `null` при пустом результате). */
+            /** @description Массив рейсов в `data`; при пустом результате — `[]`. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4521,12 +4524,25 @@ export interface operations {
                     };
                 };
             };
-            /** @description `INVALID_REQUEST` — невалидный destination_id или warehouse_id. */
+            /**
+             * @description `INVALID_REQUEST`: `неизвестный статус рейса`, `destination_id не uuid`,
+             *     `warehouse_id не число`.
+             */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
+                    /**
+                     * @example {
+                     *       "success": false,
+                     *       "data": null,
+                     *       "error": {
+                     *         "code": "INVALID_REQUEST",
+                     *         "message": "неизвестный статус рейса"
+                     *       }
+                     *     }
+                     */
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
@@ -4594,8 +4610,9 @@ export interface operations {
                 };
             };
             /**
-             * @description `INVALID_REQUEST` — битый JSON / лишнее поле, пустой `driver_name` или
-             *     `vehicle_number`, либо `scheduled_at` более чем на 1 минуту в прошлом.
+             * @description `INVALID_REQUEST`: `Невалидный JSON в теле запроса` (битый JSON, лишнее поле),
+             *     `driver_name обязателен`, `vehicle_number обязателен`,
+             *     `scheduled_at не может быть в прошлом` (более чем на 1 минуту).
              */
             400: {
                 headers: {
@@ -4608,7 +4625,7 @@ export interface operations {
                      *       "data": null,
                      *       "error": {
                      *         "code": "INVALID_REQUEST",
-                     *         "message": "Invalid request body: you need to pass a driver_name"
+                     *         "message": "driver_name обязателен"
                      *       }
                      *     }
                      */
@@ -4617,10 +4634,7 @@ export interface operations {
             };
             401: components["responses"]["PlainTextUnauthorized"];
             403: components["responses"]["JSONForbidden"];
-            /**
-             * @description `NOT_FOUND` — destination_id не найден в `wms_inventory.destinations`.
-             *     Внимание: `message` здесь — строка-сентинел `DESTINATION_NOT_FOUND`, не фраза.
-             */
+            /** @description `DESTINATION_NOT_FOUND` — destination_id не найден в `wms_inventory.destinations`. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -4631,8 +4645,8 @@ export interface operations {
                      *       "success": false,
                      *       "data": null,
                      *       "error": {
-                     *         "code": "NOT_FOUND",
-                     *         "message": "DESTINATION_NOT_FOUND"
+                     *         "code": "DESTINATION_NOT_FOUND",
+                     *         "message": "Магазин не найден"
                      *       }
                      *     }
                      */
@@ -4666,7 +4680,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description `INVALID_REQUEST` — dispatch_id не парсится как UUID. */
+            /** @description `INVALID_REQUEST` — `dispatch_id не uuid`. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -4677,7 +4691,7 @@ export interface operations {
             };
             401: components["responses"]["PlainTextUnauthorized"];
             403: components["responses"]["JSONForbidden"];
-            /** @description `NOT_FOUND` — рейс не найден. `message` — строка-сентинел `DISPATCH_NOT_FOUND`. */
+            /** @description `DISPATCH_NOT_FOUND` — рейс не найден. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -4688,8 +4702,8 @@ export interface operations {
                      *       "success": false,
                      *       "data": null,
                      *       "error": {
-                     *         "code": "NOT_FOUND",
-                     *         "message": "DISPATCH_NOT_FOUND"
+                     *         "code": "DISPATCH_NOT_FOUND",
+                     *         "message": "Рейс не найден"
                      *       }
                      *     }
                      */

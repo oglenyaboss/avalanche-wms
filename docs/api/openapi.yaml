@@ -5219,7 +5219,10 @@ components:
           description: 'код действия (ADR-0001): 1 Receive, 2 PutAway, 3 Pick, 4 Ship; 5/6 — ключевые действия.'
         itemIds:
           type: array
-          description: Товары действия (из строки действия, в порядке хранения).
+          description: |
+            Товары, которые действие изменило в доменных таблицах, без DISTINCT: дубль строки виден аудитору.
+            Receive — товары закрытых коробок грузоместа, часть по 2000 в порядке возрастания itemId;
+            PutAway, Pick, Ship — строки `putaways`, `assembly_tasks`, `shippings` с этим `action_id`, порядок не гарантирован.
           items:
             type: string
             format: uuid

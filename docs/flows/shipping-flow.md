@@ -206,7 +206,7 @@ VALUES (
 |---------|--------|
 | `/scan-buffer`: `bin.section != 'SHIPPING_BUFFER'` | `BIN_NOT_SHIPPING_BUFFER` |
 | `/scan-buffer`: bin не найден | `BIN_NOT_FOUND` |
-| `/scan-buffer`: в буфере нет товаров `READY_TO_SHIP` | `BUFFER_EMPTY` |
+| `/scan-buffer`: в буфере нет товаров `READY_TO_SHIP` | Не ошибка: `200` с пустым списком (`count: 0`). `BUFFER_EMPTY` бывает только у `/ship/draft` |
 | `/scan-driver`: `dispatch_code` не найден | `DISPATCH_NOT_FOUND` |
 | `/scan-driver`: `dispatch.status = DEPARTED` | `DISPATCH_ALREADY_DEPARTED` |
 | `/scan-driver`: `dispatch.status = CANCELLED` | `DISPATCH_CANCELLED` (409) |

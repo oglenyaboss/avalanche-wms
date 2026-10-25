@@ -141,12 +141,10 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING : Аллокация
-    PENDING --> IN_PROGRESS : Оператор начал сборку (опционально)
-    IN_PROGRESS --> DONE : /pick
-    PENDING --> DONE : /pick без IN_PROGRESS
-    PENDING --> CANCELLED : Деаллокация
-    IN_PROGRESS --> CANCELLED : Деаллокация
+    PENDING --> DONE : /pick
 ```
+
+`IN_PROGRESS` и `CANCELLED` есть в enum и в фильтре `GET /assembly/tasks?status=`, но API их не выставляет.
 
 ### orders.status (в контексте сборки)
 
@@ -170,7 +168,7 @@ stateDiagram-v2
 | `products.order_id` | UPDATE | Аллокация | `NULL -> :order_id` |
 | `products.bin_id` | UPDATE | `/scan-shipping-buffer/submit` | `storage_bin -> shipping_buffer_bin` |
 | `assembly_tasks` | INSERT | Аллокация | Создание задач подбора с `destination_id`, `status = PENDING` |
-| `assembly_tasks` | UPDATE | `/pick` | `status: PENDING/IN_PROGRESS -> DONE`, `operator_id` |
+| `assembly_tasks` | UPDATE | `/pick` | `status: PENDING -> DONE`, `operator_id` |
 | `assembly_tasks` | UPDATE | `/scan-shipping-buffer/submit` | `action_id` (ссылка на подписанное Pick-действие), `unloaded_at` |
 | `warehouse_actions` | INSERT | `/scan-shipping-buffer/draft` | Строка на каждую часть Pick-операции |
 | `bins` | SELECT | Аллокация / буфер | Обычные storage bins и destination-specific `SHIPPING_BUFFER` |
@@ -212,9 +210,9 @@ VALUES (
 | Условие | Ошибка |
 |---------|--------|
 | `/allocate`: недостаточно `STORED` products по SKU | Не ошибка: `200`, заказ попадает в `insufficient_orders` с недостающими SKU, остальные заказы аллоцируются |
-| `/allocate`: заказ уже в статусе != `NEW` | `ORDER_NOT_NEW` |
+| `/allocate`: заказ магазина не в статусе `NEW` | Не ошибка: такие заказы не выбираются, повторный `/allocate` их пропускает. `ORDER_NOT_NEW` (409) — только если заказ сменил статус во время аллокации (гонка двух `/allocate`) |
 | `/pick`: `product.status != ALLOCATED` | `PRODUCT_NOT_ALLOCATED` |
-| `/pick`: нет `PENDING` / `IN_PROGRESS` assembly_task для product | `NO_TASK_FOR_PRODUCT` |
+| `/pick`: нет `PENDING` assembly_task для product (в том числе повторный `/pick` того же товара) | `NO_TASK_FOR_PRODUCT` |
 | `/pick`: `FAILED` PutAway-действие товара в цепи | `CHAIN_EVENT_REJECTED` |
 | `/scan-shipping-buffer/draft`: оператор не несёт ASSEMBLED товаров (ничего не подобрано / уже размещено) | `CART_EMPTY` |
 | `/scan-shipping-buffer/draft`: ячейка не найдена или `bin.section != 'SHIPPING_BUFFER'` | `BIN_NOT_SHIPPING_BUFFER` (400) |
