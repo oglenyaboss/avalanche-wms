@@ -23,7 +23,7 @@ const draftStale = () => fail(409, "DRAFT_STALE", "Состав отгрузки
 const pickingNotConfirmed = (count: number) =>
   fail(409, "PICKING_NOT_CONFIRMED", `Сборка части товаров (${count} шт.) ещё не подтверждена в цепи. Повторите отгрузку чуть позже`);
 
-const decodeJson = () => fail(400, "INVALID_REQUEST", "Invalid request body: decode json");
+const decodeJson = () => fail(400, "INVALID_REQUEST", "Невалидный JSON в теле запроса");
 
 const skuName = (state: Db, row: ProductRow) => state.skus.find((sku) => sku.sku_id === row.sku_id)?.name ?? "";
 const binById = (state: Db, binId: string) => state.bins.find((bin) => bin.bin_id === binId);
@@ -67,16 +67,18 @@ const dispatchDestinationOf = (state: Db, dispatch: OutboundDispatchRow) => dest
 const atGateDispatch = (state: Db, code: string) =>
   state.outbound_dispatches.find((row) => row.dispatch_code === code && row.status === "SCHEDULED" && dispatchDestinationOf(state, row));
 
+const dispatchStatuses: readonly string[] = ["SCHEDULED", "AT_GATE", "DEPARTED", "CANCELLED"] satisfies Schema<"OutboundDispatchStatus">[];
+
 const uuidQuery = (raw: string | null) => {
   if (!raw) return null;
   const id = parseUuid(raw);
-  if (!id) throw fail(400, "INVALID_REQUEST", "Invalid request: invalid UUID format");
+  if (!id) throw fail(400, "INVALID_REQUEST", "destination_id не uuid");
   return id;
 };
 
 const intQuery = (raw: string | null) => {
   if (!raw) return null;
-  if (!/^[+-]?\d+$/.test(raw)) throw fail(400, "INVALID_REQUEST", `Invalid request: strconv.Atoi: parsing "${raw}": invalid syntax`);
+  if (!/^[+-]?\d+$/.test(raw)) throw fail(400, "INVALID_REQUEST", "warehouse_id не число");
   return Number(raw);
 };
 
@@ -97,10 +99,9 @@ const decodeBody = async (request: Request) => {
     return await readJson(
       request,
       { destination_id: "string", vehicle_number: "string", driver_name: "string", driver_phone: "string", scheduled_at: "string" },
-      "Invalid request body: decode json",
+      "Невалидный JSON в теле запроса",
     );
   } catch {
-    // ponytail: Go добавляет текст ошибки декодера; апгрейд — воспроизвести тексты encoding/json
     throw decodeJson();
   }
 };
@@ -293,8 +294,11 @@ export const shippingHandlers = [
 
   route("get", "/dispatches/", guards.operator, ({ db, url }) => {
     let rows = [...db.outbound_dispatches];
-    const statuses = url.searchParams.get("status");
-    if (statuses) rows = rows.filter((row) => row.status === statuses);
+    const status = url.searchParams.get("status");
+    if (status) {
+      if (!dispatchStatuses.includes(status)) throw fail(400, "INVALID_REQUEST", "неизвестный статус рейса");
+      rows = rows.filter((row) => row.status === status);
+    }
     const destinationId = uuidQuery(url.searchParams.get("destination_id"));
     if (destinationId !== null && destinationId !== nilUuid) rows = rows.filter((row) => row.destination_id === destinationId);
     const warehouseId = intQuery(url.searchParams.get("warehouse_id"));
@@ -304,9 +308,9 @@ export const shippingHandlers = [
 
   route("get", "/dispatches/:dispatchId", guards.operator, ({ db, params }) => {
     const dispatchId = parseUuid(params.dispatchId);
-    if (!dispatchId) throw fail(400, "INVALID_REQUEST", "invalid dispatch_id format: invalid UUID format");
+    if (!dispatchId) throw fail(400, "INVALID_REQUEST", "dispatch_id не uuid");
     const dispatch = dispatchById(db, dispatchId);
-    if (!dispatch) throw fail(404, "NOT_FOUND", "DISPATCH_NOT_FOUND");
+    if (!dispatch) throw dispatchNotFound();
     return { dispatch } satisfies { dispatch: Schema<"OutboundDispatch"> };
   }),
 
@@ -315,11 +319,11 @@ export const shippingHandlers = [
     const scheduledMs = body.scheduled_at === undefined ? 0 : Date.parse(body.scheduled_at);
     if (Number.isNaN(scheduledMs)) throw decodeJson();
     const destinationId = decodedUuid(body.destination_id);
-    if ((body.driver_name ?? "") === "") throw fail(400, "INVALID_REQUEST", "Invalid request body: you need to pass a driver_name");
-    if ((body.vehicle_number ?? "") === "") throw fail(400, "INVALID_REQUEST", "Invalid request body: you need to pass a vehicle_number");
-    if (scheduledMs < Date.now() - 60_000) throw fail(400, "INVALID_REQUEST", "Invalid request body: scheduled_at should not be past time");
+    if ((body.driver_name ?? "") === "") throw fail(400, "INVALID_REQUEST", "driver_name обязателен");
+    if ((body.vehicle_number ?? "") === "") throw fail(400, "INVALID_REQUEST", "vehicle_number обязателен");
+    if (scheduledMs < Date.now() - 60_000) throw fail(400, "INVALID_REQUEST", "scheduled_at не может быть в прошлом");
     const destination = destinationById(db, destinationId);
-    if (!destination) throw fail(404, "NOT_FOUND", "DESTINATION_NOT_FOUND");
+    if (!destination) throw fail(404, "DESTINATION_NOT_FOUND", "Магазин не найден");
     const dispatch: OutboundDispatchRow = {
       dispatch_id: newId(),
       dispatch_code: nextDispatchCode(db),

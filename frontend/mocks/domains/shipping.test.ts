@@ -374,8 +374,10 @@ describe("реестр рейсов", () => {
   });
 
   it.each([
-    ["warehouse_id не число", { warehouse_id: "abc" }, `Invalid request: strconv.Atoi: parsing "abc": invalid syntax`],
-    ["destination_id не UUID", { destination_id: "x" }, "Invalid request: invalid UUID format"],
+    ["warehouse_id не число", { warehouse_id: "abc" }, "warehouse_id не число"],
+    ["destination_id не UUID", { destination_id: "x" }, "destination_id не uuid"],
+    ["неизвестный статус", { status: "BOGUS" }, "неизвестный статус рейса"],
+    ["статус в нижнем регистре", { status: "at_gate" }, "неизвестный статус рейса"],
   ])("список: %s — INVALID_REQUEST", async (_, query, message) => {
     await loginAs("operator");
     await expect(listDispatches(query)).rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST", message });
@@ -394,14 +396,14 @@ describe("реестр рейсов", () => {
     expect(result.dispatch.departed_at).not.toBeNull();
   });
 
-  it("неизвестный рейс — 404 NOT_FOUND/DISPATCH_NOT_FOUND", async () => {
+  it("неизвестный рейс — 404 DISPATCH_NOT_FOUND", async () => {
     await loginAs("operator");
-    await expect(dispatchById(unknownDispatch)).rejects.toMatchObject({ status: 404, code: "NOT_FOUND", message: "DISPATCH_NOT_FOUND" });
+    await expect(dispatchById(unknownDispatch)).rejects.toMatchObject({ status: 404, code: "DISPATCH_NOT_FOUND", message: "Рейс не найден" });
   });
 
   it("id не UUID — INVALID_REQUEST", async () => {
     await loginAs("operator");
-    await expect(dispatchById("x")).rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST", message: "invalid dispatch_id format: invalid UUID format" });
+    await expect(dispatchById("x")).rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST", message: "dispatch_id не uuid" });
   });
 
   it("создание: код DSP-<UTC-дата>-<NNN> по счётчику за сегодня, рейс доступен по id", async () => {
@@ -425,16 +427,16 @@ describe("реестр рейсов", () => {
   });
 
   it.each([
-    ["driver_name пустой", { vehicle_number: "B777OP77", driver_name: "", scheduled_at: later(60) }, "Invalid request body: you need to pass a driver_name"],
-    ["driver_name отсутствует", { vehicle_number: "B777OP77", scheduled_at: later(60) }, "Invalid request body: you need to pass a driver_name"],
-    ["vehicle_number пустой", { vehicle_number: "", driver_name: "Пётр Иванов", scheduled_at: later(60) }, "Invalid request body: you need to pass a vehicle_number"],
-    ["vehicle_number отсутствует", { driver_name: "Пётр Иванов", scheduled_at: later(60) }, "Invalid request body: you need to pass a vehicle_number"],
-    ["scheduled_at в прошлом", { vehicle_number: "B777OP77", driver_name: "Пётр Иванов", scheduled_at: ago(60) }, "Invalid request body: scheduled_at should not be past time"],
-    ["scheduled_at отсутствует", { vehicle_number: "B777OP77", driver_name: "Пётр Иванов" }, "Invalid request body: scheduled_at should not be past time"],
-    ["scheduled_at не разбирается", { vehicle_number: "B777OP77", driver_name: "Пётр Иванов", scheduled_at: "завтра" }, "Invalid request body: decode json"],
-    ["лишнее поле", { vehicle_number: "B777OP77", driver_name: "Пётр Иванов", scheduled_at: later(60), extra: true }, "Invalid request body: decode json"],
-    ["неразбираемый scheduled_at раньше пустого driver_name", { vehicle_number: "B777OP77", driver_name: "", scheduled_at: "завтра" }, "Invalid request body: decode json"],
-    ["destination_id не UUID раньше пустого driver_name", { destination_id: "x", vehicle_number: "B777OP77", driver_name: "", scheduled_at: later(60) }, "Invalid request body: decode json"],
+    ["driver_name пустой", { vehicle_number: "B777OP77", driver_name: "", scheduled_at: later(60) }, "driver_name обязателен"],
+    ["driver_name отсутствует", { vehicle_number: "B777OP77", scheduled_at: later(60) }, "driver_name обязателен"],
+    ["vehicle_number пустой", { vehicle_number: "", driver_name: "Пётр Иванов", scheduled_at: later(60) }, "vehicle_number обязателен"],
+    ["vehicle_number отсутствует", { driver_name: "Пётр Иванов", scheduled_at: later(60) }, "vehicle_number обязателен"],
+    ["scheduled_at в прошлом", { vehicle_number: "B777OP77", driver_name: "Пётр Иванов", scheduled_at: ago(60) }, "scheduled_at не может быть в прошлом"],
+    ["scheduled_at отсутствует", { vehicle_number: "B777OP77", driver_name: "Пётр Иванов" }, "scheduled_at не может быть в прошлом"],
+    ["scheduled_at не разбирается", { vehicle_number: "B777OP77", driver_name: "Пётр Иванов", scheduled_at: "завтра" }, "Невалидный JSON в теле запроса"],
+    ["лишнее поле", { vehicle_number: "B777OP77", driver_name: "Пётр Иванов", scheduled_at: later(60), extra: true }, "Невалидный JSON в теле запроса"],
+    ["неразбираемый scheduled_at раньше пустого driver_name", { vehicle_number: "B777OP77", driver_name: "", scheduled_at: "завтра" }, "Невалидный JSON в теле запроса"],
+    ["destination_id не UUID раньше пустого driver_name", { destination_id: "x", vehicle_number: "B777OP77", driver_name: "", scheduled_at: later(60) }, "Невалидный JSON в теле запроса"],
   ])("создание: %s — INVALID_REQUEST", async (_, body, message) => {
     await loginAs("operator");
     await expect(createDispatch({ destination_id: seedIds.destinations["SHOP-7"], ...body })).rejects.toMatchObject({
@@ -448,6 +450,6 @@ describe("реестр рейсов", () => {
     await loginAs("operator");
     await expect(
       createDispatch({ destination_id: unknownDestination, vehicle_number: "B777OP77", driver_name: "Пётр Иванов", scheduled_at: later(60) }),
-    ).rejects.toMatchObject({ status: 404, code: "NOT_FOUND", message: "DESTINATION_NOT_FOUND" });
+    ).rejects.toMatchObject({ status: 404, code: "DESTINATION_NOT_FOUND", message: "Магазин не найден" });
   });
 });
