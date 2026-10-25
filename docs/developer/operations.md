@@ -488,7 +488,7 @@ Root `.gitlab-ci.yml`, стадии `lint → test → build_&_deploy`, includes
 
 Test-джобы: `go test -race -count=1 ./...`, retry ≤2 на runner/stuck/scheduler, `needs: []`.
 
-> **Замечания:** (1) `ci/frontend.yml` существует, но **не подключён** в `.gitlab-ci.yml` — фронтенд в CI не линтится. (2) WMS собирается под `golang:1.24`, ledger-adapter — под `golang:1.25`; общий `.golangci.yml` указывает `go: "1.24"`. (3) Если пайплайн «красный» на стадии `get_sources` — обычно это инфраструктура раннера (не может склонировать), а не код.
+> **Замечания:** (1) Фронтенд в CI не проверяется. (2) WMS собирается под `golang:1.24`, ledger-adapter — под `golang:1.25`; общий `.golangci.yml` указывает `go: "1.24"`. (3) Если пайплайн «красный» на стадии `get_sources` — обычно это инфраструктура раннера (не может склонировать), а не код.
 
 Соглашения по веткам/коммитам/MR — [CONVENTIONS](../CONVENTIONS.md) и [MR_GUIDE](../MR_GUIDE.md). Pre-push хук блокирует push в `main`/`master`/`develop`/`dev` (обход — `ALLOW_PROTECTED_PUSH=1`) и требует имя ветки вида `^(feature|fix|hotfix|docs|refactor|chore|test)/...`. Commit-msg хук валидирует Conventional Commits.
 
