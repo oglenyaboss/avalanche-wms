@@ -33,15 +33,15 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 // GetSummary returns headline counters and lifecycle breakdowns. EventsToday is
 // the number of outbox events created since local midnight.
 func (r *Repository) GetSummary(ctx context.Context) (SummaryReport, error) {
-	products, err := r.statusCounts(ctx, `SELECT status::text, count(*) FROM wms_inventory.products GROUP BY status`)
+	products, err := r.statusCounts(ctx, `SELECT status::text, count(*) FROM wms_inventory.products GROUP BY status ORDER BY status::text COLLATE "C"`)
 	if err != nil {
 		return SummaryReport{}, fmt.Errorf("analytics.Repository.GetSummary products: %w", err)
 	}
-	orders, err := r.statusCounts(ctx, `SELECT status::text, count(*) FROM wms_inventory.orders GROUP BY status`)
+	orders, err := r.statusCounts(ctx, `SELECT status::text, count(*) FROM wms_inventory.orders GROUP BY status ORDER BY status::text COLLATE "C"`)
 	if err != nil {
 		return SummaryReport{}, fmt.Errorf("analytics.Repository.GetSummary orders: %w", err)
 	}
-	dispatches, err := r.statusCounts(ctx, `SELECT status::text, count(*) FROM wms_inventory.outbound_dispatches GROUP BY status`)
+	dispatches, err := r.statusCounts(ctx, `SELECT status::text, count(*) FROM wms_inventory.outbound_dispatches GROUP BY status ORDER BY status::text COLLATE "C"`)
 	if err != nil {
 		return SummaryReport{}, fmt.Errorf("analytics.Repository.GetSummary dispatches: %w", err)
 	}
