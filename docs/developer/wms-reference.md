@@ -1041,9 +1041,7 @@ Sentinel-ошибки (`errors.go`): `ErrDestinationNotFound`, `ErrDispatchNotFo
 
 > [!WARNING] `dispatches` отличается от остальных модулей:
 > - Внутренние ошибки → **HTTP 503** (а не 500).
-> - `respondWithError` имеет **инвертированный порядок аргументов** → для 404 в поле `message` попадает строка кода (`"DESTINATION_NOT_FOUND"`), а `code` = `"NOT_FOUND"`.
 > - `POST` возвращает **200, не 201**; `data` обёрнут лишним ключом `{"dispatch": ...}` (в отличие от `GET /dispatches/`, где массив лежит прямо в `data`).
-> - `GET /dispatches/` при пустом результате может вернуть `"data": null` (nil-слайс), не `[]`.
 > - Своя структура `ApiError` (не `httputil.APIError`).
 
 ---

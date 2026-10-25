@@ -44,6 +44,12 @@ func (h *Handler) GetDispatches(w http.ResponseWriter, r *http.Request) {
 	filter := DispatchFilter{}
 
 	if status := vars.Get("status"); status != "" {
+		switch domain.OutboundDispatchStatus(status) {
+		case domain.OutboundDispatchStatusScheduled, domain.OutboundDispatchStatusAtGate, domain.OutboundDispatchStatusDeparted, domain.OutboundDispatchStatusCancelled:
+		default:
+			respondWithError(w, "неизвестный статус рейса", "INVALID_REQUEST", 400)
+			return
+		}
 		filter.Status = (*domain.OutboundDispatchStatus)(&status)
 	} else {
 		filter.Status = nil
@@ -51,7 +57,7 @@ func (h *Handler) GetDispatches(w http.ResponseWriter, r *http.Request) {
 	if destID := vars.Get("destination_id"); destID != "" {
 		x, err := uuid.Parse(destID)
 		if err != nil {
-			respondWithError(w, "Invalid request: "+err.Error(), "INVALID_REQUEST", 400)
+			respondWithError(w, "destination_id не uuid", "INVALID_REQUEST", 400)
 			return
 		}
 		filter.DestinationID = x
@@ -61,7 +67,7 @@ func (h *Handler) GetDispatches(w http.ResponseWriter, r *http.Request) {
 	if whId := vars.Get("warehouse_id"); whId != "" {
 		x, err := strconv.Atoi(whId)
 		if err != nil {
-			respondWithError(w, "Invalid request: "+err.Error(), "INVALID_REQUEST", 400)
+			respondWithError(w, "warehouse_id не число", "INVALID_REQUEST", 400)
 			return
 		}
 		filter.WarehouseID = x
@@ -94,26 +100,26 @@ func (h *Handler) NewDispatch(w http.ResponseWriter, r *http.Request) {
 	var inputData NewDispatchQuery
 	err := decodeJSON(r, &inputData)
 	if err != nil {
-		respondWithError(w, "Invalid request body: "+err.Error(), "INVALID_REQUEST", 400)
+		respondWithError(w, "Невалидный JSON в теле запроса", "INVALID_REQUEST", 400)
 		return
 	}
 	if inputData.DriverName == "" {
-		respondWithError(w, "Invalid request body: you need to pass a driver_name", "INVALID_REQUEST", 400)
+		respondWithError(w, "driver_name обязателен", "INVALID_REQUEST", 400)
 		return
 	}
 	if inputData.VehicleNumber == "" {
-		respondWithError(w, "Invalid request body: you need to pass a vehicle_number", "INVALID_REQUEST", 400)
+		respondWithError(w, "vehicle_number обязателен", "INVALID_REQUEST", 400)
 		return
 	}
 	if inputData.ScheduledAt.Before(time.Now().Add(-1 * time.Minute)) {
-		respondWithError(w, "Invalid request body: scheduled_at should not be past time", "INVALID_REQUEST", 400)
+		respondWithError(w, "scheduled_at не может быть в прошлом", "INVALID_REQUEST", 400)
 		return
 	}
 
 	dispatch, err := h.svc.CreateNewDispatch(r.Context(), &inputData)
 	if err != nil {
 		if errors.Is(err, ErrDestinationNotFound) {
-			respondWithError(w, "DESTINATION_NOT_FOUND", "NOT_FOUND", 404)
+			respondWithError(w, "Магазин не найден", "DESTINATION_NOT_FOUND", 404)
 			return
 		}
 		respondWithError(w, fmt.Errorf("failed to create new dispatch: %w", err).Error(), "INTERNAL_ERROR", 503)
@@ -133,14 +139,14 @@ func (h *Handler) GetDispatchByID(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	dispatchID, err := uuid.Parse(vars["dispatch_id"])
 	if err != nil {
-		respondWithError(w, fmt.Errorf("invalid dispatch_id format: %w", err).Error(), "INVALID_REQUEST", 400)
+		respondWithError(w, "dispatch_id не uuid", "INVALID_REQUEST", 400)
 		return
 	}
 
 	dispatch, err := h.svc.GetDispatchByID(r.Context(), dispatchID)
 	if err != nil {
 		if errors.Is(err, ErrDispatchNotFound) {
-			respondWithError(w, "DISPATCH_NOT_FOUND", "NOT_FOUND", 404)
+			respondWithError(w, "Рейс не найден", "DISPATCH_NOT_FOUND", 404)
 			return
 		}
 		respondWithError(w, fmt.Errorf("failed to get dispatch by id %s: %w", dispatchID, err).Error(), "INTERNAL_ERROR", 503)

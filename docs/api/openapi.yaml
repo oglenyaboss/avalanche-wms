@@ -1822,7 +1822,6 @@ paths:
       description: |
         RBAC: только `OPERATOR`. **Завершающий слэш обязателен** (gorilla/mux не
         редиректит). Все фильтры опциональны. Внутренние ошибки отдают `503`.
-        Внимание: при пустом результате `data` может быть `null`, а не `[]`.
       operationId: dispatchesList
       parameters:
         - name: status
@@ -1843,7 +1842,7 @@ paths:
             type: integer
       responses:
         '200':
-          description: 'Массив рейсов в `data` (или `null` при пустом результате).'
+          description: 'Массив рейсов в `data`; при пустом результате — `[]`.'
           content:
             application/json:
               schema:
@@ -1872,11 +1871,17 @@ paths:
                     updated_at: '2026-05-31T09:00:00Z'
                 error: null
         '400':
-          description: '`INVALID_REQUEST` — невалидный destination_id или warehouse_id.'
+          description: |
+            `INVALID_REQUEST`: `неизвестный статус рейса`, `destination_id не uuid`,
+            `warehouse_id не число`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                data: null
+                error: { code: INVALID_REQUEST, message: неизвестный статус рейса }
         '401':
           $ref: '#/components/responses/PlainTextUnauthorized'
         '403':
@@ -1938,8 +1943,9 @@ paths:
                 error: null
         '400':
           description: |
-            `INVALID_REQUEST` — битый JSON / лишнее поле, пустой `driver_name` или
-            `vehicle_number`, либо `scheduled_at` более чем на 1 минуту в прошлом.
+            `INVALID_REQUEST`: `Невалидный JSON в теле запроса` (битый JSON, лишнее поле),
+            `driver_name обязателен`, `vehicle_number обязателен`,
+            `scheduled_at не может быть в прошлом` (более чем на 1 минуту).
           content:
             application/json:
               schema:
@@ -1947,15 +1953,14 @@ paths:
               example:
                 success: false
                 data: null
-                error: { code: INVALID_REQUEST, message: 'Invalid request body: you need to pass a driver_name' }
+                error: { code: INVALID_REQUEST, message: driver_name обязателен }
         '401':
           $ref: '#/components/responses/PlainTextUnauthorized'
         '403':
           $ref: '#/components/responses/JSONForbidden'
         '404':
           description: |
-            `NOT_FOUND` — destination_id не найден в `wms_inventory.destinations`.
-            Внимание: `message` здесь — строка-сентинел `DESTINATION_NOT_FOUND`, не фраза.
+            `DESTINATION_NOT_FOUND` — destination_id не найден в `wms_inventory.destinations`.
           content:
             application/json:
               schema:
@@ -1963,7 +1968,7 @@ paths:
               example:
                 success: false
                 data: null
-                error: { code: NOT_FOUND, message: DESTINATION_NOT_FOUND }
+                error: { code: DESTINATION_NOT_FOUND, message: Магазин не найден }
         '503':
           $ref: '#/components/responses/JSONServiceUnavailable'
 
@@ -1996,7 +2001,7 @@ paths:
                           dispatch:
                             $ref: '#/components/schemas/OutboundDispatch'
         '400':
-          description: '`INVALID_REQUEST` — dispatch_id не парсится как UUID.'
+          description: '`INVALID_REQUEST` — `dispatch_id не uuid`.'
           content:
             application/json:
               schema:
@@ -2007,7 +2012,7 @@ paths:
           $ref: '#/components/responses/JSONForbidden'
         '404':
           description: |
-            `NOT_FOUND` — рейс не найден. `message` — строка-сентинел `DISPATCH_NOT_FOUND`.
+            `DISPATCH_NOT_FOUND` — рейс не найден.
           content:
             application/json:
               schema:
@@ -2015,7 +2020,7 @@ paths:
               example:
                 success: false
                 data: null
-                error: { code: NOT_FOUND, message: DISPATCH_NOT_FOUND }
+                error: { code: DISPATCH_NOT_FOUND, message: Рейс не найден }
         '503':
           $ref: '#/components/responses/JSONServiceUnavailable'
 
