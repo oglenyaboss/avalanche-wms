@@ -1273,7 +1273,7 @@ paths:
         '403':
           $ref: '#/components/responses/JSONForbidden'
         '404':
-          description: '`OPERATION_NOT_FOUND`, `STORAGE_BIN_NOT_FOUND` или `PRODUCT_NOT_FOUND`.'
+          description: '`OPERATION_NOT_FOUND` или `STORAGE_BIN_NOT_FOUND`.'
           content:
             application/json:
               schema:
@@ -2172,7 +2172,7 @@ paths:
               example:
                 success: false
                 data: null
-                error: { code: DISPATCH_ALREADY_DEPARTED, message: Рейс уже отбыл }
+                error: { code: DISPATCH_ALREADY_DEPARTED, message: Рейс уже отправлен }
         '500':
           $ref: '#/components/responses/JSONInternal'
 
@@ -2250,8 +2250,8 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
           description: |
-            `DISPATCH_ALREADY_DEPARTED`, `DISPATCH_CANCELLED`, `DESTINATION_MISMATCH`
-            (destination буфера ≠ destination рейса), `DISPATCH_NOT_AT_GATE`,
+            `DESTINATION_MISMATCH` (destination буфера ≠ destination рейса),
+            `DISPATCH_NOT_AT_GATE`,
             `BUFFER_EMPTY` (bulk-режим, в ячейке нет READY_TO_SHIP) или
             `PRODUCT_NOT_IN_BUFFER` (spot-режим, несовпадение по товарам),
             `PICKING_NOT_CONFIRMED` (Pick-действие товара ещё не COMMITTED в цепи) или

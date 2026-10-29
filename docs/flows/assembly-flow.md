@@ -211,11 +211,12 @@ VALUES (
 |---------|--------|
 | `/allocate`: недостаточно `STORED` products по SKU | Не ошибка: `200`, заказ попадает в `insufficient_orders` с недостающими SKU, остальные заказы аллоцируются |
 | `/allocate`: заказ магазина не в статусе `NEW` | Не ошибка: такие заказы не выбираются, повторный `/allocate` их пропускает. `ORDER_NOT_NEW` (409) — только если заказ сменил статус во время аллокации (гонка двух `/allocate`) |
-| `/pick`: `product.status != ALLOCATED` | `PRODUCT_NOT_ALLOCATED` |
-| `/pick`: нет `PENDING` assembly_task для product (в том числе повторный `/pick` того же товара) | `NO_TASK_FOR_PRODUCT` |
 | `/pick`: `FAILED` PutAway-действие товара в цепи | `CHAIN_EVENT_REJECTED` |
+| `/pick`: нет `PENDING` assembly_task для product (в том числе повторный `/pick` того же товара) | `NO_TASK_FOR_PRODUCT` |
+| `/pick`: `product.status != ALLOCATED` | `PRODUCT_NOT_ALLOCATED` |
 | `/scan-shipping-buffer/draft`: оператор не несёт ASSEMBLED товаров (ничего не подобрано / уже размещено) | `CART_EMPTY` |
 | `/scan-shipping-buffer/draft`: ячейка не найдена или `bin.section != 'SHIPPING_BUFFER'` | `BIN_NOT_SHIPPING_BUFFER` (400) |
+| `/scan-shipping-buffer/draft`, `/scan-shipping-buffer/submit`: у `SHIPPING_BUFFER`-ячейки нет `destination_id` | `DESTINATION_NOT_FOUND` (404) |
 | `/scan-shipping-buffer/draft`: оператор несёт ASSEMBLED товары, но для другого `destination_id`, чем у буфера | `DESTINATION_MISMATCH` |
 | `/scan-shipping-buffer/draft`, `/submit`: у оператора нет активного passkey | `SIGNER_KEY_NOT_ACTIVE` (409) |
 | `/scan-shipping-buffer/submit`: состав корзины изменился после подписи | `DRAFT_STALE` |

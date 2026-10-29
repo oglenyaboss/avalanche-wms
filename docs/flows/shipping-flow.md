@@ -205,6 +205,7 @@ VALUES (
 | Условие | Ошибка |
 |---------|--------|
 | `/scan-buffer`: `bin.section != 'SHIPPING_BUFFER'` | `BIN_NOT_SHIPPING_BUFFER` |
+| `/scan-buffer`: у `SHIPPING_BUFFER`-ячейки нет `destination_id` | `BIN_NOT_SHIPPING_BUFFER` (400) |
 | `/scan-buffer`: bin не найден | `BIN_NOT_FOUND` |
 | `/scan-buffer`: в буфере нет товаров `READY_TO_SHIP` | Не ошибка: `200` с пустым списком (`count: 0`). `BUFFER_EMPTY` бывает только у `/ship/draft` |
 | `/scan-driver`: `dispatch_code` не найден | `DISPATCH_NOT_FOUND` |
@@ -216,6 +217,7 @@ VALUES (
 | `/ship/draft`: один из `product_ids` не в буфере / не `READY_TO_SHIP` | `PRODUCT_NOT_IN_BUFFER` |
 | `/ship/draft`: буфер пуст в bulk-режиме | `BUFFER_EMPTY` |
 | `/ship/draft`: Pick-действие какого-то товара ещё не `COMMITTED` на цепи | `PICKING_NOT_CONFIRMED` (409) |
+| `/ship/submit`: Pick-действие какого-то товара ещё не `COMMITTED` на цепи | `PICKING_NOT_CONFIRMED` (409) |
 | `/ship/draft`, `/ship/submit`: у оператора нет активного passkey | `SIGNER_KEY_NOT_ACTIVE` (409) |
 | `/ship/submit`: товар черновика ушёл из буфера или сменил статус после подписи | `DRAFT_STALE` (409) |
 | `/ship/submit`: операция уже отправлена | `OPERATION_ALREADY_SUBMITTED` (409) |
