@@ -181,7 +181,7 @@ func (r *Repository) GetDispatchesByFilter(ctx context.Context, filter DispatchF
 	}
 	defer rows.Close()
 
-	var dispatches []domain.OutboundDispatch
+	dispatches := []domain.OutboundDispatch{}
 	for rows.Next() {
 		var d domain.OutboundDispatch
 		err := rows.Scan(

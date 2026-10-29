@@ -1,48 +1,118 @@
-﻿# Frontend
+# Терминал склада (frontend)
 
-React + TypeScript + Vite frontend for the WMS application.
+Next.js (App Router) + TypeScript + Tailwind + shadcn/ui. Приложение работает только в браузере: сервер Next отдаёт оболочку и проксирует `/api/*` в бэкенд.
 
-## Local run
-
-1. Start the backend from the repository root:
-   ```bash
-   make up
-   ```
-2. Install dependencies in `frontend/`:
-   ```bash
-   npm install
-   ```
-3. Start the dev server:
-   ```bash
-   npm run dev
-   ```
-
-The default API base URL is `VITE_API_BASE_URL=/api`. Vite proxies `/api/*`
-requests to `http://localhost:8081` and strips the `/api` prefix, so
-`/api/auth/login` becomes `/auth/login` on the WMS backend without extra CORS
-setup.
-
-For a local environment created by `make up`, `deploy/db-init.sh` seeds the
-default admin credentials `admin/admin`.
-
-## Scripts
+## Запуск
 
 ```bash
-npm run dev
-npm run build
-npm run lint
-npm run preview
+npm install
+npm run dev          # http://localhost:5173, API на моках
 ```
 
-## Structure
+Бэкенд не нужен: запросы к `/api/*` перехватывают моки (MSW, папка `mocks/`). Пользователи моков — логин и пароль совпадают:
 
-- `src/app` - app bootstrap, providers, router
-- `src/pages` - route-level pages
-- `src/widgets` - page sections and layout
-- `src/features` - user scenarios such as auth
-- `src/entities` - domain state and contracts
-- `src/shared` - UI primitives, config, API client, utilities
+| Логин | Роль |
+|-------|------|
+| `operator` | OPERATOR, ключ passkey активен |
+| `operator2` | OPERATOR, без ключа |
+| `operator3` | OPERATOR, ключ ждёт подтверждения админом; подписать операцию не может |
+| `operator4` | OPERATOR, ключ активен для отзыва админом; в браузере ключа нет, подписать операцию не может |
+| `admin` | ADMIN |
+| `auditor` | AUDITOR |
+| `customer` | CUSTOMER |
 
-## Package manager
+Данные, режимы цепи и аутентификатора, сброс состояния и сценарий для каждой ошибки — в [mocks/README.md](mocks/README.md).
 
-This project uses **npm** and `package-lock.json`.
+С настоящим бэкендом: создать `.env.local` по образцу `.env.example` с `NEXT_PUBLIC_API_MOCKS=off` и адресом WMS в `WMS_API_URL`. Порт 5173 не менять: только этот origin бэкенд принимает для passkey (`WEBAUTHN_RP_ORIGINS`), а 3000 в docker-compose занят Grafana.
+
+## Команды
+
+| Команда | Что делает |
+|---------|-----------|
+| `npm run dev` | dev-сервер на порту 5173 |
+| `npm run build` | production-сборка |
+| `npm run lint` | ESLint |
+| `npm run typecheck` | проверка типов: генерирует типы маршрутов Next и запускает `tsc` |
+| `npm test` | unit-тесты (Vitest) |
+| `npm run test:e2e` | e2e (Playwright, десктоп и планшет; сам собирает и поднимает приложение на порту 3100) |
+
+## Где что лежит
+
+| Путь | Что |
+|------|-----|
+| `src/app/(terminal)/` | экраны терминала; layout пускает только с сессией |
+| `src/app/login/` | вход |
+| `src/components/app-shell/navigation.ts` | разделы меню и роли, которым они доступны; по этому списку проверяется доступ к экрану |
+| `src/lib/auth/` | сессия (`localStorage`, ключ `wms-auth`), вход, `authFetch` |
+| `src/components/ui/` | компоненты shadcn/ui |
+| `mocks/` | моки API |
+| `e2e/` | Playwright-тесты |
+
+`authFetch` добавляет `Authorization: Bearer …`, на `401` один раз обновляет токен через `/auth/refresh` и повторяет запрос. Если обновить не удалось, сессия сбрасывается и терминал уходит на вход.
+
+## Сканер
+
+Экран подключает поле скана — `ScanField` из `src/components/scan/scan-field.tsx`: передаёт `label` и `onScan(value, source)`. Поле само регистрируется в реестре (`src/lib/scan/scan-registry.ts`) и становится активным при монтировании и при фокусе; реестр на приложение один, живёт в `ScanProvider` (`src/lib/scan/scan-context.tsx`).
+
+Код попадает в активное поле одним путём из трёх источников: сканер-клавиатура (Enter в поле — `keyboard`), эмулятор сканера (`emulator`) и камера (`camera`). После скана поле очищается и держит фокус — следующий скан тоже попадёт в него; пока `onScan` не завершился, поле помечено `aria-busy` и игнорирует новые сканы.
+
+Эмулятор — кнопка в шапке, появляется только с моками (`NEXT_PUBLIC_API_MOCKS=off` — его нет). Панель показывает активное поле и умеет сканировать в него код из каталога (`mocks/scan-catalog.ts`: ТТН, грузоместа, коробки, штрихкоды SKU, QR товаров, ячейки и рейсы из текущего состояния моков) или введённый вручную. Проверить сканер можно на экране `/scanner-check` — ссылка внизу панели эмулятора, экран доступен всем ролям и не входит в меню.
+
+## API
+
+Типы генерируются из `docs/api/openapi.yaml` командой `npm run gen:api` в `src/lib/api/schema.d.ts`. Руками этот файл не правят и wire-типы не пишут: нужный тип берётся как `Schema<"PutawayScanBufferResponse">`.
+
+```ts
+import { api, unwrap } from "@/lib/api/client";
+import { ApiError } from "@/lib/api/errors";
+
+try {
+  const buffer = await unwrap(api.POST("/putaway/scan-buffer", { body: { buffer_bin_id } }));
+} catch (error) {
+  if (error instanceof ApiError && error.code === "BUFFER_BIN_NOT_FOUND") { /* … */ }
+}
+```
+
+`unwrap` снимает конверт `{success, data, error}` и отдаёт `data`. Ответы без конверта (`/auth/*`, `/health`) отдаёт как есть. Любая ошибка приходит как `ApiError { status, code, message }`:
+
+| Ответ | `code` | `message` |
+|-------|--------|-----------|
+| JSON-конверт ошибки | `error.code` | `error.message` с бэкенда |
+| `unauthorized` (текст) | `UNAUTHORIZED` | «Сессия истекла, войдите заново» |
+| `forbidden` (текст) | `FORBIDDEN` | «Недостаточно прав для этого действия» |
+| `invalid request body` (текст) | `INVALID_REQUEST` | «Некорректный запрос» |
+| `user already exists` (текст) | `USER_ALREADY_EXISTS` | «Пользователь уже существует» |
+| `internal server error` (текст) | `INTERNAL_ERROR` | «Внутренняя ошибка сервера» |
+| другое тело | `HTTP_<статус>` | «Сервер ответил ошибкой <статус>» |
+| нет ответа | `NETWORK_ERROR`, `status: 0` | «Нет связи с сервером» |
+
+`api` ходит через `authFetch`, `publicApi` — без токена (вход).
+
+Разметка: от 1024 px меню слева, на планшете — за кнопкой «Открыть меню».
+
+## Новый экран
+
+1. Страница в `src/app/(terminal)/<путь>/page.tsx`.
+2. Пункт в `src/components/app-shell/navigation.ts` с ролями, которые пускает бэкенд (`docs/api/api-contract.md`, раздел RBAC).
+
+## Подписанные операции
+
+Приёмка (закрытие грузоместа), раскладка, сборка и отгрузка подписываются passkey по [ADR-0001](../docs/adr/0001-signed-actions.md): черновик → подпись каждой части → отправка → статус в цепи.
+
+```ts
+import { signAndSubmit } from "@/lib/signing/sign-and-submit";
+import { OperationStatus } from "@/components/signing/operation-status";
+
+const draft = await unwrap(api.POST("/putaway/scan-storage-bin/draft", { body }));
+const result = await signAndSubmit(draft, (submitBody) =>
+  unwrap(api.POST("/putaway/scan-storage-bin/submit", { body: submitBody })),
+);
+// <OperationStatus operationId={result.operation_id} />
+```
+
+- `signAndSubmit` просит подпись на каждую часть черновика и отправляет все подписи одним submit. Отмена на устройстве — `SigningError` с кодом `SIGNING_CANCELLED`, остальные сбои устройства — `SIGNING_FAILED`; ошибки API — `ApiError`.
+- `OperationStatus` опрашивает `/signed-actions/operations/{id}` раз в 2 секунды, пока есть части в `SENT`, и показывает итог (`role="status"`).
+- Ключевые действия админа (подтвердить, отозвать ключ) подписываются `getAssertion(draft)`, регистрация ключа — `createPasskey(options)`; оба в `src/lib/signing/webauthn.ts`.
+- `src/lib/signing/adr.ts` и `webauthn-verify.ts` пересчитывают challenge и проверяют подпись как цепь; сверены с golden vectors `testdata/signed-actions/vectors.v1.json`.
+
+На моках `navigator.credentials` подменяет программный аутентификатор (`mocks/virtual-authenticator.ts`): у `operator` и `admin` уже есть активные ключи, новые ключи создаются в браузере. Режим аутентификатора — `localStorage["wms-virtual-authenticator-mode"]`: `ok`, `cancel` (пользователь отменил) или `corrupt` (подпись не сойдётся).
