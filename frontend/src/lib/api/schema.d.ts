@@ -5064,7 +5064,7 @@ export interface operations {
             };
             /**
              * @description `OPERATION_ALREADY_SUBMITTED`, `DRAFT_STALE` (товар ушёл из буфера),
-             *     `PICKING_NOT_CONFIRMED`, `DISPATCH_ALREADY_DEPARTED`, `DISPATCH_CANCELLED`,
+             *     `PICKING_NOT_CONFIRMED`, `DISPATCH_ALREADY_DEPARTED` (рейс ушёл между черновиком и отправкой),
              *     `DESTINATION_MISMATCH`, `DISPATCH_NOT_AT_GATE` или `SIGNER_KEY_NOT_ACTIVE`.
              */
             409: {
