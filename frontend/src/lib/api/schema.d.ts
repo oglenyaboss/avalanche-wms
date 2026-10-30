@@ -3912,7 +3912,7 @@ export interface operations {
             };
             401: components["responses"]["PlainTextUnauthorized"];
             403: components["responses"]["JSONForbidden"];
-            /** @description `OPERATION_NOT_FOUND`, `STORAGE_BIN_NOT_FOUND` или `PRODUCT_NOT_FOUND`. */
+            /** @description `OPERATION_NOT_FOUND` или `STORAGE_BIN_NOT_FOUND`. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -4892,7 +4892,7 @@ export interface operations {
                      *       "data": null,
                      *       "error": {
                      *         "code": "DISPATCH_ALREADY_DEPARTED",
-                     *         "message": "Рейс уже отбыл"
+                     *         "message": "Рейс уже отправлен"
                      *       }
                      *     }
                      */
@@ -4986,8 +4986,8 @@ export interface operations {
                 };
             };
             /**
-             * @description `DISPATCH_ALREADY_DEPARTED`, `DISPATCH_CANCELLED`, `DESTINATION_MISMATCH`
-             *     (destination буфера ≠ destination рейса), `DISPATCH_NOT_AT_GATE`,
+             * @description `DESTINATION_MISMATCH` (destination буфера ≠ destination рейса),
+             *     `DISPATCH_NOT_AT_GATE`,
              *     `BUFFER_EMPTY` (bulk-режим, в ячейке нет READY_TO_SHIP) или
              *     `PRODUCT_NOT_IN_BUFFER` (spot-режим, несовпадение по товарам),
              *     `PICKING_NOT_CONFIRMED` (Pick-действие товара ещё не COMMITTED в цепи) или
@@ -5064,7 +5064,7 @@ export interface operations {
             };
             /**
              * @description `OPERATION_ALREADY_SUBMITTED`, `DRAFT_STALE` (товар ушёл из буфера),
-             *     `PICKING_NOT_CONFIRMED`, `DISPATCH_ALREADY_DEPARTED`, `DISPATCH_CANCELLED`,
+             *     `PICKING_NOT_CONFIRMED`, `DISPATCH_ALREADY_DEPARTED` (рейс ушёл между черновиком и отправкой),
              *     `DESTINATION_MISMATCH`, `DISPATCH_NOT_AT_GATE` или `SIGNER_KEY_NOT_ACTIVE`.
              */
             409: {
